@@ -1,0 +1,22 @@
+{
+  "environment": "production",
+  "server": {
+    "addr": ":8080",
+    "read_header_timeout_sec": 10,
+    "read_timeout_sec": 20,
+    "write_timeout_sec": 20,
+    "idle_timeout_sec": 120,
+    "shutdown_timeout_sec": 30
+  },
+  "database": {
+    "driver": "mysql",
+    "mysql_dsn": "deploy_app:${MYSQL_PASSWORD}@tcp(mysql-prod.internal.company:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
+    "max_open_conns": 80,
+    "max_idle_conns": 20,
+    "conn_max_lifetime_sec": 1800,
+    "conn_max_idle_time_sec": 600,
+    "ping_timeout_sec": 5,
+    "startup_max_retries": 20,
+    "startup_retry_interval_sec": 3
+  }
+}

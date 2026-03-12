@@ -1,0 +1,43 @@
+package application
+
+import (
+	"time"
+)
+
+type Status string
+
+const (
+	StatusActive   Status = "active"
+	StatusInactive Status = "inactive"
+)
+
+func (s Status) Valid() bool {
+	switch s {
+	case StatusActive, StatusInactive:
+		return true
+	default:
+		return false
+	}
+}
+
+type Application struct {
+	ID           string
+	Name         string
+	Key          string
+	RepoURL      string
+	Description  string
+	Owner        string
+	Status       Status
+	ArtifactType string
+	language     string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+func (a Application) Language() string {
+	return a.language
+}
+
+func (a *Application) SetLanguage(language string) {
+	a.language = language
+}
