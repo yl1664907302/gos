@@ -19,5 +19,17 @@
     "ping_timeout_sec": 5,
     "startup_max_retries": 10,
     "startup_retry_interval_sec": 2
+  },
+  "jenkins": {
+    "enabled": true,
+    "base_url": "http://192.168.1.208:8000/",
+    "username": "shuang",
+    "api_token": "112aabb50308085b4c9fddb1cf7660a6f2",
+    "timeout_sec": 5,
+    "startup_check_enabled": true,
+    "startup_max_retries": 5,
+    "startup_retry_interval_sec": 2,
+    "auto_sync_enabled": true,
+    "auto_sync_interval_sec": 300
   }
 }

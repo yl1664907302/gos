@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { AppstoreOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, ClusterOutlined } from '@ant-design/icons-vue'
+import { message } from 'ant-design-vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -7,6 +8,12 @@ const route = useRoute()
 const router = useRouter()
 
 const activeMenuKey = computed(() => {
+  if (route.path.includes('/pipeline-bindings')) {
+    return ['pipeline-bindings']
+  }
+  if (route.path.startsWith('/components/jenkins')) {
+    return ['jenkins-management']
+  }
   if (route.path.startsWith('/applications')) {
     return ['my-applications']
   }
@@ -14,6 +21,9 @@ const activeMenuKey = computed(() => {
 })
 
 const openMenuKeys = computed(() => {
+  if (route.path.startsWith('/components/jenkins')) {
+    return ['component-management']
+  }
   if (route.path.startsWith('/applications')) {
     return ['application-management']
   }
@@ -24,6 +34,20 @@ const pageTitle = computed(() => String(route.meta.title || '应用管理'))
 
 function goToApplications() {
   void router.push('/applications')
+}
+
+function goToPipelineBindings() {
+  const appID = String(route.params.id || '').trim()
+  if (appID) {
+    void router.push(`/applications/${appID}/pipeline-bindings`)
+    return
+  }
+  message.info('请先进入具体应用，再查看管线绑定')
+  void router.push('/applications')
+}
+
+function goToJenkinsManagement() {
+  void router.push('/components/jenkins')
 }
 </script>
 
@@ -45,6 +69,16 @@ function goToApplications() {
           <template #title>应用管理</template>
 
           <a-menu-item key="my-applications" @click="goToApplications">我的应用</a-menu-item>
+          <a-menu-item key="pipeline-bindings" @click="goToPipelineBindings">管线绑定</a-menu-item>
+        </a-sub-menu>
+
+        <a-sub-menu key="component-management">
+          <template #icon>
+            <ClusterOutlined />
+          </template>
+          <template #title>组件管理</template>
+
+          <a-menu-item key="jenkins-management" @click="goToJenkinsManagement">Jenkins管理</a-menu-item>
         </a-sub-menu>
       </a-menu>
     </a-layout-sider>

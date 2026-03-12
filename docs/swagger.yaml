@@ -62,10 +62,124 @@ definitions:
       status:
         type: string
     type: object
+  httpapi.CreateBindingRequest:
+    properties:
+      binding_type:
+        type: string
+      external_ref:
+        type: string
+      name:
+        type: string
+      pipeline_id:
+        type: string
+      provider:
+        type: string
+      status:
+        type: string
+      trigger_mode:
+        type: string
+    type: object
   httpapi.ErrorResponse:
     properties:
       error:
         type: string
+    type: object
+  httpapi.PipelineBindingDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.PipelineBindingResponse'
+    type: object
+  httpapi.PipelineBindingListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.PipelineBindingResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.PipelineBindingResponse:
+    properties:
+      application_id:
+        type: string
+      application_name:
+        type: string
+      binding_type:
+        type: string
+      created_at:
+        type: string
+      external_ref:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      pipeline_id:
+        type: string
+      provider:
+        type: string
+      status:
+        type: string
+      trigger_mode:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  httpapi.PipelineDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.PipelineResponse'
+    type: object
+  httpapi.PipelineListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.PipelineResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.PipelineResponse:
+    properties:
+      created_at:
+        type: string
+      credential_ref:
+        type: string
+      default_branch:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      job_full_name:
+        type: string
+      job_name:
+        type: string
+      job_url:
+        type: string
+      last_synced_at:
+        type: string
+      last_verified_at:
+        type: string
+      provider:
+        type: string
+      status:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  httpapi.SyncPipelinesResponse:
+    properties:
+      data:
+        $ref: '#/definitions/usecase.SyncPipelinesOutput'
     type: object
   httpapi.UpdateApplicationRequest:
     properties:
@@ -85,6 +199,46 @@ definitions:
         type: string
       status:
         type: string
+    type: object
+  httpapi.UpdateBindingRequest:
+    properties:
+      external_ref:
+        type: string
+      name:
+        type: string
+      pipeline_id:
+        type: string
+      provider:
+        type: string
+      status:
+        type: string
+      trigger_mode:
+        type: string
+    type: object
+  httpapi.VerifyPipelineResponse:
+    properties:
+      data:
+        properties:
+          job_name:
+            type: string
+          job_url:
+            type: string
+          pipeline:
+            $ref: '#/definitions/httpapi.PipelineResponse'
+          verified:
+            type: boolean
+        type: object
+    type: object
+  usecase.SyncPipelinesOutput:
+    properties:
+      created:
+        type: integer
+      skipped:
+        type: integer
+      total:
+        type: integer
+      updated:
+        type: integer
     type: object
 info:
   contact: {}
@@ -265,6 +419,310 @@ paths:
       summary: Update application
       tags:
       - applications
+  /applications/{id}/pipeline-bindings:
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 'Binding type: ci/cd'
+        in: query
+        name: binding_type
+        type: string
+      - description: 'Provider: jenkins/argocd'
+        in: query
+        name: provider
+        type: string
+      - description: Binding status
+        in: query
+        name: status
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineBindingListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List pipeline bindings for application
+      tags:
+      - pipeline-bindings
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Create binding request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.CreateBindingRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/httpapi.PipelineBindingDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Create pipeline binding for application
+      tags:
+      - pipeline-bindings
+  /jenkins/pipelines/sync:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.SyncPipelinesResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Sync pipelines from Jenkins
+      tags:
+      - pipelines
+  /pipeline-bindings/{id}:
+    delete:
+      parameters:
+      - description: Binding ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Delete pipeline binding
+      tags:
+      - pipeline-bindings
+    get:
+      parameters:
+      - description: Binding ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineBindingDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get pipeline binding by ID
+      tags:
+      - pipeline-bindings
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Binding ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Update binding request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdateBindingRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineBindingDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update pipeline binding
+      tags:
+      - pipeline-bindings
+  /pipelines:
+    get:
+      parameters:
+      - description: Pipeline name
+        in: query
+        name: name
+        type: string
+      - description: Provider, default jenkins
+        in: query
+        name: provider
+        type: string
+      - description: Pipeline status
+        in: query
+        name: status
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List pipelines
+      tags:
+      - pipelines
+  /pipelines/{id}:
+    get:
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get pipeline by ID
+      tags:
+      - pipelines
+  /pipelines/{id}/verify:
+    post:
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.VerifyPipelineResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Verify Jenkins pipeline availability
+      tags:
+      - pipelines
 schemes:
 - http
 - https

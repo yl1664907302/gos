@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeftOutlined, EditOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, EditOutlined, LinkOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import { computed, onMounted, ref } from 'vue'
@@ -72,6 +72,13 @@ function toEdit() {
   void router.push(`/applications/${applicationId.value}/edit`)
 }
 
+function toBindings() {
+  if (!applicationId.value) {
+    return
+  }
+  void router.push(`/applications/${applicationId.value}/pipeline-bindings`)
+}
+
 onMounted(() => {
   void loadDetail()
 })
@@ -92,6 +99,12 @@ onMounted(() => {
             <EditOutlined />
           </template>
           去编辑
+        </a-button>
+        <a-button @click="toBindings">
+          <template #icon>
+            <LinkOutlined />
+          </template>
+          管线绑定
         </a-button>
       </a-space>
     </div>

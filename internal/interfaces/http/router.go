@@ -11,17 +11,22 @@ import (
 	_ "gos/docs"
 )
 
-func NewRouter(applicationHandler *ApplicationHandler) *gin.Engine {
+func NewRouter(applicationHandler *ApplicationHandler, pipelineHandler *PipelineHandler) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 	router.Use(cors())
 	registerSystemRoutes(router)
 	registerApplicationRoutes(router, applicationHandler)
+	registerPipelineRoutes(router, pipelineHandler)
 	return router
 }
 
 func registerApplicationRoutes(router gin.IRouter, applicationHandler *ApplicationHandler) {
 	applicationHandler.RegisterRoutes(router)
+}
+
+func registerPipelineRoutes(router gin.IRouter, pipelineHandler *PipelineHandler) {
+	pipelineHandler.RegisterRoutes(router)
 }
 
 func registerSystemRoutes(router gin.IRouter) {

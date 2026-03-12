@@ -4,6 +4,8 @@ import ApplicationCreateView from '../views/application/ApplicationCreateView.vu
 import ApplicationDetailView from '../views/application/ApplicationDetailView.vue'
 import ApplicationEditView from '../views/application/ApplicationEditView.vue'
 import ApplicationListView from '../views/application/ApplicationListView.vue'
+import ApplicationPipelineBindingView from '../views/application/ApplicationPipelineBindingView.vue'
+import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -39,6 +41,18 @@ export const router = createRouter({
           name: 'application-edit',
           component: ApplicationEditView,
           meta: { title: '编辑应用' },
+        },
+        {
+          path: 'applications/:id/pipeline-bindings',
+          name: 'application-pipeline-bindings',
+          component: ApplicationPipelineBindingView,
+          meta: { title: '管线绑定' },
+        },
+        {
+          path: 'components/jenkins',
+          name: 'jenkins-management',
+          component: JenkinsManagementView,
+          meta: { title: 'Jenkins管理' },
         },
       ],
     },

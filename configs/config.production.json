@@ -18,5 +18,17 @@
     "ping_timeout_sec": 5,
     "startup_max_retries": 20,
     "startup_retry_interval_sec": 3
+  },
+  "jenkins": {
+    "enabled": true,
+    "base_url": "https://jenkins.internal.company",
+    "username": "deploy_bot",
+    "api_token": "${JENKINS_API_TOKEN}",
+    "timeout_sec": 5,
+    "startup_check_enabled": true,
+    "startup_max_retries": 10,
+    "startup_retry_interval_sec": 3,
+    "auto_sync_enabled": true,
+    "auto_sync_interval_sec": 300
   }
 }

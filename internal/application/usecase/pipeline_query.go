@@ -1,0 +1,96 @@
+package usecase
+
+import (
+	"context"
+	"strings"
+	"time"
+
+	domain "gos/internal/domain/pipeline"
+)
+
+type QueryPipeline struct {
+	repo    domain.Repository
+	jenkins JenkinsPipelineClient
+	now     func() time.Time
+}
+
+type VerifyPipelineOutput struct {
+	Verified bool            `json:"verified"`
+	JobName  string          `json:"job_name"`
+	JobURL   string          `json:"job_url"`
+	Pipeline domain.Pipeline `json:"pipeline"`
+}
+
+func NewQueryPipeline(repo domain.Repository, jenkins JenkinsPipelineClient) *QueryPipeline {
+	return &QueryPipeline{
+		repo:    repo,
+		jenkins: jenkins,
+		now: func() time.Time {
+			return time.Now().UTC()
+		},
+	}
+}
+
+func (uc *QueryPipeline) List(ctx context.Context, filter domain.PipelineListFilter) ([]domain.Pipeline, int64, error) {
+	const (
+		defaultPage     = 1
+		defaultPageSize = 20
+		maxPageSize     = 100
+	)
+
+	filter.Name = strings.TrimSpace(filter.Name)
+	if filter.Provider == "" {
+		filter.Provider = domain.ProviderJenkins
+	}
+	if !filter.Provider.Valid() {
+		return nil, 0, ErrInvalidProvider
+	}
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, 0, ErrInvalidStatus
+	}
+	if filter.Page <= 0 {
+		filter.Page = defaultPage
+	}
+	if filter.PageSize <= 0 {
+		filter.PageSize = defaultPageSize
+	}
+	if filter.PageSize > maxPageSize {
+		filter.PageSize = maxPageSize
+	}
+	return uc.repo.ListPipelines(ctx, filter)
+}
+
+func (uc *QueryPipeline) GetByID(ctx context.Context, id string) (domain.Pipeline, error) {
+	if strings.TrimSpace(id) == "" {
+		return domain.Pipeline{}, ErrInvalidID
+	}
+	return uc.repo.GetPipelineByID(ctx, id)
+}
+
+func (uc *QueryPipeline) Verify(ctx context.Context, id string) (VerifyPipelineOutput, error) {
+	if strings.TrimSpace(id) == "" {
+		return VerifyPipelineOutput{}, ErrInvalidID
+	}
+
+	p, err := uc.repo.GetPipelineByID(ctx, id)
+	if err != nil {
+		return VerifyPipelineOutput{}, err
+	}
+
+	job, err := uc.jenkins.GetJob(ctx, p.JobFullName)
+	if err != nil {
+		return VerifyPipelineOutput{}, err
+	}
+
+	updated, err := uc.repo.MarkPipelineVerified(ctx, id, uc.now(), uc.now())
+	if err != nil {
+		return VerifyPipelineOutput{}, err
+	}
+
+	return VerifyPipelineOutput{
+		Verified: true,
+		JobName:  job.Name,
+		JobURL:   job.URL,
+		Pipeline: updated,
+	}, nil
+}

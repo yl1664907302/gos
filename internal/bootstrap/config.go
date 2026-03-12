@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -12,6 +13,7 @@ type Config struct {
 	Environment string         `json:"environment"`
 	Server      ServerConfig   `json:"server"`
 	Database    DatabaseConfig `json:"database"`
+	Jenkins     JenkinsConfig  `json:"jenkins"`
 }
 
 type ServerConfig struct {
@@ -34,6 +36,19 @@ type DatabaseConfig struct {
 	PingTimeoutSec          int    `json:"ping_timeout_sec"`
 	StartupMaxRetries       int    `json:"startup_max_retries"`
 	StartupRetryIntervalSec int    `json:"startup_retry_interval_sec"`
+}
+
+type JenkinsConfig struct {
+	Enabled                 bool   `json:"enabled"`
+	BaseURL                 string `json:"base_url"`
+	Username                string `json:"username"`
+	APIToken                string `json:"api_token"`
+	TimeoutSec              int    `json:"timeout_sec"`
+	StartupCheckEnabled     bool   `json:"startup_check_enabled"`
+	StartupMaxRetries       int    `json:"startup_max_retries"`
+	StartupRetryIntervalSec int    `json:"startup_retry_interval_sec"`
+	AutoSyncEnabled         bool   `json:"auto_sync_enabled"`
+	AutoSyncIntervalSec     int    `json:"auto_sync_interval_sec"`
 }
 
 func LoadConfig() (Config, error) {
@@ -79,6 +94,18 @@ func defaultConfig() Config {
 			StartupMaxRetries:       10,
 			StartupRetryIntervalSec: 2,
 		},
+		Jenkins: JenkinsConfig{
+			Enabled:                 false,
+			BaseURL:                 "http://127.0.0.1:8080",
+			Username:                "admin",
+			APIToken:                "",
+			TimeoutSec:              5,
+			StartupCheckEnabled:     false,
+			StartupMaxRetries:       5,
+			StartupRetryIntervalSec: 2,
+			AutoSyncEnabled:         false,
+			AutoSyncIntervalSec:     300,
+		},
 	}
 }
 
@@ -115,6 +142,36 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := strings.TrimSpace(os.Getenv("SQLITE_PATH")); v != "" {
 		cfg.Database.SQLitePath = v
+	}
+	if v, ok := boolFromEnv("JENKINS_ENABLED"); ok {
+		cfg.Jenkins.Enabled = v
+	}
+	if v := strings.TrimSpace(os.Getenv("JENKINS_BASE_URL")); v != "" {
+		cfg.Jenkins.BaseURL = v
+	}
+	if v := strings.TrimSpace(os.Getenv("JENKINS_USERNAME")); v != "" {
+		cfg.Jenkins.Username = v
+	}
+	if v := strings.TrimSpace(os.Getenv("JENKINS_API_TOKEN")); v != "" {
+		cfg.Jenkins.APIToken = v
+	}
+	if v, ok := intFromEnv("JENKINS_TIMEOUT_SEC"); ok {
+		cfg.Jenkins.TimeoutSec = v
+	}
+	if v, ok := boolFromEnv("JENKINS_STARTUP_CHECK_ENABLED"); ok {
+		cfg.Jenkins.StartupCheckEnabled = v
+	}
+	if v, ok := intFromEnv("JENKINS_STARTUP_MAX_RETRIES"); ok {
+		cfg.Jenkins.StartupMaxRetries = v
+	}
+	if v, ok := intFromEnv("JENKINS_STARTUP_RETRY_INTERVAL_SEC"); ok {
+		cfg.Jenkins.StartupRetryIntervalSec = v
+	}
+	if v, ok := boolFromEnv("JENKINS_AUTO_SYNC_ENABLED"); ok {
+		cfg.Jenkins.AutoSyncEnabled = v
+	}
+	if v, ok := intFromEnv("JENKINS_AUTO_SYNC_INTERVAL_SEC"); ok {
+		cfg.Jenkins.AutoSyncIntervalSec = v
 	}
 }
 
@@ -171,6 +228,22 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.Database.StartupRetryIntervalSec <= 0 {
 		cfg.Database.StartupRetryIntervalSec = 2
 	}
+
+	cfg.Jenkins.BaseURL = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.BaseURL))
+	cfg.Jenkins.Username = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.Username))
+	cfg.Jenkins.APIToken = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.APIToken))
+	if cfg.Jenkins.TimeoutSec <= 0 {
+		cfg.Jenkins.TimeoutSec = 5
+	}
+	if cfg.Jenkins.StartupMaxRetries <= 0 {
+		cfg.Jenkins.StartupMaxRetries = 5
+	}
+	if cfg.Jenkins.StartupRetryIntervalSec <= 0 {
+		cfg.Jenkins.StartupRetryIntervalSec = 2
+	}
+	if cfg.Jenkins.AutoSyncIntervalSec <= 0 {
+		cfg.Jenkins.AutoSyncIntervalSec = 300
+	}
 }
 
 func validateConfig(cfg Config) error {
@@ -186,5 +259,39 @@ func validateConfig(cfg Config) error {
 	default:
 		return fmt.Errorf("unsupported database.driver %q", cfg.Database.Driver)
 	}
+
+	if cfg.Jenkins.Enabled {
+		if cfg.Jenkins.BaseURL == "" {
+			return errors.New("jenkins.base_url is required when jenkins.enabled=true")
+		}
+		if (cfg.Jenkins.Username == "") != (cfg.Jenkins.APIToken == "") {
+			return errors.New("jenkins.username and jenkins.api_token must be set together")
+		}
+	}
+
 	return nil
+}
+
+func boolFromEnv(key string) (bool, bool) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return false, false
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return value, true
+}
+
+func intFromEnv(key string) (int, bool) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }

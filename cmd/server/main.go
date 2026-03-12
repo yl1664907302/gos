@@ -12,6 +12,7 @@ import (
 
 	"gos/internal/application/usecase"
 	"gos/internal/bootstrap"
+	"gos/internal/infrastructure/jenkins"
 	"gos/internal/infrastructure/persistence/sqlrepo"
 	httpapi "gos/internal/interfaces/http"
 )
@@ -28,6 +29,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	if err := bootstrap.CheckJenkinsConnection(cfg); err != nil {
+		log.Fatalf("check jenkins: %v", err)
+	}
 
 	db, err := bootstrap.OpenDatabase(cfg)
 	if err != nil {
@@ -40,14 +44,47 @@ func main() {
 		log.Fatalf("init schema: %v", err)
 	}
 
+	pipelineRepo := sqlrepo.NewPipelineRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(pipelineRepo); err != nil {
+		log.Fatalf("init pipeline schema: %v", err)
+	}
+
+	jenkinsClient := jenkins.NewClient(jenkins.Config{
+		BaseURL:    cfg.Jenkins.BaseURL,
+		Username:   cfg.Jenkins.Username,
+		APIToken:   cfg.Jenkins.APIToken,
+		TimeoutSec: cfg.Jenkins.TimeoutSec,
+	})
+	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
+
 	handler := httpapi.NewApplicationHandler(
 		usecase.NewCreateApplication(repo),
 		usecase.NewQueryApplication(repo),
 		usecase.NewUpdateApplication(repo),
 		usecase.NewDeleteApplication(repo),
 	)
+	pipelineHandler := httpapi.NewPipelineHandler(
+		syncPipelines,
+		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
+		usecase.NewPipelineBindingManager(pipelineRepo, repo),
+	)
+	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
+		result, err := syncPipelines.Execute(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf(
+			"jenkins auto sync completed: total=%d created=%d updated=%d skipped=%d",
+			result.Total,
+			result.Created,
+			result.Updated,
+			result.Skipped,
+		)
+		return nil
+	})
+	defer syncTask.Stop()
 
-	router := httpapi.NewRouter(handler)
+	router := httpapi.NewRouter(handler, pipelineHandler)
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -62,7 +99,13 @@ func main() {
 	go func() {
 		serverErr <- server.ListenAndServe()
 	}()
-	log.Printf("server listening on %s (env=%s db=%s)", cfg.Server.Addr, cfg.Environment, cfg.Database.Driver)
+	log.Printf(
+		"server listening on %s (env=%s db=%s jenkins_enabled=%t)",
+		cfg.Server.Addr,
+		cfg.Environment,
+		cfg.Database.Driver,
+		cfg.Jenkins.Enabled,
+	)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

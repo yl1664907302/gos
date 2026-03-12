@@ -81,3 +81,17 @@ a {
     --text-title-size: 18px;
   }
 }
+
+.resizable-header-cell {
+  position: relative;
+}
+
+.resizable-header-cell::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 10px;
+  height: 100%;
+  cursor: col-resize;
+}

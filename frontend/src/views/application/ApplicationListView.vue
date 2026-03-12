@@ -6,6 +6,7 @@ import dayjs from 'dayjs'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { deleteApplication, listApplications } from '../../api/application'
+import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useApplicationListStore } from '../../stores/application-list'
 import type { Application } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -18,7 +19,7 @@ const deletingId = ref('')
 const dataSource = ref<Application[]>([])
 const total = ref(0)
 
-const columns: TableColumnsType<Application> = [
+const initialColumns: TableColumnsType<Application> = [
   { title: '应用名称', dataIndex: 'name', key: 'name', width: 180 },
   { title: 'Key', dataIndex: 'key', key: 'key', width: 180 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
@@ -27,8 +28,9 @@ const columns: TableColumnsType<Application> = [
   { title: '负责人', dataIndex: 'owner', key: 'owner', width: 120 },
   { title: '仓库地址', dataIndex: 'repo_url', key: 'repo_url', ellipsis: true },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 200, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 280, fixed: 'right' },
 ]
+const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 520, hitArea: 10 })
 
 async function loadApplications() {
   loading.value = true
@@ -75,6 +77,10 @@ function toDetail(id: string) {
 
 function toEdit(id: string) {
   void router.push(`/applications/${id}/edit`)
+}
+
+function toBindings(id: string) {
+  void router.push(`/applications/${id}/pipeline-bindings`)
 }
 
 async function handleDelete(id: string) {
@@ -163,7 +169,7 @@ onMounted(() => {
         :data-source="dataSource"
         :loading="loading"
         :pagination="false"
-        :scroll="{ x: 1260 }"
+        :scroll="{ x: 1380 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
@@ -191,6 +197,7 @@ onMounted(() => {
             <a-space>
               <a-button type="link" size="small" @click="toDetail(record.id)">查看</a-button>
               <a-button type="link" size="small" @click="toEdit(record.id)">编辑</a-button>
+              <a-button type="link" size="small" @click="toBindings(record.id)">管线绑定</a-button>
               <a-popconfirm
                 title="确认删除当前应用吗？"
                 ok-text="删除"
