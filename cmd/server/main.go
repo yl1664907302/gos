@@ -16,6 +16,13 @@ import (
 	httpapi "gos/internal/interfaces/http"
 )
 
+//go:generate swag init -g cmd/server/main.go -o docs --parseInternal
+
+// @title           GOS API
+// @version         1.0
+// @description     Internal deployment platform API.
+// @BasePath        /
+// @schemes         http https
 func main() {
 	cfg, err := bootstrap.LoadConfig()
 	if err != nil {

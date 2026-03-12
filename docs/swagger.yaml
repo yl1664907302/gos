@@ -1,0 +1,271 @@
+basePath: /
+definitions:
+  httpapi.ApplicationDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.ApplicationResponse'
+    type: object
+  httpapi.ApplicationListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.ApplicationResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.ApplicationResponse:
+    properties:
+      artifact_type:
+        type: string
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      key:
+        type: string
+      language:
+        type: string
+      name:
+        type: string
+      owner:
+        type: string
+      repo_url:
+        type: string
+      status:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  httpapi.CreateApplicationRequest:
+    properties:
+      artifact_type:
+        type: string
+      description:
+        type: string
+      key:
+        type: string
+      language:
+        type: string
+      name:
+        type: string
+      owner:
+        type: string
+      repo_url:
+        type: string
+      status:
+        type: string
+    type: object
+  httpapi.ErrorResponse:
+    properties:
+      error:
+        type: string
+    type: object
+  httpapi.UpdateApplicationRequest:
+    properties:
+      artifact_type:
+        type: string
+      description:
+        type: string
+      key:
+        type: string
+      language:
+        type: string
+      name:
+        type: string
+      owner:
+        type: string
+      repo_url:
+        type: string
+      status:
+        type: string
+    type: object
+info:
+  contact: {}
+  description: Internal deployment platform API.
+  title: GOS API
+  version: "1.0"
+paths:
+  /applications:
+    get:
+      parameters:
+      - description: Application key
+        in: query
+        name: key
+        type: string
+      - description: Application name
+        in: query
+        name: name
+        type: string
+      - description: Application status
+        in: query
+        name: status
+        type: string
+      - description: Page number, starts from 1
+        in: query
+        name: page
+        type: integer
+      - description: Page size, max 100
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ApplicationListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List applications
+      tags:
+      - applications
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Create application request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.CreateApplicationRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/httpapi.ApplicationDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Create application
+      tags:
+      - applications
+  /applications/{id}:
+    delete:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Delete application
+      tags:
+      - applications
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ApplicationDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get application by ID
+      tags:
+      - applications
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Update application request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdateApplicationRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ApplicationDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update application
+      tags:
+      - applications
+schemes:
+- http
+- https
+swagger: "2.0"

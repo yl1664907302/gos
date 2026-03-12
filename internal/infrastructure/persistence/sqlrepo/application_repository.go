@@ -111,12 +111,11 @@ WHERE id = ?;`
 	return app, nil
 }
 
-func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilter) ([]domain.Application, error) {
+func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilter) ([]domain.Application, int64, error) {
 	args := make([]any, 0, 3)
 	builder := strings.Builder{}
-	builder.WriteString(`
-SELECT id, name, app_key, repo_url, description, owner, status, artifact_type, language, created_at, updated_at
-FROM applications`)
+	countBuilder := strings.Builder{}
+	countBuilder.WriteString(`SELECT COUNT(1) FROM applications`)
 
 	where := make([]string, 0, 3)
 	if filter.Key != "" {
@@ -132,14 +131,30 @@ FROM applications`)
 		args = append(args, string(filter.Status))
 	}
 	if len(where) > 0 {
+		countBuilder.WriteString(" WHERE ")
+		countBuilder.WriteString(strings.Join(where, " AND "))
+	}
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, countBuilder.String(), args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	builder.WriteString(`
+SELECT id, name, app_key, repo_url, description, owner, status, artifact_type, language, created_at, updated_at
+FROM applications`)
+	if len(where) > 0 {
 		builder.WriteString(" WHERE ")
 		builder.WriteString(strings.Join(where, " AND "))
 	}
-	builder.WriteString(" ORDER BY created_at DESC;")
+	builder.WriteString(" ORDER BY created_at DESC LIMIT ? OFFSET ?;")
 
-	rows, err := r.db.QueryContext(ctx, builder.String(), args...)
+	offset := (filter.Page - 1) * filter.PageSize
+	queryArgs := append(args, filter.PageSize, offset)
+
+	rows, err := r.db.QueryContext(ctx, builder.String(), queryArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -147,14 +162,14 @@ FROM applications`)
 	for rows.Next() {
 		app, err := scanApplication(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		apps = append(apps, app)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return apps, nil
+	return apps, total, nil
 }
 
 func (r *ApplicationRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.Application, error) {

@@ -30,6 +30,9 @@ func (uc *UpdateApplication) Execute(ctx context.Context, id string, input domai
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Key) == "" {
 		return domain.Application{}, fmt.Errorf("%w: name and key are required", ErrInvalidInput)
 	}
+	if strings.TrimSpace(input.ArtifactType) == "" || strings.TrimSpace(input.Language) == "" {
+		return domain.Application{}, fmt.Errorf("%w: artifact_type and language are required", ErrInvalidInput)
+	}
 	if !input.Status.Valid() {
 		return domain.Application{}, ErrInvalidStatus
 	}
