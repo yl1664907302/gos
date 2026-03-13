@@ -33,7 +33,7 @@ func (r *ReleaseRepository) InitSchema(ctx context.Context) error {
 			return execErr
 		}
 	}
-	return nil
+	return r.migrateSchema(ctx)
 }
 
 func releaseSchemaStatements(dbDriver string) ([]string, error) {
@@ -48,10 +48,11 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_id VARCHAR(64) NOT NULL,
 	pipeline_id VARCHAR(64) NOT NULL DEFAULT '',
 	env_code VARCHAR(50) NOT NULL,
+	son_service VARCHAR(200) NOT NULL DEFAULT '',
 	git_ref VARCHAR(200) NOT NULL DEFAULT '',
 	image_tag VARCHAR(200) NOT NULL DEFAULT '',
 	trigger_type VARCHAR(50) NOT NULL,
-	status VARCHAR(50) NOT NULL,
+	status VARCHAR(50) NOT NULL DEFAULT 'pending',
 	remark VARCHAR(500) NOT NULL DEFAULT '',
 	triggered_by VARCHAR(64) NOT NULL DEFAULT '',
 	started_at BIGINT NULL,
@@ -99,10 +100,11 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_id TEXT NOT NULL,
 	pipeline_id TEXT NOT NULL DEFAULT '',
 	env_code TEXT NOT NULL,
+	son_service TEXT NOT NULL DEFAULT '',
 	git_ref TEXT NOT NULL DEFAULT '',
 	image_tag TEXT NOT NULL DEFAULT '',
 	trigger_type TEXT NOT NULL,
-	status TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
 	remark TEXT NOT NULL DEFAULT '',
 	triggered_by TEXT NOT NULL DEFAULT '',
 	started_at INTEGER NULL,
@@ -144,6 +146,101 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	}
 }
 
+func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
+	switch r.dbDriver {
+	case "mysql":
+		exists, err := r.mysqlColumnExists(ctx, "release_order", "son_service")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN son_service VARCHAR(200) NOT NULL DEFAULT '' AFTER env_code;`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, err = r.db.ExecContext(
+			ctx,
+			`ALTER TABLE release_order MODIFY COLUMN status VARCHAR(50) NOT NULL DEFAULT 'pending';`,
+		); err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`UPDATE release_order
+SET status = 'pending'
+WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
+		)
+		return err
+	case "sqlite":
+		columns, err := r.sqliteTableColumns(ctx, "release_order")
+		if err != nil {
+			return err
+		}
+		if _, ok := columns["son_service"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN son_service TEXT NOT NULL DEFAULT '';`,
+			); err != nil {
+				return err
+			}
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`UPDATE release_order
+SET status = 'pending'
+WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
+		)
+		return err
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+}
+
+func (r *ReleaseRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {
+	const q = `
+SELECT COUNT(1)
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?;`
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, q, table, column).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *ReleaseRepository) sqliteTableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
+	q := fmt.Sprintf("PRAGMA table_info(%q);", table)
+	rows, err := r.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			typ       string
+			notNull   int
+			defaultV  sql.NullString
+			primaryID int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultV, &primaryID); err != nil {
+			return nil, err
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
+}
+
 func (r *ReleaseRepository) Create(
 	ctx context.Context,
 	order domain.ReleaseOrder,
@@ -163,8 +260,8 @@ func (r *ReleaseRepository) Create(
 	const insertOrder = `
 INSERT INTO release_order (
 	id, order_no, application_id, application_name, binding_id, pipeline_id, env_code,
-	git_ref, image_tag, trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	son_service, git_ref, image_tag, trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -176,6 +273,7 @@ INSERT INTO release_order (
 		order.BindingID,
 		order.PipelineID,
 		order.EnvCode,
+		order.SonService,
 		order.GitRef,
 		order.ImageTag,
 		string(order.TriggerType),
@@ -246,7 +344,7 @@ INSERT INTO release_order_step (
 
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
-SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, git_ref, image_tag,
+SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
@@ -297,7 +395,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 
 	listQuery := `
-SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, git_ref, image_tag,
+SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
@@ -488,6 +586,7 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		&item.BindingID,
 		&item.PipelineID,
 		&item.EnvCode,
+		&item.SonService,
 		&item.GitRef,
 		&item.ImageTag,
 		&triggerType,

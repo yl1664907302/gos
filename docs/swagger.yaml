@@ -125,6 +125,8 @@ definitions:
         type: array
       remark:
         type: string
+      son_service:
+        type: string
       steps:
         items:
           $ref: '#/definitions/httpapi.CreateReleaseOrderStepRequest'
@@ -410,6 +412,8 @@ definitions:
       pipeline_id:
         type: string
       remark:
+        type: string
+      son_service:
         type: string
       started_at:
         type: string

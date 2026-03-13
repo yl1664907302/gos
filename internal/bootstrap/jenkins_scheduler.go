@@ -23,8 +23,34 @@ func (t JenkinsSyncTask) Stop() {
 }
 
 func StartJenkinsAutoSyncTask(cfg JenkinsConfig, run func(context.Context) error) JenkinsSyncTask {
+	return startJenkinsTask(
+		cfg.Enabled && cfg.AutoSyncEnabled,
+		time.Duration(cfg.AutoSyncIntervalSec)*time.Second,
+		300*time.Second,
+		"jenkins auto sync",
+		run,
+	)
+}
+
+func StartJenkinsReleaseTrackTask(cfg JenkinsConfig, run func(context.Context) error) JenkinsSyncTask {
+	return startJenkinsTask(
+		cfg.Enabled && cfg.ReleaseTrackEnabled,
+		time.Duration(cfg.ReleaseTrackIntervalSec)*time.Second,
+		10*time.Second,
+		"jenkins release track",
+		run,
+	)
+}
+
+func startJenkinsTask(
+	enabled bool,
+	interval time.Duration,
+	defaultInterval time.Duration,
+	taskName string,
+	run func(context.Context) error,
+) JenkinsSyncTask {
 	done := make(chan struct{})
-	if !cfg.Enabled || !cfg.AutoSyncEnabled || run == nil {
+	if !enabled || run == nil {
 		close(done)
 		return JenkinsSyncTask{
 			stop: func() {},
@@ -32,19 +58,18 @@ func StartJenkinsAutoSyncTask(cfg JenkinsConfig, run func(context.Context) error
 		}
 	}
 
-	interval := time.Duration(cfg.AutoSyncIntervalSec) * time.Second
 	if interval <= 0 {
-		interval = 300 * time.Second
+		interval = defaultInterval
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer close(done)
-		log.Printf("jenkins auto sync task started, interval=%s", interval)
+		log.Printf("%s task started, interval=%s", taskName, interval)
 
 		execute := func() {
 			if err := run(ctx); err != nil {
-				log.Printf("jenkins auto sync failed: %v", err)
+				log.Printf("%s failed: %v", taskName, err)
 			}
 		}
 
@@ -55,7 +80,7 @@ func StartJenkinsAutoSyncTask(cfg JenkinsConfig, run func(context.Context) error
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("jenkins auto sync task stopped")
+				log.Printf("%s task stopped", taskName)
 				return
 			case <-ticker.C:
 				execute()

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +99,8 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 	}
 
 	path := buildJenkinsJobPath(fullName)
-	endpoint := c.baseURL + path + "/build"
+	buildEndpoint := c.baseURL + path + "/build"
+	buildWithParamsEndpoint := c.baseURL + path + "/buildWithParameters"
 	form := url.Values{}
 	for k, v := range params {
 		key := strings.TrimSpace(k)
@@ -106,28 +109,152 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 		}
 		form.Set(key, v)
 	}
-	if len(form) > 0 {
-		endpoint = c.baseURL + path + "/buildWithParameters"
-	}
-
 	body := form.Encode()
-	queueURL, statusCode, err := c.post(ctx, endpoint, body, crumbHeader{})
-	if err == nil {
-		return queueURL, nil
-	}
-	if statusCode != http.StatusForbidden {
-		return "", err
+
+	endpoints := make([]string, 0, 2)
+	if len(form) > 0 {
+		endpoints = append(endpoints, buildWithParamsEndpoint)
+	} else {
+		// Jenkins 参数化任务在 /build 空提交时会返回 400，兜底尝试 /buildWithParameters。
+		endpoints = append(endpoints, buildEndpoint, buildWithParamsEndpoint)
 	}
 
-	crumbField, crumbValue, crumbErr := c.getCrumb(ctx)
-	if crumbErr != nil {
-		return "", err
+	var lastErr error
+	for _, endpoint := range endpoints {
+		queueURL, statusCode, err := c.post(ctx, endpoint, body, crumbHeader{})
+		if err == nil {
+			return queueURL, nil
+		}
+
+		if statusCode == http.StatusForbidden {
+			crumbField, crumbValue, crumbErr := c.getCrumb(ctx)
+			if crumbErr == nil {
+				queueURL, _, crumbPostErr := c.post(ctx, endpoint, body, crumbHeader{field: crumbField, value: crumbValue})
+				if crumbPostErr == nil {
+					return queueURL, nil
+				}
+				lastErr = crumbPostErr
+				continue
+			}
+		}
+
+		lastErr = err
 	}
-	queueURL, _, err = c.post(ctx, endpoint, body, crumbHeader{field: crumbField, value: crumbValue})
+	if lastErr == nil {
+		lastErr = fmt.Errorf("trigger jenkins build failed")
+	}
+	return "", lastErr
+}
+
+func (c *Client) GetQueueItem(
+	ctx context.Context,
+	queueURL string,
+) (executableURL string, cancelled bool, why string, err error) {
+	endpoint := buildJenkinsAPIEndpoint(c.baseURL, queueURL, "cancelled,why,executable[url]")
+	if endpoint == "" {
+		return "", false, "", fmt.Errorf("queue url is required")
+	}
+
+	body, err := c.get(ctx, endpoint)
 	if err != nil {
-		return "", err
+		return "", false, "", err
 	}
-	return queueURL, nil
+
+	var payload struct {
+		Cancelled  bool   `json:"cancelled"`
+		Why        string `json:"why"`
+		Executable struct {
+			URL string `json:"url"`
+		} `json:"executable"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", false, "", err
+	}
+
+	return strings.TrimSpace(payload.Executable.URL), payload.Cancelled, strings.TrimSpace(payload.Why), nil
+}
+
+func (c *Client) GetBuildStatus(ctx context.Context, buildURL string) (building bool, result string, err error) {
+	endpoint := buildJenkinsAPIEndpoint(c.baseURL, buildURL, "building,result")
+	if endpoint == "" {
+		return false, "", fmt.Errorf("build url is required")
+	}
+
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return false, "", err
+	}
+
+	var payload struct {
+		Building bool   `json:"building"`
+		Result   string `json:"result"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false, "", err
+	}
+	return payload.Building, strings.TrimSpace(payload.Result), nil
+}
+
+func (c *Client) GetBuildConsoleText(
+	ctx context.Context,
+	buildURL string,
+	start int64,
+) (content string, nextStart int64, moreData bool, err error) {
+	if start < 0 {
+		start = 0
+	}
+	endpoint := buildJenkinsProgressiveTextEndpoint(c.baseURL, buildURL, start)
+	if endpoint == "" {
+		return "", start, false, fmt.Errorf("build url is required")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", start, false, err
+	}
+	if c.username != "" && c.apiToken != "" {
+		req.SetBasicAuth(c.username, c.apiToken)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return "", start, false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return "", start, false, err
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return "", start, false, buildJenkinsHTTPError(resp.StatusCode, body)
+	}
+
+	nextStart = start
+	if textSize := strings.TrimSpace(resp.Header.Get("X-Text-Size")); textSize != "" {
+		if parsed, parseErr := strconv.ParseInt(textSize, 10, 64); parseErr == nil && parsed >= 0 {
+			nextStart = parsed
+		}
+	}
+	moreData = parseJenkinsMoreData(resp.Header.Get("X-More-Data"))
+
+	return string(body), nextStart, moreData, nil
+}
+
+func (c *Client) AbortQueueItem(ctx context.Context, queueURL string) error {
+	endpoint := buildJenkinsActionEndpoint(c.baseURL, queueURL, "cancelQueue")
+	if endpoint == "" {
+		return fmt.Errorf("queue url is required")
+	}
+	return c.postAction(ctx, endpoint)
+}
+
+func (c *Client) AbortBuild(ctx context.Context, buildURL string) error {
+	endpoint := buildJenkinsActionEndpoint(c.baseURL, buildURL, "stop")
+	if endpoint == "" {
+		return fmt.Errorf("build url is required")
+	}
+	return c.postAction(ctx, endpoint)
 }
 
 func (c *Client) ListJobParamSets(ctx context.Context) ([]pipelineparamdomain.JenkinsJobParamSet, error) {
@@ -794,6 +921,64 @@ func buildJenkinsJobAPIPath(fullName string) string {
 	return buildJenkinsJobPath(fullName) + "/api/json"
 }
 
+func buildJenkinsAPIEndpoint(baseURL string, resourceURL string, tree string) string {
+	trimmed := strings.TrimSpace(resourceURL)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return strings.TrimRight(trimmed, "/") + "/api/json?tree=" + tree
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/") + "/api/json?tree=" + tree
+	}
+	return strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/") + "/api/json?tree=" + tree
+}
+
+func buildJenkinsProgressiveTextEndpoint(baseURL string, buildURL string, start int64) string {
+	trimmed := strings.TrimSpace(buildURL)
+	if trimmed == "" {
+		return ""
+	}
+
+	var prefix string
+	switch {
+	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
+		prefix = strings.TrimRight(trimmed, "/")
+	case strings.HasPrefix(trimmed, "/"):
+		prefix = strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/")
+	default:
+		prefix = strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/")
+	}
+	if start < 0 {
+		start = 0
+	}
+	return fmt.Sprintf("%s/logText/progressiveText?start=%d", prefix, start)
+}
+
+func buildJenkinsActionEndpoint(baseURL string, resourceURL string, action string) string {
+	trimmed := strings.TrimSpace(resourceURL)
+	if trimmed == "" {
+		return ""
+	}
+
+	var prefix string
+	switch {
+	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
+		prefix = strings.TrimRight(trimmed, "/")
+	case strings.HasPrefix(trimmed, "/"):
+		prefix = strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/")
+	default:
+		prefix = strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/")
+	}
+
+	action = strings.Trim(strings.TrimSpace(action), "/")
+	if action == "" {
+		return prefix
+	}
+	return prefix + "/" + action
+}
+
 func buildJenkinsJobConfigPath(fullName string) string {
 	return buildJenkinsJobPath(fullName) + "/config.xml"
 }
@@ -866,14 +1051,60 @@ func (c *Client) post(ctx context.Context, endpoint string, encodedForm string, 
 		return "", resp.StatusCode, readErr
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", resp.StatusCode, fmt.Errorf(
-			"jenkins request failed: status=%d body=%s",
-			resp.StatusCode,
-			strings.TrimSpace(string(responseBody)),
-		)
+		return "", resp.StatusCode, buildJenkinsHTTPError(resp.StatusCode, responseBody)
 	}
 	queueURL := strings.TrimSpace(resp.Header.Get("Location"))
 	return queueURL, resp.StatusCode, nil
+}
+
+func (c *Client) postAction(ctx context.Context, endpoint string) error {
+	statusCode, err := c.postActionOnce(ctx, endpoint, crumbHeader{})
+	if err == nil {
+		return nil
+	}
+	if statusCode == http.StatusForbidden {
+		crumbField, crumbValue, crumbErr := c.getCrumb(ctx)
+		if crumbErr == nil {
+			statusCode, err = c.postActionOnce(ctx, endpoint, crumbHeader{field: crumbField, value: crumbValue})
+			if err == nil {
+				return nil
+			}
+		}
+	}
+	if statusCode == http.StatusNotFound || statusCode == http.StatusGone {
+		// Already gone/finished, treat as idempotent success.
+		return nil
+	}
+	return err
+}
+
+func (c *Client) postActionOnce(ctx context.Context, endpoint string, crumb crumbHeader) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.username != "" && c.apiToken != "" {
+		req.SetBasicAuth(c.username, c.apiToken)
+	}
+	if crumb.field != "" && crumb.value != "" {
+		req.Header.Set(crumb.field, crumb.value)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return resp.StatusCode, readErr
+	}
+
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+		return resp.StatusCode, nil
+	}
+	return resp.StatusCode, buildJenkinsHTTPError(resp.StatusCode, body)
 }
 
 func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
@@ -896,7 +1127,108 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("jenkins request failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, buildJenkinsHTTPError(resp.StatusCode, body)
 	}
 	return body, nil
+}
+
+var (
+	htmlParagraphPattern = regexp.MustCompile(`(?is)<p[^>]*>(.*?)</p>`)
+	htmlH2Pattern        = regexp.MustCompile(`(?is)<h2[^>]*>(.*?)</h2>`)
+	htmlTagPattern       = regexp.MustCompile(`(?is)<[^>]+>`)
+	multiSpacePattern    = regexp.MustCompile(`\s+`)
+	paramInvalidPattern  = regexp.MustCompile(`(?i)parameter\s+[^\n]{1,300}?\s+is\s+invalid`)
+	httpErrorPattern     = regexp.MustCompile(`(?i)http error\s+\d+\s+[^\n]{1,120}`)
+)
+
+func buildJenkinsHTTPError(statusCode int, body []byte) error {
+	message := extractJenkinsErrorMessage(string(body))
+	if message == "" {
+		return fmt.Errorf("jenkins request failed: status=%d", statusCode)
+	}
+	return fmt.Errorf("jenkins request failed: status=%d message=%s", statusCode, message)
+}
+
+func extractJenkinsErrorMessage(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+
+	for _, matcher := range []*regexp.Regexp{htmlParagraphPattern, htmlH2Pattern} {
+		matches := matcher.FindAllStringSubmatch(text, 3)
+		for _, match := range matches {
+			if len(match) < 2 {
+				continue
+			}
+			candidate := normalizeHTMLText(match[1])
+			if reason := extractKnownJenkinsReason(candidate); reason != "" {
+				return reason
+			}
+			if looksLikeMeaningfulMessage(candidate) {
+				return candidate
+			}
+		}
+	}
+
+	candidate := normalizeHTMLText(text)
+	if reason := extractKnownJenkinsReason(candidate); reason != "" {
+		return reason
+	}
+	if candidate == "" {
+		return ""
+	}
+	if len(candidate) > 220 {
+		return candidate[:220] + "..."
+	}
+	return candidate
+}
+
+func normalizeHTMLText(raw string) string {
+	decoded := html.UnescapeString(strings.TrimSpace(raw))
+	if decoded == "" {
+		return ""
+	}
+	decoded = htmlTagPattern.ReplaceAllString(decoded, " ")
+	decoded = multiSpacePattern.ReplaceAllString(decoded, " ")
+	return strings.TrimSpace(decoded)
+}
+
+func looksLikeMeaningfulMessage(message string) bool {
+	if message == "" {
+		return false
+	}
+	lower := strings.ToLower(message)
+	if lower == "jenkins - jenkins" {
+		return false
+	}
+	if strings.Contains(lower, "skip to content") {
+		return false
+	}
+	if len(message) > 220 {
+		return false
+	}
+	return true
+}
+
+func extractKnownJenkinsReason(text string) string {
+	if text == "" {
+		return ""
+	}
+	if match := paramInvalidPattern.FindString(text); match != "" {
+		return strings.TrimSpace(match)
+	}
+	if match := httpErrorPattern.FindString(text); match != "" {
+		return strings.TrimSpace(match)
+	}
+	return ""
+}
+
+func parseJenkinsMoreData(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
 }

@@ -11,6 +11,7 @@ export interface ReleaseOrder {
   binding_id: string
   pipeline_id: string
   env_code: string
+  son_service: string
   git_ref: string
   image_tag: string
   trigger_type: ReleaseTriggerType
@@ -75,6 +76,19 @@ export interface ReleaseOrderStepListResponse {
   data: ReleaseOrderStep[]
 }
 
+export interface ReleaseOrderLogStreamEvent {
+  type: 'status' | 'log' | 'done' | 'error' | string
+  timestamp: string
+  message?: string
+  content?: string
+  queue_url?: string
+  build_url?: string
+  offset?: number
+  more_data?: boolean
+  result?: string
+  order_status?: string
+}
+
 export interface CreateReleaseOrderParamPayload {
   param_key: string
   executor_param_name: string
@@ -92,6 +106,7 @@ export interface CreateReleaseOrderPayload {
   application_id: string
   binding_id: string
   env_code: string
+  son_service?: string
   git_ref?: string
   image_tag?: string
   trigger_type?: ReleaseTriggerType

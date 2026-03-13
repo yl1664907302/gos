@@ -1,4 +1,4 @@
-import { http } from './http'
+import { apiBaseURL, http } from './http'
 import type {
   CreateReleaseOrderPayload,
   ReleaseOrderDataResponse,
@@ -41,4 +41,11 @@ export async function listReleaseOrderParams(id: string): Promise<ReleaseOrderPa
 export async function listReleaseOrderSteps(id: string): Promise<ReleaseOrderStepListResponse> {
   const response = await http.get<ReleaseOrderStepListResponse>(`/release-orders/${id}/steps`)
   return response.data
+}
+
+export function buildReleaseOrderLogStreamURL(id: string, start = 0): string {
+  const base = apiBaseURL.replace(/\/+$/, '')
+  const orderID = encodeURIComponent(String(id || '').trim())
+  const offset = Number.isFinite(start) && start > 0 ? Math.floor(start) : 0
+  return `${base}/release-orders/${orderID}/logs/stream?start=${offset}`
 }

@@ -26,6 +26,7 @@ type CreateReleaseOrderInput struct {
 	ApplicationID string
 	BindingID     string
 	EnvCode       string
+	SonService    string
 	GitRef        string
 	ImageTag      string
 	TriggerType   domain.TriggerType
@@ -65,6 +66,9 @@ type FinishReleaseOrderStepInput struct {
 
 type JenkinsReleaseExecutor interface {
 	TriggerBuild(ctx context.Context, fullName string, params map[string]string) (queueURL string, err error)
+	GetQueueItem(ctx context.Context, queueURL string) (executableURL string, cancelled bool, why string, err error)
+	AbortQueueItem(ctx context.Context, queueURL string) error
+	AbortBuild(ctx context.Context, buildURL string) error
 }
 
 func NewReleaseOrderManager(
@@ -125,6 +129,7 @@ func (uc *ReleaseOrderManager) Create(
 		BindingID:       bindingID,
 		PipelineID:      strings.TrimSpace(binding.PipelineID),
 		EnvCode:         envCode,
+		SonService:      strings.TrimSpace(input.SonService),
 		GitRef:          strings.TrimSpace(input.GitRef),
 		ImageTag:        strings.TrimSpace(input.ImageTag),
 		TriggerType:     triggerType,
@@ -214,7 +219,100 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	}
 
 	now := uc.now()
+	steps, err := uc.repo.ListSteps(ctx, id)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+
+	cancelNote := ""
+	if order.Status == domain.OrderStatusRunning {
+		cancelNote = uc.abortJenkinsExecution(ctx, order, steps)
+	}
+
+	// Mark jenkins-related in-flight steps as finished to avoid stale "running/pending" states after cancel.
+	for _, step := range steps {
+		if !shouldFinishStepOnCancel(step) {
+			continue
+		}
+		startedAt := step.StartedAt
+		if startedAt == nil {
+			startedAt = &now
+		}
+		message := "发布已取消"
+		if cancelNote != "" {
+			message = message + "，" + cancelNote
+		}
+		_, updateErr := uc.repo.UpdateStep(ctx, id, step.StepCode, domain.StepUpdateInput{
+			Status:     domain.StepStatusFailed,
+			Message:    message,
+			StartedAt:  startedAt,
+			FinishedAt: &now,
+		})
+		if updateErr != nil && !errors.Is(updateErr, domain.ErrStepNotFound) {
+			return domain.ReleaseOrder{}, updateErr
+		}
+	}
+
 	return uc.repo.UpdateStatus(ctx, id, domain.OrderStatusCancelled, order.StartedAt, &now, now)
+}
+
+func shouldFinishStepOnCancel(step domain.ReleaseOrderStep) bool {
+	if step.Status == domain.StepStatusRunning {
+		return true
+	}
+	if step.Status != domain.StepStatusPending {
+		return false
+	}
+	switch step.StepCode {
+	case "trigger_pipeline", "pipeline_running", "pipeline_success":
+		return true
+	default:
+		return false
+	}
+}
+
+func (uc *ReleaseOrderManager) abortJenkinsExecution(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	steps []domain.ReleaseOrderStep,
+) string {
+	if uc.jenkins == nil {
+		return ""
+	}
+
+	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
+	if err != nil || binding.Provider != pipelinedomain.ProviderJenkins {
+		return ""
+	}
+
+	queueURL := strings.TrimSpace(extractQueueURLFromSteps(steps))
+	if queueURL == "" {
+		return ""
+	}
+
+	buildURL, cancelled, _, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL)
+	if queueErr != nil {
+		if !isResourceNotFoundError(queueErr) {
+			return "尝试终止 Jenkins 任务失败"
+		}
+		return ""
+	}
+	if cancelled {
+		return "Jenkins 队列已取消"
+	}
+
+	buildURL = strings.TrimSpace(buildURL)
+	if buildURL != "" {
+		if err := uc.jenkins.AbortBuild(ctx, buildURL); err != nil {
+			return "尝试停止 Jenkins 构建失败"
+		}
+		return "已发送 Jenkins 停止构建请求"
+	}
+
+	if err := uc.jenkins.AbortQueueItem(ctx, queueURL); err != nil {
+		return "尝试取消 Jenkins 队列失败"
+	}
+	return "已发送 Jenkins 取消队列请求"
 }
 
 func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.ReleaseOrder, error) {
@@ -230,7 +328,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	if order.Status != domain.OrderStatusPending {
+	if !isPendingOrderStatus(order.Status) {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: only pending release order can be executed", ErrInvalidInput)
 	}
 
@@ -289,7 +387,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		_ = uc.markStepFinished(ctx, order.ID, "trigger_pipeline", domain.StepStatusFailed, "触发 Jenkins 失败: "+triggerErr.Error())
 		finishedAt := uc.now()
 		_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &finishedAt, finishedAt)
-		return domain.ReleaseOrder{}, triggerErr
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: trigger jenkins failed: %v", ErrInvalidInput, triggerErr)
 	}
 
 	triggerMessage := "Jenkins 触发成功"
@@ -650,6 +748,11 @@ func deriveOrderStatusFromSteps(steps []domain.ReleaseOrderStep) (domain.OrderSt
 		return domain.OrderStatusSuccess, true
 	}
 	return domain.OrderStatusRunning, false
+}
+
+func isPendingOrderStatus(status domain.OrderStatus) bool {
+	normalized := strings.ToLower(strings.TrimSpace(string(status)))
+	return normalized == "pending" || normalized == "pengding"
 }
 
 func ensureStepOrder(steps []domain.ReleaseOrderStep, current domain.ReleaseOrderStep) error {

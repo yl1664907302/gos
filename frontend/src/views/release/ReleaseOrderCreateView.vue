@@ -35,6 +35,7 @@ interface CreateFormState {
   application_id: string
   binding_id: string
   env_code: string
+  son_service: string
   git_ref: string
   image_tag: string
   trigger_type: ReleaseTriggerType
@@ -60,6 +61,7 @@ const formState = reactive<CreateFormState>({
   application_id: '',
   binding_id: '',
   env_code: 'dev',
+  son_service: '',
   git_ref: '',
   image_tag: '',
   trigger_type: 'manual',
@@ -114,6 +116,14 @@ const branchParamDefs = computed(() =>
   paramDefs.value.filter((item) => String(item.param_key || '').trim().toLowerCase() === 'branch'),
 )
 
+const projectNameParamDefs = computed(() =>
+  paramDefs.value.filter((item) => {
+    const paramKey = String(item.param_key || '').trim().toLowerCase()
+    const executorName = String(item.executor_param_name || '').trim().toLowerCase()
+    return paramKey === 'project_name' || executorName === 'project_name'
+  }),
+)
+
 const gitRefOptions = computed<SelectOption[]>(() => {
   const result: SelectOption[] = []
   const seen = new Set<string>()
@@ -134,6 +144,29 @@ const gitRefOptions = computed<SelectOption[]>(() => {
     appendValue(paramValues[item.id] || '')
   }
   appendValue(formState.git_ref)
+  return result
+})
+
+const sonServiceOptions = computed<SelectOption[]>(() => {
+  const result: SelectOption[] = []
+  const seen = new Set<string>()
+
+  const appendValue = (value: string) => {
+    const next = String(value || '').trim()
+    if (!next || seen.has(next)) {
+      return
+    }
+    seen.add(next)
+    result.push({ label: next, value: next })
+  }
+
+  for (const item of projectNameParamDefs.value) {
+    const meta = getChoiceMeta(item)
+    meta.options.forEach((option) => appendValue(option.value))
+    appendValue(item.default_value)
+    appendValue(paramValues[item.id] || '')
+  }
+  appendValue(formState.son_service)
   return result
 })
 
@@ -192,8 +225,31 @@ function syncBranchParamValuesFromGitRef(value: string) {
   }
 }
 
+function syncSonServiceFromProjectNameParams() {
+  for (const item of projectNameParamDefs.value) {
+    const value = String(paramValues[item.id] || '').trim()
+    if (value) {
+      formState.son_service = value
+      return
+    }
+  }
+}
+
+function syncProjectNameParamValuesFromSonService(value: string) {
+  const next = String(value || '').trim()
+  for (const item of projectNameParamDefs.value) {
+    paramValues[item.id] = next
+  }
+}
+
 function isBranchParam(item: PipelineParamDef) {
   return String(item.param_key || '').trim().toLowerCase() === 'branch'
+}
+
+function isProjectNameParam(item: PipelineParamDef) {
+  const paramKey = String(item.param_key || '').trim().toLowerCase()
+  const executorName = String(item.executor_param_name || '').trim().toLowerCase()
+  return paramKey === 'project_name' || executorName === 'project_name'
 }
 
 function resolveChoiceMeta(item: PipelineParamDef): ChoiceMeta {
@@ -374,6 +430,9 @@ function handleChoiceSingleChange(item: PipelineParamDef, value: unknown) {
   if (isBranchParam(item)) {
     formState.git_ref = nextValue
   }
+  if (isProjectNameParam(item)) {
+    formState.son_service = nextValue
+  }
 }
 
 function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
@@ -387,6 +446,9 @@ function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
   if (isBranchParam(item)) {
     formState.git_ref = String(paramValues[item.id] || '').trim()
   }
+  if (isProjectNameParam(item)) {
+    formState.son_service = String(paramValues[item.id] || '').trim()
+  }
 }
 
 function handleParamValueInput(item: PipelineParamDef, value: string) {
@@ -395,11 +457,19 @@ function handleParamValueInput(item: PipelineParamDef, value: string) {
   if (isBranchParam(item)) {
     formState.git_ref = nextValue.trim()
   }
+  if (isProjectNameParam(item)) {
+    formState.son_service = nextValue.trim()
+  }
 }
 
 function handleGitRefChange(value: string | undefined) {
   formState.git_ref = String(value || '').trim()
   syncBranchParamValuesFromGitRef(formState.git_ref)
+}
+
+function handleSonServiceChange(value: string | undefined) {
+  formState.son_service = String(value || '').trim()
+  syncProjectNameParamValuesFromSonService(formState.son_service)
 }
 
 function applyRouteQuery() {
@@ -490,6 +560,7 @@ async function loadPipelineParamDefs() {
     paramDefs.value = response.data
     fillParamValues(response.data)
     syncGitRefFromBranchParams()
+    syncSonServiceFromProjectNameParams()
   } catch (error) {
     paramDefs.value = []
     resetParamValues()
@@ -538,7 +609,11 @@ function buildParamsPayload() {
   }> = []
 
   for (const item of paramDefs.value) {
-    const value = String(paramValues[item.id] || '').trim()
+    let value = String(paramValues[item.id] || '').trim()
+    if (isProjectNameParam(item) && String(formState.son_service || '').trim()) {
+      value = String(formState.son_service || '').trim()
+      paramValues[item.id] = value
+    }
     const paramKey = String(item.param_key || '').trim()
     const displayName = item.executor_param_name || item.id
 
@@ -595,6 +670,7 @@ async function handleSubmit() {
       application_id: formState.application_id.trim(),
       binding_id: formState.binding_id.trim(),
       env_code: formState.env_code.trim(),
+      son_service: formState.son_service.trim() || undefined,
       git_ref: formState.git_ref.trim() || undefined,
       image_tag: formState.image_tag.trim() || undefined,
       trigger_type: formState.trigger_type,
@@ -701,6 +777,20 @@ onMounted(async () => {
 
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
+            <a-form-item label="子服务（son_service）" name="son_service">
+              <a-select
+                v-model:value="formState.son_service"
+                show-search
+                allow-clear
+                option-filter-prop="label"
+                :options="sonServiceOptions"
+                :disabled="sonServiceOptions.length === 0"
+                placeholder="从 project_name 参数候选值中选择（选填）"
+                @change="handleSonServiceChange"
+              />
+            </a-form-item>
+          </a-col>
+          <a-col :xs="24" :md="12">
             <a-form-item label="Git 版本" name="git_ref">
               <a-select
                 v-if="gitRefOptions.length > 0"
@@ -720,19 +810,22 @@ onMounted(async () => {
               />
             </a-form-item>
           </a-col>
+        </a-row>
+
+        <a-row :gutter="16">
           <a-col :xs="24" :md="12">
             <a-form-item label="镜像版本" name="image_tag">
               <a-input v-model:value="formState.image_tag" placeholder="例如 20260313-01" />
             </a-form-item>
           </a-col>
-        </a-row>
-
-        <a-row :gutter="16">
           <a-col :xs="24" :md="12">
             <a-form-item label="触发人" name="triggered_by">
               <a-input v-model:value="formState.triggered_by" placeholder="例如 lingyun" />
             </a-form-item>
           </a-col>
+        </a-row>
+
+        <a-row :gutter="16">
           <a-col :xs="24" :md="12">
             <a-form-item label="备注" name="remark">
               <a-input v-model:value="formState.remark" placeholder="本次发布说明" />

@@ -91,6 +91,7 @@ type ReleaseOrder struct {
 	BindingID       string
 	PipelineID      string
 	EnvCode         string
+	SonService      string
 	GitRef          string
 	ImageTag        string
 	TriggerType     TriggerType

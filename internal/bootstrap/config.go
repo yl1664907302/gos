@@ -49,6 +49,8 @@ type JenkinsConfig struct {
 	StartupRetryIntervalSec int    `json:"startup_retry_interval_sec"`
 	AutoSyncEnabled         bool   `json:"auto_sync_enabled"`
 	AutoSyncIntervalSec     int    `json:"auto_sync_interval_sec"`
+	ReleaseTrackEnabled     bool   `json:"release_track_enabled"`
+	ReleaseTrackIntervalSec int    `json:"release_track_interval_sec"`
 }
 
 func LoadConfig() (Config, error) {
@@ -105,6 +107,8 @@ func defaultConfig() Config {
 			StartupRetryIntervalSec: 2,
 			AutoSyncEnabled:         false,
 			AutoSyncIntervalSec:     300,
+			ReleaseTrackEnabled:     true,
+			ReleaseTrackIntervalSec: 10,
 		},
 	}
 }
@@ -172,6 +176,12 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v, ok := intFromEnv("JENKINS_AUTO_SYNC_INTERVAL_SEC"); ok {
 		cfg.Jenkins.AutoSyncIntervalSec = v
+	}
+	if v, ok := boolFromEnv("JENKINS_RELEASE_TRACK_ENABLED"); ok {
+		cfg.Jenkins.ReleaseTrackEnabled = v
+	}
+	if v, ok := intFromEnv("JENKINS_RELEASE_TRACK_INTERVAL_SEC"); ok {
+		cfg.Jenkins.ReleaseTrackIntervalSec = v
 	}
 }
 
@@ -243,6 +253,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.Jenkins.AutoSyncIntervalSec <= 0 {
 		cfg.Jenkins.AutoSyncIntervalSec = 300
+	}
+	if cfg.Jenkins.ReleaseTrackIntervalSec <= 0 {
+		cfg.Jenkins.ReleaseTrackIntervalSec = 10
 	}
 }
 

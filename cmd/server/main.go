@@ -90,9 +90,14 @@ func main() {
 		usecase.NewPipelineParamDefManager(pipelineParamRepo, repo, pipelineRepo, platformParamRepo),
 		syncPipelineParamDefs,
 	)
-	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
-		usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, jenkinsClient),
+	releaseOrderManager := usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, jenkinsClient)
+	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
+	releaseOrderHandler := httpapi.NewReleaseOrderHandler(releaseOrderManager, releaseOrderLogStreamer)
+	releaseTracker := usecase.NewTrackReleaseExecution(
+		releaseOrderManager,
+		jenkinsClient,
 	)
+
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
 		pipelineResult, err := syncPipelines.Execute(ctx)
 		if err != nil {
@@ -120,6 +125,22 @@ func main() {
 		return nil
 	})
 	defer syncTask.Stop()
+
+	releaseTrackTask := bootstrap.StartJenkinsReleaseTrackTask(cfg.Jenkins, func(ctx context.Context) error {
+		releaseResult, err := releaseTracker.Execute(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf(
+			"release execution track completed: running=%d updated=%d skipped=%d failed=%d",
+			releaseResult.RunningOrders,
+			releaseResult.UpdatedOrders,
+			releaseResult.SkippedOrders,
+			releaseResult.FailedOrders,
+		)
+		return nil
+	})
+	defer releaseTrackTask.Stop()
 
 	router := httpapi.NewRouter(handler, pipelineHandler, platformParamHandler, pipelineParamHandler, releaseOrderHandler)
 

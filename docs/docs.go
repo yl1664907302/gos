@@ -1991,6 +1991,9 @@ const docTemplate = `{
                 "remark": {
                     "type": "string"
                 },
+                "son_service": {
+                    "type": "string"
+                },
                 "steps": {
                     "type": "array",
                     "items": {
@@ -2428,6 +2431,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "remark": {
+                    "type": "string"
+                },
+                "son_service": {
                     "type": "string"
                 },
                 "started_at": {

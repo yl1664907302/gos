@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { ExclamationCircleOutlined, LoadingOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listApplications } from '../../api/application'
 import { listPipelineBindings } from '../../api/pipeline'
@@ -26,12 +26,15 @@ interface SelectOption {
 
 const route = useRoute()
 const router = useRouter()
+const AUTO_REFRESH_INTERVAL_MS = 5000
 
 const loading = ref(false)
+const querying = ref(false)
 const cancellingID = ref('')
 const executingID = ref('')
 const dataSource = ref<ReleaseOrder[]>([])
 const total = ref(0)
+const autoRefreshTimer = ref<number | null>(null)
 
 const applicationsLoading = ref(false)
 const bindingOptionsLoading = ref(false)
@@ -54,6 +57,14 @@ const filters = reactive({
   pageSize: 20,
 })
 
+const activeQuery = reactive({
+  application_id: '',
+  binding_id: '',
+  env_code: '',
+  status: '' as ReleaseOrderStatus | '',
+  trigger_type: '' as ReleaseTriggerType | '',
+})
+
 const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '发布单号', dataIndex: 'order_no', key: 'order_no', width: 220 },
   { title: '应用名称', dataIndex: 'application_name', key: 'application_name', width: 180 },
@@ -70,13 +81,21 @@ const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidt
 
 const hasFilter = computed(() => {
   return Boolean(
-    filters.application_id ||
-      filters.binding_id ||
-      filters.env_code.trim() ||
-      filters.status ||
-      filters.trigger_type,
+    activeQuery.application_id ||
+      activeQuery.binding_id ||
+      activeQuery.env_code ||
+      activeQuery.status ||
+      activeQuery.trigger_type,
   )
 })
+
+function applyActiveQueryFromFilters() {
+  activeQuery.application_id = filters.application_id
+  activeQuery.binding_id = filters.binding_id
+  activeQuery.env_code = filters.env_code.trim()
+  activeQuery.status = filters.status
+  activeQuery.trigger_type = filters.trigger_type
+}
 
 function formatTime(value: string | null) {
   if (!value) {
@@ -115,6 +134,10 @@ function statusText(status: ReleaseOrderStatus) {
     default:
       return status
   }
+}
+
+function isRunningStatus(status: ReleaseOrderStatus) {
+  return status === 'running'
 }
 
 function canCancel(record: ReleaseOrder) {
@@ -163,15 +186,22 @@ async function loadBindingOptions() {
   }
 }
 
-async function loadReleaseOrders() {
-  loading.value = true
+async function loadReleaseOrders(options?: { silent?: boolean }) {
+  if (querying.value) {
+    return
+  }
+  const silent = Boolean(options?.silent)
+  querying.value = true
+  if (!silent) {
+    loading.value = true
+  }
   try {
     const response = await listReleaseOrders({
-      application_id: filters.application_id || undefined,
-      binding_id: filters.binding_id || undefined,
-      env_code: filters.env_code.trim() || undefined,
-      status: filters.status || undefined,
-      trigger_type: filters.trigger_type || undefined,
+      application_id: activeQuery.application_id || undefined,
+      binding_id: activeQuery.binding_id || undefined,
+      env_code: activeQuery.env_code || undefined,
+      status: activeQuery.status || undefined,
+      trigger_type: activeQuery.trigger_type || undefined,
       page: filters.page,
       page_size: filters.pageSize,
     })
@@ -180,9 +210,14 @@ async function loadReleaseOrders() {
     filters.page = response.page
     filters.pageSize = response.page_size
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '发布单列表加载失败'))
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, '发布单列表加载失败'))
+    }
   } finally {
-    loading.value = false
+    querying.value = false
+    if (!silent) {
+      loading.value = false
+    }
   }
 }
 
@@ -210,6 +245,7 @@ function toDetail(id: string) {
 
 function handleSearch() {
   filters.page = 1
+  applyActiveQueryFromFilters()
   void loadReleaseOrders()
 }
 
@@ -222,6 +258,7 @@ function handleReset() {
   filters.page = 1
   filters.pageSize = 20
   bindingOptions.value = []
+  applyActiveQueryFromFilters()
   void loadReleaseOrders()
 }
 
@@ -236,6 +273,7 @@ async function handleApplicationChange(value: string | undefined) {
   filters.binding_id = ''
   filters.page = 1
   await loadBindingOptions()
+  applyActiveQueryFromFilters()
   await loadReleaseOrders()
 }
 
@@ -297,11 +335,34 @@ async function confirmExecuteRelease() {
   }
 }
 
+function stopAutoRefresh() {
+  if (autoRefreshTimer.value !== null) {
+    window.clearInterval(autoRefreshTimer.value)
+    autoRefreshTimer.value = null
+  }
+}
+
+function startAutoRefresh() {
+  stopAutoRefresh()
+  autoRefreshTimer.value = window.setInterval(() => {
+    if (document.hidden || executePreviewVisible.value || executePreviewLoading.value || executeSubmitting.value) {
+      return
+    }
+    void loadReleaseOrders({ silent: true })
+  }, AUTO_REFRESH_INTERVAL_MS)
+}
+
 onMounted(async () => {
   applyRouteQuery()
   await loadApplicationOptions()
   await loadBindingOptions()
+  applyActiveQueryFromFilters()
   await loadReleaseOrders()
+  startAutoRefresh()
+})
+
+onBeforeUnmount(() => {
+  stopAutoRefresh()
 })
 </script>
 
@@ -407,7 +468,10 @@ onMounted(async () => {
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
-            <a-tag :color="statusColor(record.status)">{{ statusText(record.status) }}</a-tag>
+            <a-tag :color="statusColor(record.status)" class="status-tag">
+              <LoadingOutlined v-if="isRunningStatus(record.status)" spin />
+              <span>{{ statusText(record.status) }}</span>
+            </a-tag>
           </template>
           <template v-else-if="column.key === 'started_at'">
             {{ formatTime(record.started_at) }}
@@ -540,6 +604,12 @@ onMounted(async () => {
 
 .danger-icon {
   color: #ff4d4f;
+}
+
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .pagination-area {

@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,11 +20,26 @@ import (
 )
 
 type ReleaseOrderHandler struct {
-	manager *usecase.ReleaseOrderManager
+	manager     *usecase.ReleaseOrderManager
+	logStreamer ReleaseOrderLogStreamer
 }
 
-func NewReleaseOrderHandler(manager *usecase.ReleaseOrderManager) *ReleaseOrderHandler {
-	return &ReleaseOrderHandler{manager: manager}
+type ReleaseOrderLogStreamer interface {
+	Stream(
+		ctx context.Context,
+		input usecase.StreamReleaseOrderLogInput,
+		emit func(event usecase.ReleaseOrderLogEvent) error,
+	) error
+}
+
+func NewReleaseOrderHandler(
+	manager *usecase.ReleaseOrderManager,
+	logStreamer ReleaseOrderLogStreamer,
+) *ReleaseOrderHandler {
+	return &ReleaseOrderHandler{
+		manager:     manager,
+		logStreamer: logStreamer,
+	}
 }
 
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
@@ -29,6 +48,7 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/release-orders/:id", h.GetByID)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
 	router.POST("/release-orders/:id/execute", h.Execute)
+	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
 
 	router.GET("/release-orders/:id/params", h.ListParams)
 	router.GET("/release-orders/:id/steps", h.ListSteps)
@@ -40,6 +60,7 @@ type CreateReleaseOrderRequest struct {
 	ApplicationID string                           `json:"application_id"`
 	BindingID     string                           `json:"binding_id"`
 	EnvCode       string                           `json:"env_code"`
+	SonService    string                           `json:"son_service"`
 	GitRef        string                           `json:"git_ref"`
 	ImageTag      string                           `json:"image_tag"`
 	TriggerType   string                           `json:"trigger_type"`
@@ -79,6 +100,7 @@ type ReleaseOrderResponse struct {
 	BindingID       string     `json:"binding_id"`
 	PipelineID      string     `json:"pipeline_id"`
 	EnvCode         string     `json:"env_code"`
+	SonService      string     `json:"son_service"`
 	GitRef          string     `json:"git_ref"`
 	ImageTag        string     `json:"image_tag"`
 	TriggerType     string     `json:"trigger_type"`
@@ -182,6 +204,7 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		ApplicationID: req.ApplicationID,
 		BindingID:     req.BindingID,
 		EnvCode:       req.EnvCode,
+		SonService:    req.SonService,
 		GitRef:        req.GitRef,
 		ImageTag:      req.ImageTag,
 		TriggerType:   domain.TriggerType(strings.TrimSpace(req.TriggerType)),
@@ -306,6 +329,73 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+// StreamLogs godoc
+// @Summary      Stream release order logs
+// @Tags         release-orders
+// @Produce      text/event-stream
+// @Param        id     path   string  true   "Release order ID"
+// @Param        start  query  int     false  "Start offset for progressive logs"
+// @Success      200
+// @Failure      400  {object}  ErrorResponse
+// @Failure      404  {object}  ErrorResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /release-orders/{id}/logs/stream [get]
+func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
+	if h.logStreamer == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": "log stream is not configured"})
+		return
+	}
+
+	startOffset, err := parseNonNegativeInt64Query(c, "start")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming is not supported"})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+
+	writeEvent := func(event usecase.ReleaseOrderLogEvent) error {
+		eventName := strings.TrimSpace(event.Type)
+		if eventName == "" {
+			eventName = "message"
+		}
+		payload, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, writeErr := fmt.Fprintf(c.Writer, "event: %s\n", eventName); writeErr != nil {
+			return writeErr
+		}
+		if _, writeErr := fmt.Fprintf(c.Writer, "data: %s\n\n", payload); writeErr != nil {
+			return writeErr
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	streamErr := h.logStreamer.Stream(c.Request.Context(), usecase.StreamReleaseOrderLogInput{
+		ReleaseOrderID: c.Param("id"),
+		StartOffset:    startOffset,
+	}, writeEvent)
+	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
+		_ = writeEvent(usecase.ReleaseOrderLogEvent{
+			Type:      usecase.ReleaseOrderLogEventTypeError,
+			Timestamp: time.Now().UTC(),
+			Message:   normalizeReleaseOrderErrorMessage(streamErr),
+		})
+	}
 }
 
 // ListParams godoc
@@ -436,6 +526,7 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		BindingID:       item.BindingID,
 		PipelineID:      item.PipelineID,
 		EnvCode:         item.EnvCode,
+		SonService:      item.SonService,
 		GitRef:          item.GitRef,
 		ImageTag:        item.ImageTag,
 		TriggerType:     string(item.TriggerType),
@@ -482,7 +573,7 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 		errors.Is(err, usecase.ErrInvalidID),
 		errors.Is(err, usecase.ErrInvalidStatus),
 		errors.Is(err, usecase.ErrInvalidSourceFrom):
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": normalizeReleaseOrderErrorMessage(err)})
 
 	case errors.Is(err, appdomain.ErrNotFound),
 		errors.Is(err, pipelinedomain.ErrBindingNotFound),
@@ -496,4 +587,51 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 	}
+}
+
+func normalizeReleaseOrderErrorMessage(err error) string {
+	if err == nil {
+		return "invalid input"
+	}
+
+	message := strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+	if message == "" {
+		return "invalid input"
+	}
+
+	lower := strings.ToLower(message)
+	const triggerPrefix = "trigger jenkins failed:"
+	if index := strings.Index(lower, triggerPrefix); index >= 0 {
+		reason := strings.TrimSpace(message[index+len(triggerPrefix):])
+		if reason == "" {
+			return "发布执行失败"
+		}
+		if messageIndex := strings.Index(strings.ToLower(reason), "message="); messageIndex >= 0 {
+			reason = strings.TrimSpace(reason[messageIndex+len("message="):])
+		}
+		if len(reason) > 220 {
+			reason = reason[:220] + "..."
+		}
+		return "发布执行失败：" + reason
+	}
+
+	if len(message) > 220 {
+		return message[:220] + "..."
+	}
+	return message
+}
+
+func parseNonNegativeInt64Query(c *gin.Context, name string) (int64, error) {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, errors.New(name + " must be an integer")
+	}
+	if value < 0 {
+		return 0, errors.New(name + " must be greater than or equal to 0")
+	}
+	return value, nil
 }

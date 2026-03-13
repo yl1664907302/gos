@@ -30,6 +30,8 @@
     "startup_max_retries": 5,
     "startup_retry_interval_sec": 2,
     "auto_sync_enabled": true,
-    "auto_sync_interval_sec": 300
+    "auto_sync_interval_sec": 5,
+    "release_track_enabled": true,
+    "release_track_interval_sec": 10
   }
 }
