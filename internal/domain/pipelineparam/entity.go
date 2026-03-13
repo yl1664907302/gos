@@ -60,6 +60,7 @@ type PipelineParamDef struct {
 	ExecutorParamName string
 	ParamKey          string
 	ParamType         ParamType
+	SingleSelect      bool
 	Required          bool
 	DefaultValue      string
 	Description       string
@@ -75,6 +76,7 @@ type PipelineParamDef struct {
 type JenkinsParamSnapshot struct {
 	Name         string
 	ParamType    ParamType
+	SingleSelect bool
 	Required     bool
 	DefaultValue string
 	Description  string

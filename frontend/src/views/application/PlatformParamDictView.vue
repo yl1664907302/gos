@@ -396,7 +396,7 @@ onMounted(() => {
       :open="modalVisible"
       :confirm-loading="submitting"
       :title="modalTitle"
-      width="760"
+      :width="760"
       ok-text="保存"
       cancel-text="取消"
       @ok="submitForm"
@@ -443,14 +443,13 @@ onMounted(() => {
           <a-select v-model:value="formState.param_type" :options="typeOptions" />
         </a-form-item>
 
-        <div class="switch-row">
-          <a-form-item label="默认必填" name="required">
-            <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
-          </a-form-item>
-          <a-form-item label="内置字段" name="builtin">
-            <a-switch v-model:checked="formState.builtin" checked-children="是" un-checked-children="否" />
-          </a-form-item>
-        </div>
+        <a-form-item label="默认必填" name="required">
+          <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
+        </a-form-item>
+
+        <a-form-item label="内置字段" name="builtin">
+          <a-switch v-model:checked="formState.builtin" checked-children="是" un-checked-children="否" />
+        </a-form-item>
 
         <a-form-item label="状态" name="status" :rules="[{ required: true, message: '请选择状态' }]">
           <a-select v-model:value="formState.status" :options="statusOptions" />
@@ -508,21 +507,10 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
-.switch-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .switch-row {
-    grid-template-columns: 1fr;
-    gap: 0;
   }
 }
 </style>

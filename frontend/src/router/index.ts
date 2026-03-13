@@ -8,6 +8,9 @@ import ApplicationPipelineBindingView from '../views/application/ApplicationPipe
 import PlatformParamDictView from '../views/application/PlatformParamDictView.vue'
 import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
 import PipelineParamManagementView from '../views/component/PipelineParamManagementView.vue'
+import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
+import ReleaseOrderDetailView from '../views/release/ReleaseOrderDetailView.vue'
+import ReleaseOrderListView from '../views/release/ReleaseOrderListView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -67,6 +70,24 @@ export const router = createRouter({
           name: 'pipeline-param-management',
           component: PipelineParamManagementView,
           meta: { title: '管线参数' },
+        },
+        {
+          path: 'releases',
+          name: 'release-order-list',
+          component: ReleaseOrderListView,
+          meta: { title: '发布单' },
+        },
+        {
+          path: 'releases/new',
+          name: 'release-order-create',
+          component: ReleaseOrderCreateView,
+          meta: { title: '新建发布单' },
+        },
+        {
+          path: 'releases/:id',
+          name: 'release-order-detail',
+          component: ReleaseOrderDetailView,
+          meta: { title: '发布单详情' },
         },
       ],
     },

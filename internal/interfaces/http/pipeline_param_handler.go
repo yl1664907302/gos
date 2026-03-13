@@ -50,6 +50,7 @@ type PipelineParamDefResponse struct {
 	ExecutorParamName string    `json:"executor_param_name"`
 	ParamKey          string    `json:"param_key"`
 	ParamType         string    `json:"param_type"`
+	SingleSelect      bool      `json:"single_select"`
 	Required          bool      `json:"required"`
 	DefaultValue      string    `json:"default_value"`
 	Description       string    `json:"description"`
@@ -278,6 +279,7 @@ func toPipelineParamResponse(item domain.PipelineParamDef) PipelineParamDefRespo
 		ExecutorParamName: item.ExecutorParamName,
 		ParamKey:          item.ParamKey,
 		ParamType:         string(item.ParamType),
+		SingleSelect:      item.SingleSelect,
 		Required:          item.Required,
 		DefaultValue:      item.DefaultValue,
 		Description:       item.Description,

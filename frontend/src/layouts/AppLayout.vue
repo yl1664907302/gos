@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AppstoreOutlined, ClusterOutlined } from '@ant-design/icons-vue'
+import { AppstoreOutlined, ClusterOutlined, RocketOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -20,6 +20,9 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/components/jenkins')) {
     return ['jenkins-management']
   }
+  if (route.path.startsWith('/releases')) {
+    return ['release-orders']
+  }
   if (route.path.startsWith('/applications')) {
     return ['my-applications']
   }
@@ -29,6 +32,9 @@ const activeMenuKey = computed(() => {
 const openMenuKeys = computed(() => {
   if (route.path.startsWith('/components/')) {
     return ['component-management']
+  }
+  if (route.path.startsWith('/releases')) {
+    return ['release-management']
   }
   if (route.path.startsWith('/applications') || route.path.startsWith('/platform-param-dicts')) {
     return ['application-management']
@@ -68,6 +74,10 @@ function goToPipelineParamManagement() {
   }
   void router.push('/components/pipeline-params')
 }
+
+function goToReleaseOrders() {
+  void router.push('/releases')
+}
 </script>
 
 <template>
@@ -100,6 +110,15 @@ function goToPipelineParamManagement() {
 
           <a-menu-item key="jenkins-management" @click="goToJenkinsManagement">Jenkins管理</a-menu-item>
           <a-menu-item key="pipeline-param-management" @click="goToPipelineParamManagement">管线参数</a-menu-item>
+        </a-sub-menu>
+
+        <a-sub-menu key="release-management">
+          <template #icon>
+            <RocketOutlined />
+          </template>
+          <template #title>发布管理</template>
+
+          <a-menu-item key="release-orders" @click="goToReleaseOrders">发布单</a-menu-item>
         </a-sub-menu>
       </a-menu>
     </a-layout-sider>

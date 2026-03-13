@@ -87,6 +87,7 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 				ExecutorParamName: paramName,
 				ParamKey:          "",
 				ParamType:         paramType,
+				SingleSelect:      snapshot.SingleSelect,
 				Required:          snapshot.Required,
 				DefaultValue:      strings.TrimSpace(snapshot.DefaultValue),
 				Description:       strings.TrimSpace(snapshot.Description),

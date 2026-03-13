@@ -95,6 +95,7 @@ export interface PipelineParamDef {
   executor_param_name: string
   param_key: string
   param_type: 'string' | 'choice' | 'bool' | 'number'
+  single_select: boolean
   required: boolean
   default_value: string
   description: string

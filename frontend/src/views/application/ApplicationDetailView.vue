@@ -79,6 +79,16 @@ function toBindings() {
   void router.push(`/applications/${applicationId.value}/pipeline-bindings`)
 }
 
+function toRelease() {
+  if (!applicationId.value) {
+    return
+  }
+  void router.push({
+    path: '/releases/new',
+    query: { application_id: applicationId.value },
+  })
+}
+
 onMounted(() => {
   void loadDetail()
 })
@@ -106,6 +116,7 @@ onMounted(() => {
           </template>
           管线绑定
         </a-button>
+        <a-button type="primary" ghost @click="toRelease">发起发布</a-button>
       </a-space>
     </div>
 

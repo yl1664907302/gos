@@ -102,7 +102,7 @@ const initialColumns: TableColumnsType<PipelineBinding> = [
   { title: '触发方式', dataIndex: 'trigger_mode', key: 'trigger_mode', width: 120 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 300, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 360, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
 
@@ -148,6 +148,16 @@ function toPipelineParams(record: PipelineBinding) {
   void router.push({
     path: '/components/pipeline-params',
     query,
+  })
+}
+
+function toCreateRelease(record: PipelineBinding) {
+  void router.push({
+    path: '/releases/new',
+    query: {
+      application_id: record.application_id,
+      binding_id: record.id,
+    },
   })
 }
 
@@ -524,6 +534,7 @@ onMounted(async () => {
               >
                 管线参数
               </a-button>
+              <a-button type="link" size="small" @click="toCreateRelease(record)">发布</a-button>
               <a-popconfirm
                 title="确认删除当前绑定吗？"
                 ok-text="删除"

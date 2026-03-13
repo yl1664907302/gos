@@ -16,6 +16,7 @@ func NewRouter(
 	pipelineHandler *PipelineHandler,
 	platformParamHandler *PlatformParamHandler,
 	pipelineParamHandler *PipelineParamHandler,
+	releaseOrderHandler *ReleaseOrderHandler,
 ) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
@@ -25,6 +26,7 @@ func NewRouter(
 	registerPipelineRoutes(router, pipelineHandler)
 	registerPlatformParamRoutes(router, platformParamHandler)
 	registerPipelineParamRoutes(router, pipelineParamHandler)
+	registerReleaseOrderRoutes(router, releaseOrderHandler)
 	return router
 }
 
@@ -42,6 +44,10 @@ func registerPlatformParamRoutes(router gin.IRouter, platformParamHandler *Platf
 
 func registerPipelineParamRoutes(router gin.IRouter, pipelineParamHandler *PipelineParamHandler) {
 	pipelineParamHandler.RegisterRoutes(router)
+}
+
+func registerReleaseOrderRoutes(router gin.IRouter, releaseOrderHandler *ReleaseOrderHandler) {
+	releaseOrderHandler.RegisterRoutes(router)
 }
 
 func registerSystemRoutes(router gin.IRouter) {

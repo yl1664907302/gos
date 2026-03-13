@@ -28,7 +28,7 @@ const initialColumns: TableColumnsType<Application> = [
   { title: '负责人', dataIndex: 'owner', key: 'owner', width: 120 },
   { title: '仓库地址', dataIndex: 'repo_url', key: 'repo_url', ellipsis: true },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 280, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 360, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 520, hitArea: 10 })
 
@@ -81,6 +81,13 @@ function toEdit(id: string) {
 
 function toBindings(id: string) {
   void router.push(`/applications/${id}/pipeline-bindings`)
+}
+
+function toRelease(id: string) {
+  void router.push({
+    path: '/releases/new',
+    query: { application_id: id },
+  })
 }
 
 async function handleDelete(id: string) {
@@ -198,6 +205,7 @@ onMounted(() => {
               <a-button type="link" size="small" @click="toDetail(record.id)">查看</a-button>
               <a-button type="link" size="small" @click="toEdit(record.id)">编辑</a-button>
               <a-button type="link" size="small" @click="toBindings(record.id)">管线绑定</a-button>
+              <a-button type="link" size="small" @click="toRelease(record.id)">发布</a-button>
               <a-popconfirm
                 title="确认删除当前应用吗？"
                 ok-text="删除"

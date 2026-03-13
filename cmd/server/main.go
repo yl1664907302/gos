@@ -58,6 +58,10 @@ func main() {
 	if err := bootstrap.InitSchema(pipelineParamRepo); err != nil {
 		log.Fatalf("init pipeline param schema: %v", err)
 	}
+	releaseRepo := sqlrepo.NewReleaseRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(releaseRepo); err != nil {
+		log.Fatalf("init release schema: %v", err)
+	}
 
 	jenkinsClient := jenkins.NewClient(jenkins.Config{
 		BaseURL:    cfg.Jenkins.BaseURL,
@@ -85,6 +89,9 @@ func main() {
 	pipelineParamHandler := httpapi.NewPipelineParamHandler(
 		usecase.NewPipelineParamDefManager(pipelineParamRepo, repo, pipelineRepo, platformParamRepo),
 		syncPipelineParamDefs,
+	)
+	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
+		usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, jenkinsClient),
 	)
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
 		pipelineResult, err := syncPipelines.Execute(ctx)
@@ -114,7 +121,7 @@ func main() {
 	})
 	defer syncTask.Stop()
 
-	router := httpapi.NewRouter(handler, pipelineHandler, platformParamHandler, pipelineParamHandler)
+	router := httpapi.NewRouter(handler, pipelineHandler, platformParamHandler, pipelineParamHandler, releaseOrderHandler)
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,

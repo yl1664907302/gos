@@ -1306,6 +1306,494 @@
                     }
                 }
             }
+        },
+        "/release-orders": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "List release orders",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Application ID",
+                        "name": "application_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Pipeline binding ID",
+                        "name": "binding_id",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Environment code",
+                        "name": "env_code",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Release status",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Trigger type",
+                        "name": "trigger_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Create release order",
+                "parameters": [
+                    {
+                        "description": "Create release order request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.CreateReleaseOrderRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Get release order by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/cancel": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Cancel release order",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/execute": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Execute release order",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/params": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "List release order params",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderParamListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/steps": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "List release order steps",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderStepListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/steps/{step_code}/finish": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Finish release order step",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Step code",
+                        "name": "step_code",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Finish step request",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.FinishReleaseOrderStepRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderStepActionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/release-orders/{id}/steps/{step_code}/start": {
+            "post": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Start release order step",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Step code",
+                        "name": "step_code",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Start step request",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.StartReleaseOrderStepRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderStepActionResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -1456,10 +1944,93 @@
                 }
             }
         },
+        "httpapi.CreateReleaseOrderParamRequest": {
+            "type": "object",
+            "properties": {
+                "executor_param_name": {
+                    "type": "string"
+                },
+                "param_key": {
+                    "type": "string"
+                },
+                "param_value": {
+                    "type": "string"
+                },
+                "value_source": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.CreateReleaseOrderRequest": {
+            "type": "object",
+            "properties": {
+                "application_id": {
+                    "type": "string"
+                },
+                "binding_id": {
+                    "type": "string"
+                },
+                "env_code": {
+                    "type": "string"
+                },
+                "git_ref": {
+                    "type": "string"
+                },
+                "image_tag": {
+                    "type": "string"
+                },
+                "params": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.CreateReleaseOrderParamRequest"
+                    }
+                },
+                "remark": {
+                    "type": "string"
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.CreateReleaseOrderStepRequest"
+                    }
+                },
+                "trigger_type": {
+                    "type": "string"
+                },
+                "triggered_by": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.CreateReleaseOrderStepRequest": {
+            "type": "object",
+            "properties": {
+                "sort_no": {
+                    "type": "integer"
+                },
+                "step_code": {
+                    "type": "string"
+                },
+                "step_name": {
+                    "type": "string"
+                }
+            }
+        },
         "httpapi.ErrorResponse": {
             "type": "object",
             "properties": {
                 "error": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.FinishReleaseOrderStepRequest": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string"
+                },
+                "status": {
                     "type": "string"
                 }
             }
@@ -1628,6 +2199,9 @@
                 "required": {
                     "type": "boolean"
                 },
+                "single_select": {
+                    "type": "boolean"
+                },
                 "sort_no": {
                     "type": "integer"
                 },
@@ -1745,6 +2319,197 @@
                     "type": "integer"
                 },
                 "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.ReleaseOrderDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/httpapi.ReleaseOrderResponse"
+                }
+            }
+        },
+        "httpapi.ReleaseOrderListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ReleaseOrderResponse"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "httpapi.ReleaseOrderParamListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ReleaseOrderParamResponse"
+                    }
+                }
+            }
+        },
+        "httpapi.ReleaseOrderParamResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "executor_param_name": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "param_key": {
+                    "type": "string"
+                },
+                "param_value": {
+                    "type": "string"
+                },
+                "release_order_id": {
+                    "type": "string"
+                },
+                "value_source": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.ReleaseOrderResponse": {
+            "type": "object",
+            "properties": {
+                "application_id": {
+                    "type": "string"
+                },
+                "application_name": {
+                    "type": "string"
+                },
+                "binding_id": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "env_code": {
+                    "type": "string"
+                },
+                "finished_at": {
+                    "type": "string"
+                },
+                "git_ref": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "image_tag": {
+                    "type": "string"
+                },
+                "order_no": {
+                    "type": "string"
+                },
+                "pipeline_id": {
+                    "type": "string"
+                },
+                "remark": {
+                    "type": "string"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "trigger_type": {
+                    "type": "string"
+                },
+                "triggered_by": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.ReleaseOrderStepActionResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "order": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderResponse"
+                        },
+                        "step": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderStepResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "httpapi.ReleaseOrderStepListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ReleaseOrderStepResponse"
+                    }
+                }
+            }
+        },
+        "httpapi.ReleaseOrderStepResponse": {
+            "type": "object",
+            "properties": {
+                "created_at": {
+                    "type": "string"
+                },
+                "finished_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "release_order_id": {
+                    "type": "string"
+                },
+                "sort_no": {
+                    "type": "integer"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "step_code": {
+                    "type": "string"
+                },
+                "step_name": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.StartReleaseOrderStepRequest": {
+            "type": "object",
+            "properties": {
+                "message": {
                     "type": "string"
                 }
             }
