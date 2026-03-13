@@ -1,11 +1,15 @@
 import { http } from './http'
 import type {
+  ApplicationPipelineParamListParams,
   CreatePipelineBindingPayload,
   PipelineBindingDataResponse,
   PipelineBindingListParams,
   PipelineBindingListResponse,
+  PipelineParamDefDataResponse,
+  PipelineParamDefListResponse,
   PipelineListParams,
   PipelineListResponse,
+  UpdatePipelineParamDefPayload,
   UpdatePipelineBindingPayload,
 } from '../types/pipeline'
 
@@ -51,4 +55,28 @@ export async function updatePipelineBinding(
 
 export async function deletePipelineBinding(id: string): Promise<void> {
   await http.delete(`/pipeline-bindings/${id}`)
+}
+
+export async function listApplicationPipelineParamDefs(
+  applicationID: string,
+  params: ApplicationPipelineParamListParams,
+): Promise<PipelineParamDefListResponse> {
+  const response = await http.get<PipelineParamDefListResponse>(
+    `/applications/${applicationID}/pipeline-param-defs`,
+    { params },
+  )
+  return response.data
+}
+
+export async function getPipelineParamDefByID(id: string): Promise<PipelineParamDefDataResponse> {
+  const response = await http.get<PipelineParamDefDataResponse>(`/pipeline-param-defs/${id}`)
+  return response.data
+}
+
+export async function updatePipelineParamDef(
+  id: string,
+  payload: UpdatePipelineParamDefPayload,
+): Promise<PipelineParamDefDataResponse> {
+  const response = await http.put<PipelineParamDefDataResponse>(`/pipeline-param-defs/${id}`, payload)
+  return response.data
 }

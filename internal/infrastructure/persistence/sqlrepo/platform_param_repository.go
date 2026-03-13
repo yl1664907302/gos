@@ -1,0 +1,286 @@
+package sqlrepo
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	domain "gos/internal/domain/platformparam"
+)
+
+type PlatformParamRepository struct {
+	db       *sql.DB
+	dbDriver string
+}
+
+func NewPlatformParamRepository(db *sql.DB, dbDriver string) *PlatformParamRepository {
+	return &PlatformParamRepository{
+		db:       db,
+		dbDriver: strings.ToLower(strings.TrimSpace(dbDriver)),
+	}
+}
+
+func (r *PlatformParamRepository) InitSchema(ctx context.Context) error {
+	var schema string
+	switch r.dbDriver {
+	case "mysql":
+		schema = `
+CREATE TABLE IF NOT EXISTS platform_param_dict (
+	id VARCHAR(64) PRIMARY KEY,
+	param_key VARCHAR(100) NOT NULL,
+	name VARCHAR(100) NOT NULL,
+	description VARCHAR(500) NOT NULL,
+	param_type VARCHAR(50) NOT NULL,
+	required TINYINT(1) NOT NULL,
+	builtin TINYINT(1) NOT NULL,
+	status TINYINT(1) NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uq_platform_param_key (param_key),
+	KEY idx_platform_param_status_updated_at (status, updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`
+	case "sqlite":
+		schema = `
+CREATE TABLE IF NOT EXISTS platform_param_dict (
+	id TEXT PRIMARY KEY,
+	param_key TEXT NOT NULL UNIQUE,
+	name TEXT NOT NULL,
+	description TEXT NOT NULL,
+	param_type TEXT NOT NULL,
+	required INTEGER NOT NULL,
+	builtin INTEGER NOT NULL,
+	status INTEGER NOT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+
+	if _, err := r.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if r.dbDriver == "sqlite" {
+		_, err := r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_platform_param_status_updated_at ON platform_param_dict (status, updated_at);`)
+		return err
+	}
+	return nil
+}
+
+func (r *PlatformParamRepository) Create(ctx context.Context, item domain.PlatformParamDict) error {
+	const q = `
+INSERT INTO platform_param_dict (
+	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		item.ID,
+		item.ParamKey,
+		item.Name,
+		item.Description,
+		string(item.ParamType),
+		boolToInt(item.Required),
+		boolToInt(item.Builtin),
+		int(item.Status),
+		item.CreatedAt.UTC().UnixNano(),
+		item.UpdatedAt.UTC().UnixNano(),
+	)
+	if err != nil {
+		if isDuplicateKeyError(r.dbDriver, err) {
+			return domain.ErrParamKeyDuplicated
+		}
+		return err
+	}
+	return nil
+}
+
+func (r *PlatformParamRepository) GetByID(ctx context.Context, id string) (domain.PlatformParamDict, error) {
+	const q = `
+SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+FROM platform_param_dict
+WHERE id = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, id)
+	item, err := scanPlatformParam(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.PlatformParamDict{}, domain.ErrNotFound
+		}
+		return domain.PlatformParamDict{}, err
+	}
+	return item, nil
+}
+
+func (r *PlatformParamRepository) GetByParamKey(ctx context.Context, paramKey string) (domain.PlatformParamDict, error) {
+	const q = `
+SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+FROM platform_param_dict
+WHERE param_key = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, paramKey)
+	item, err := scanPlatformParam(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.PlatformParamDict{}, domain.ErrNotFound
+		}
+		return domain.PlatformParamDict{}, err
+	}
+	return item, nil
+}
+
+func (r *PlatformParamRepository) List(ctx context.Context, filter domain.ListFilter) ([]domain.PlatformParamDict, int64, error) {
+	where := make([]string, 0, 4)
+	args := make([]any, 0, 4)
+
+	if filter.ParamKey != "" {
+		where = append(where, "param_key LIKE ?")
+		args = append(args, "%"+filter.ParamKey+"%")
+	}
+	if filter.Name != "" {
+		where = append(where, "name LIKE ?")
+		args = append(args, "%"+filter.Name+"%")
+	}
+	if filter.Status != nil {
+		where = append(where, "status = ?")
+		args = append(args, int(*filter.Status))
+	}
+	if filter.Builtin != nil {
+		where = append(where, "builtin = ?")
+		args = append(args, boolToInt(*filter.Builtin))
+	}
+
+	countQuery := "SELECT COUNT(1) FROM platform_param_dict"
+	if len(where) > 0 {
+		countQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int64
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	listQuery := `
+SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+FROM platform_param_dict`
+	if len(where) > 0 {
+		listQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	listQuery += " ORDER BY updated_at DESC LIMIT ? OFFSET ?;"
+
+	offset := (filter.Page - 1) * filter.PageSize
+	rows, err := r.db.QueryContext(ctx, listQuery, append(args, filter.PageSize, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.PlatformParamDict, 0)
+	for rows.Next() {
+		item, scanErr := scanPlatformParam(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (r *PlatformParamRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.PlatformParamDict, error) {
+	const q = `
+UPDATE platform_param_dict
+SET param_key = ?, name = ?, description = ?, param_type = ?, required = ?, builtin = ?, status = ?, updated_at = ?
+WHERE id = ?;`
+
+	res, err := r.db.ExecContext(
+		ctx,
+		q,
+		input.ParamKey,
+		input.Name,
+		input.Description,
+		string(input.ParamType),
+		boolToInt(input.Required),
+		boolToInt(input.Builtin),
+		int(input.Status),
+		updatedAt.UTC().UnixNano(),
+		id,
+	)
+	if err != nil {
+		if isDuplicateKeyError(r.dbDriver, err) {
+			return domain.PlatformParamDict{}, domain.ErrParamKeyDuplicated
+		}
+		return domain.PlatformParamDict{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.PlatformParamDict{}, err
+	}
+	if affected == 0 {
+		return domain.PlatformParamDict{}, domain.ErrNotFound
+	}
+	return r.GetByID(ctx, id)
+}
+
+func (r *PlatformParamRepository) Delete(ctx context.Context, id string) error {
+	const q = `DELETE FROM platform_param_dict WHERE id = ?;`
+	res, err := r.db.ExecContext(ctx, q, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return domain.ErrNotFound
+	}
+	return nil
+}
+
+func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
+	var (
+		item      domain.PlatformParamDict
+		paramType string
+		required  int
+		builtin   int
+		status    int
+		createdAt int64
+		updatedAt int64
+	)
+
+	if err := s.Scan(
+		&item.ID,
+		&item.ParamKey,
+		&item.Name,
+		&item.Description,
+		&paramType,
+		&required,
+		&builtin,
+		&status,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.PlatformParamDict{}, err
+	}
+
+	item.ParamType = domain.ParamType(paramType)
+	item.Required = required > 0
+	item.Builtin = builtin > 0
+	item.Status = domain.Status(status)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}

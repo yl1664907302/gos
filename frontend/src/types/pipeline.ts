@@ -2,6 +2,7 @@ export type PipelineStatus = 'active' | 'inactive'
 export type PipelineProvider = 'jenkins' | 'argocd'
 export type BindingType = 'ci' | 'cd'
 export type TriggerMode = 'manual' | 'webhook'
+export type ExecutorType = 'jenkins' | 'argocd' | 'custom'
 
 export interface Pipeline {
   id: string
@@ -85,4 +86,47 @@ export interface UpdatePipelineBindingPayload {
   external_ref?: string
   trigger_mode?: TriggerMode
   status?: PipelineStatus
+}
+
+export interface PipelineParamDef {
+  id: string
+  pipeline_id: string
+  executor_type: ExecutorType
+  executor_param_name: string
+  param_key: string
+  param_type: 'string' | 'choice' | 'bool' | 'number'
+  required: boolean
+  default_value: string
+  description: string
+  visible: boolean
+  editable: boolean
+  source_from: string
+  raw_meta: string
+  sort_no: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ApplicationPipelineParamListParams {
+  binding_type?: BindingType
+  visible?: boolean
+  editable?: boolean
+  param_key?: string
+  page?: number
+  page_size?: number
+}
+
+export interface PipelineParamDefListResponse {
+  data: PipelineParamDef[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface PipelineParamDefDataResponse {
+  data: PipelineParamDef
+}
+
+export interface UpdatePipelineParamDefPayload {
+  param_key: string
 }

@@ -11,13 +11,20 @@ import (
 	_ "gos/docs"
 )
 
-func NewRouter(applicationHandler *ApplicationHandler, pipelineHandler *PipelineHandler) *gin.Engine {
+func NewRouter(
+	applicationHandler *ApplicationHandler,
+	pipelineHandler *PipelineHandler,
+	platformParamHandler *PlatformParamHandler,
+	pipelineParamHandler *PipelineParamHandler,
+) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 	router.Use(cors())
 	registerSystemRoutes(router)
 	registerApplicationRoutes(router, applicationHandler)
 	registerPipelineRoutes(router, pipelineHandler)
+	registerPlatformParamRoutes(router, platformParamHandler)
+	registerPipelineParamRoutes(router, pipelineParamHandler)
 	return router
 }
 
@@ -27,6 +34,14 @@ func registerApplicationRoutes(router gin.IRouter, applicationHandler *Applicati
 
 func registerPipelineRoutes(router gin.IRouter, pipelineHandler *PipelineHandler) {
 	pipelineHandler.RegisterRoutes(router)
+}
+
+func registerPlatformParamRoutes(router gin.IRouter, platformParamHandler *PlatformParamHandler) {
+	platformParamHandler.RegisterRoutes(router)
+}
+
+func registerPipelineParamRoutes(router gin.IRouter, pipelineParamHandler *PipelineParamHandler) {
+	pipelineParamHandler.RegisterRoutes(router)
 }
 
 func registerSystemRoutes(router gin.IRouter) {

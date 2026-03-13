@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ArrowLeftOutlined, ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, ExclamationCircleOutlined, LinkOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApplicationByID } from '../../api/application'
 import {
@@ -56,12 +56,6 @@ const formVisible = ref(false)
 const formMode = ref<FormMode>('create')
 const formSubmitting = ref(false)
 const formRef = ref<FormInstance>()
-const formModalWidth = ref(760)
-const minFormModalWidth = 620
-const maxFormModalWidth = 1200
-const isResizingForm = ref(false)
-const resizeStartX = ref(0)
-const resizeStartWidth = ref(760)
 
 const jenkinsPipelineOptions = ref<Array<{ label: string; value: string }>>([])
 const loadingJenkinsPipelines = ref(false)
@@ -108,7 +102,7 @@ const initialColumns: TableColumnsType<PipelineBinding> = [
   { title: '触发方式', dataIndex: 'trigger_mode', key: 'trigger_mode', width: 120 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 220, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 300, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
 
@@ -128,6 +122,33 @@ function statusColor(status: PipelineStatus) {
 
 function goBack() {
   void router.push('/applications')
+}
+
+function toPipelineParams(record: PipelineBinding) {
+  if (record.provider !== 'jenkins') {
+    message.info('仅 Jenkins 类型绑定支持查看管线参数')
+    return
+  }
+
+  const query: Record<string, string> = {
+    application_id: record.application_id,
+    binding_type: record.binding_type,
+    provider: record.provider,
+  }
+  if (record.id) {
+    query.pipeline_binding_id = record.id
+  }
+  if (record.pipeline_id) {
+    query.pipeline_id = record.pipeline_id
+  }
+  if (record.name) {
+    query.pipeline_name = record.name
+  }
+
+  void router.push({
+    path: '/components/pipeline-params',
+    query,
+  })
 }
 
 async function loadApplication() {
@@ -240,40 +261,6 @@ function resetFormState() {
   formState.status = 'active'
 }
 
-function clampFormModalWidth(width: number) {
-  const viewportMax = Math.max(minFormModalWidth, window.innerWidth - 48)
-  return Math.min(Math.max(width, minFormModalWidth), Math.min(maxFormModalWidth, viewportMax))
-}
-
-function stopFormResize() {
-  if (!isResizingForm.value) {
-    return
-  }
-  isResizingForm.value = false
-  document.body.style.cursor = ''
-  document.body.style.userSelect = ''
-  window.removeEventListener('mousemove', onFormResizing)
-  window.removeEventListener('mouseup', stopFormResize)
-}
-
-function onFormResizing(event: MouseEvent) {
-  if (!isResizingForm.value) {
-    return
-  }
-  const delta = event.clientX - resizeStartX.value
-  formModalWidth.value = clampFormModalWidth(resizeStartWidth.value + delta)
-}
-
-function startFormResize(event: MouseEvent) {
-  isResizingForm.value = true
-  resizeStartX.value = event.clientX
-  resizeStartWidth.value = formModalWidth.value
-  document.body.style.cursor = 'ew-resize'
-  document.body.style.userSelect = 'none'
-  window.addEventListener('mousemove', onFormResizing)
-  window.addEventListener('mouseup', stopFormResize)
-}
-
 function openCreateModal() {
   const hasCI = existingBindingTypes.value.has('ci')
   const hasCD = existingBindingTypes.value.has('cd')
@@ -284,7 +271,6 @@ function openCreateModal() {
 
   formMode.value = 'create'
   resetFormState()
-  formModalWidth.value = clampFormModalWidth(formModalWidth.value)
   if (hasCI && !hasCD) {
     formState.binding_type = 'cd'
     formState.provider = 'argocd'
@@ -296,7 +282,6 @@ function openCreateModal() {
 async function openEditModal(record: PipelineBinding) {
   formMode.value = 'edit'
   formSubmitting.value = false
-  formModalWidth.value = clampFormModalWidth(formModalWidth.value)
   try {
     const response = await getPipelineBindingByID(record.id)
     const item = response.data
@@ -319,7 +304,6 @@ async function openEditModal(record: PipelineBinding) {
 }
 
 function closeFormModal() {
-  stopFormResize()
   formVisible.value = false
   resetFormState()
 }
@@ -440,10 +424,6 @@ onMounted(async () => {
   await loadApplication()
   await loadBindings()
 })
-
-onBeforeUnmount(() => {
-  stopFormResize()
-})
 </script>
 
 <template>
@@ -523,7 +503,7 @@ onBeforeUnmount(() => {
         :data-source="dataSource"
         :loading="loading"
         :pagination="false"
-        :scroll="{ x: 1560 }"
+        :scroll="{ x: 1700 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
@@ -536,6 +516,14 @@ onBeforeUnmount(() => {
             <a-space>
               <a-button type="link" size="small" @click="openDetailDrawer(record)">查看</a-button>
               <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+              <a-button
+                type="link"
+                size="small"
+                :disabled="record.provider !== 'jenkins'"
+                @click="toPipelineParams(record)"
+              >
+                管线参数
+              </a-button>
               <a-popconfirm
                 title="确认删除当前绑定吗？"
                 ok-text="删除"
@@ -568,21 +556,14 @@ onBeforeUnmount(() => {
 
     <a-modal
       :open="formVisible"
-      :width="formModalWidth"
-      wrap-class-name="pipeline-binding-form-modal"
+      :width="760"
       :confirm-loading="formSubmitting"
+      :title="formMode === 'create' ? '新增绑定' : '编辑绑定'"
       ok-text="保存"
       cancel-text="取消"
       @ok="submitForm"
       @cancel="closeFormModal"
     >
-      <template #title>
-        <div class="modal-title-row">
-          <span>{{ formMode === 'create' ? '新增绑定' : '编辑绑定' }}</span>
-          <span class="title-resize-handle" @mousedown.prevent.stop="startFormResize">↔ 调宽</span>
-        </div>
-      </template>
-
       <a-form ref="formRef" :model="formState" layout="vertical">
         <a-form-item
           label="绑定类型"
@@ -657,8 +638,6 @@ onBeforeUnmount(() => {
           />
         </a-form-item>
       </a-form>
-      <div class="form-resize-tip">拖拽右侧边框可调节表单宽度</div>
-      <div class="form-resize-handle" @mousedown.prevent="startFormResize" />
     </a-modal>
 
     <a-drawer :open="detailVisible" title="绑定详情" width="640" @close="closeDetailDrawer">
@@ -670,6 +649,19 @@ onBeforeUnmount(() => {
         <a-descriptions-item label="应用ID">{{ detailData.application_id }}</a-descriptions-item>
         <a-descriptions-item label="类型">{{ detailData.binding_type }}</a-descriptions-item>
         <a-descriptions-item label="提供方">{{ detailData.provider }}</a-descriptions-item>
+        <a-descriptions-item label="管线参数">
+          <a-button
+            type="link"
+            class="detail-link-button"
+            :disabled="detailData.provider !== 'jenkins'"
+            @click="toPipelineParams(detailData)"
+          >
+            <template #icon>
+              <LinkOutlined />
+            </template>
+            查看管线参数
+          </a-button>
+        </a-descriptions-item>
         <a-descriptions-item label="pipeline_id">{{ detailData.pipeline_id || '-' }}</a-descriptions-item>
         <a-descriptions-item label="external_ref">{{ detailData.external_ref || '-' }}</a-descriptions-item>
         <a-descriptions-item label="触发方式">{{ detailData.trigger_mode }}</a-descriptions-item>
@@ -713,52 +705,14 @@ onBeforeUnmount(() => {
   color: #ff4d4f;
 }
 
+.detail-link-button {
+  padding-inline: 0;
+}
+
 .pagination-area {
   margin-top: var(--space-6);
   display: flex;
   justify-content: flex-end;
-}
-
-.form-resize-tip {
-  margin-top: 4px;
-  color: #8c8c8c;
-  font-size: 12px;
-}
-
-.modal-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.title-resize-handle {
-  color: #1677ff;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: ew-resize;
-  user-select: none;
-}
-
-.form-resize-handle {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 10px;
-  height: 100%;
-  cursor: ew-resize;
-  z-index: 5;
-  background: linear-gradient(
-    to right,
-    rgba(22, 119, 255, 0) 0%,
-    rgba(22, 119, 255, 0.1) 100%
-  );
-}
-
-:deep(.pipeline-binding-form-modal .ant-modal-body) {
-  position: relative;
-  overflow: visible;
-  padding-right: 16px;
 }
 
 @media (max-width: 1024px) {

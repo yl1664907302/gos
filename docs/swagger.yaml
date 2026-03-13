@@ -79,6 +79,23 @@ definitions:
       trigger_mode:
         type: string
     type: object
+  httpapi.CreatePlatformParamDictRequest:
+    properties:
+      builtin:
+        type: boolean
+      description:
+        type: string
+      name:
+        type: string
+      param_key:
+        type: string
+      param_type:
+        type: string
+      required:
+        type: boolean
+      status:
+        type: integer
+    type: object
   httpapi.ErrorResponse:
     properties:
       error:
@@ -147,6 +164,59 @@ definitions:
       total:
         type: integer
     type: object
+  httpapi.PipelineParamDefDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.PipelineParamDefResponse'
+    type: object
+  httpapi.PipelineParamDefListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.PipelineParamDefResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.PipelineParamDefResponse:
+    properties:
+      created_at:
+        type: string
+      default_value:
+        type: string
+      description:
+        type: string
+      editable:
+        type: boolean
+      executor_param_name:
+        type: string
+      executor_type:
+        type: string
+      id:
+        type: string
+      param_key:
+        type: string
+      param_type:
+        type: string
+      pipeline_id:
+        type: string
+      raw_meta:
+        type: string
+      required:
+        type: boolean
+      sort_no:
+        type: integer
+      source_from:
+        type: string
+      updated_at:
+        type: string
+      visible:
+        type: boolean
+    type: object
   httpapi.PipelineResponse:
     properties:
       created_at:
@@ -175,6 +245,52 @@ definitions:
         type: string
       updated_at:
         type: string
+    type: object
+  httpapi.PlatformParamDictDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.PlatformParamDictResponse'
+    type: object
+  httpapi.PlatformParamDictListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.PlatformParamDictResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.PlatformParamDictResponse:
+    properties:
+      builtin:
+        type: boolean
+      created_at:
+        type: string
+      description:
+        type: string
+      id:
+        type: string
+      name:
+        type: string
+      param_key:
+        type: string
+      param_type:
+        type: string
+      required:
+        type: boolean
+      status:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  httpapi.SyncPipelineParamDefsResponse:
+    properties:
+      data:
+        $ref: '#/definitions/usecase.SyncPipelineParamDefsOutput'
     type: object
   httpapi.SyncPipelinesResponse:
     properties:
@@ -215,6 +331,28 @@ definitions:
       trigger_mode:
         type: string
     type: object
+  httpapi.UpdatePipelineParamDefRequest:
+    properties:
+      param_key:
+        type: string
+    type: object
+  httpapi.UpdatePlatformParamDictRequest:
+    properties:
+      builtin:
+        type: boolean
+      description:
+        type: string
+      name:
+        type: string
+      param_key:
+        type: string
+      param_type:
+        type: string
+      required:
+        type: boolean
+      status:
+        type: integer
+    type: object
   httpapi.VerifyPipelineResponse:
     properties:
       data:
@@ -228,6 +366,17 @@ definitions:
           verified:
             type: boolean
         type: object
+    type: object
+  usecase.SyncPipelineParamDefsOutput:
+    properties:
+      created:
+        type: integer
+      skipped:
+        type: integer
+      total:
+        type: integer
+      updated:
+        type: integer
     type: object
   usecase.SyncPipelinesOutput:
     properties:
@@ -510,6 +659,76 @@ paths:
       summary: Create pipeline binding for application
       tags:
       - pipeline-bindings
+  /applications/{id}/pipeline-param-defs:
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Binding type, default ci
+        in: query
+        name: binding_type
+        type: string
+      - description: Visible flag
+        in: query
+        name: visible
+        type: boolean
+      - description: Editable flag
+        in: query
+        name: editable
+        type: boolean
+      - description: Mapped platform param key
+        in: query
+        name: param_key
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineParamDefListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List bound Jenkins pipeline param definitions by application
+      tags:
+      - pipeline-param-defs
+  /jenkins/pipeline-param-defs/sync:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.SyncPipelineParamDefsResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Sync pipeline param definitions from Jenkins
+      tags:
+      - pipeline-param-defs
   /jenkins/pipelines/sync:
     post:
       produces:
@@ -622,6 +841,73 @@ paths:
       summary: Update pipeline binding
       tags:
       - pipeline-bindings
+  /pipeline-param-defs/{id}:
+    get:
+      parameters:
+      - description: Pipeline param definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineParamDefDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get pipeline param definition by ID
+      tags:
+      - pipeline-param-defs
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Pipeline param definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Update pipeline param definition request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdatePipelineParamDefRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineParamDefDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update pipeline param definition mapping
+      tags:
+      - pipeline-param-defs
   /pipelines:
     get:
       parameters:
@@ -693,6 +979,60 @@ paths:
       summary: Get pipeline by ID
       tags:
       - pipelines
+  /pipelines/{id}/param-defs:
+    get:
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Executor type
+        in: query
+        name: executor_type
+        type: string
+      - description: Visible flag
+        in: query
+        name: visible
+        type: boolean
+      - description: Editable flag
+        in: query
+        name: editable
+        type: boolean
+      - description: Mapped platform param key
+        in: query
+        name: param_key
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineParamDefListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List pipeline param definitions
+      tags:
+      - pipeline-param-defs
   /pipelines/{id}/verify:
     post:
       parameters:
@@ -723,6 +1063,187 @@ paths:
       summary: Verify Jenkins pipeline availability
       tags:
       - pipelines
+  /platform-param-dicts:
+    get:
+      parameters:
+      - description: Platform param key
+        in: query
+        name: param_key
+        type: string
+      - description: Platform param name
+        in: query
+        name: name
+        type: string
+      - description: 'Status: 1 enabled, 0 disabled'
+        in: query
+        name: status
+        type: integer
+      - description: Builtin flag
+        in: query
+        name: builtin
+        type: boolean
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PlatformParamDictListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List platform param dicts
+      tags:
+      - platform-param-dicts
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: Create platform param dict request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.CreatePlatformParamDictRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/httpapi.PlatformParamDictDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Create platform param dict
+      tags:
+      - platform-param-dicts
+  /platform-param-dicts/{id}:
+    delete:
+      parameters:
+      - description: Platform param dict ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: No Content
+          schema:
+            type: string
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Delete platform param dict
+      tags:
+      - platform-param-dicts
+    get:
+      parameters:
+      - description: Platform param dict ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PlatformParamDictDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get platform param dict by ID
+      tags:
+      - platform-param-dicts
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Platform param dict ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Update platform param dict request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdatePlatformParamDictRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PlatformParamDictDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update platform param dict
+      tags:
+      - platform-param-dicts
 schemes:
 - http
 - https

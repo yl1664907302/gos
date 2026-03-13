@@ -11,6 +11,12 @@ const activeMenuKey = computed(() => {
   if (route.path.includes('/pipeline-bindings')) {
     return ['pipeline-bindings']
   }
+  if (route.path.startsWith('/platform-param-dicts')) {
+    return ['platform-param-dicts']
+  }
+  if (route.path.startsWith('/components/pipeline-params')) {
+    return ['pipeline-param-management']
+  }
   if (route.path.startsWith('/components/jenkins')) {
     return ['jenkins-management']
   }
@@ -21,10 +27,10 @@ const activeMenuKey = computed(() => {
 })
 
 const openMenuKeys = computed(() => {
-  if (route.path.startsWith('/components/jenkins')) {
+  if (route.path.startsWith('/components/')) {
     return ['component-management']
   }
-  if (route.path.startsWith('/applications')) {
+  if (route.path.startsWith('/applications') || route.path.startsWith('/platform-param-dicts')) {
     return ['application-management']
   }
   return []
@@ -37,7 +43,7 @@ function goToApplications() {
 }
 
 function goToPipelineBindings() {
-  const appID = String(route.params.id || '').trim()
+  const appID = String(route.params.id || route.query.application_id || '').trim()
   if (appID) {
     void router.push(`/applications/${appID}/pipeline-bindings`)
     return
@@ -46,8 +52,21 @@ function goToPipelineBindings() {
   void router.push('/applications')
 }
 
+function goToPlatformParamDicts() {
+  void router.push('/platform-param-dicts')
+}
+
 function goToJenkinsManagement() {
   void router.push('/components/jenkins')
+}
+
+function goToPipelineParamManagement() {
+  const appID = String(route.params.id || route.query.application_id || '').trim()
+  if (appID) {
+    void router.push(`/components/pipeline-params?application_id=${encodeURIComponent(appID)}&binding_type=ci`)
+    return
+  }
+  void router.push('/components/pipeline-params')
 }
 </script>
 
@@ -70,6 +89,7 @@ function goToJenkinsManagement() {
 
           <a-menu-item key="my-applications" @click="goToApplications">我的应用</a-menu-item>
           <a-menu-item key="pipeline-bindings" @click="goToPipelineBindings">管线绑定</a-menu-item>
+          <a-menu-item key="platform-param-dicts" @click="goToPlatformParamDicts">标准字库</a-menu-item>
         </a-sub-menu>
 
         <a-sub-menu key="component-management">
@@ -79,6 +99,7 @@ function goToJenkinsManagement() {
           <template #title>组件管理</template>
 
           <a-menu-item key="jenkins-management" @click="goToJenkinsManagement">Jenkins管理</a-menu-item>
+          <a-menu-item key="pipeline-param-management" @click="goToPipelineParamManagement">管线参数</a-menu-item>
         </a-sub-menu>
       </a-menu>
     </a-layout-sider>

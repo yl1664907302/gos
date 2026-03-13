@@ -5,7 +5,9 @@ import ApplicationDetailView from '../views/application/ApplicationDetailView.vu
 import ApplicationEditView from '../views/application/ApplicationEditView.vue'
 import ApplicationListView from '../views/application/ApplicationListView.vue'
 import ApplicationPipelineBindingView from '../views/application/ApplicationPipelineBindingView.vue'
+import PlatformParamDictView from '../views/application/PlatformParamDictView.vue'
 import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
+import PipelineParamManagementView from '../views/component/PipelineParamManagementView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -49,10 +51,22 @@ export const router = createRouter({
           meta: { title: '管线绑定' },
         },
         {
+          path: 'platform-param-dicts',
+          name: 'platform-param-dicts',
+          component: PlatformParamDictView,
+          meta: { title: '标准字库' },
+        },
+        {
           path: 'components/jenkins',
           name: 'jenkins-management',
           component: JenkinsManagementView,
           meta: { title: 'Jenkins管理' },
+        },
+        {
+          path: 'components/pipeline-params',
+          name: 'pipeline-param-management',
+          component: PipelineParamManagementView,
+          meta: { title: '管线参数' },
         },
       ],
     },

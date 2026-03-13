@@ -49,6 +49,16 @@ func main() {
 		log.Fatalf("init pipeline schema: %v", err)
 	}
 
+	platformParamRepo := sqlrepo.NewPlatformParamRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(platformParamRepo); err != nil {
+		log.Fatalf("init platform param schema: %v", err)
+	}
+
+	pipelineParamRepo := sqlrepo.NewPipelineParamRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(pipelineParamRepo); err != nil {
+		log.Fatalf("init pipeline param schema: %v", err)
+	}
+
 	jenkinsClient := jenkins.NewClient(jenkins.Config{
 		BaseURL:    cfg.Jenkins.BaseURL,
 		Username:   cfg.Jenkins.Username,
@@ -56,6 +66,7 @@ func main() {
 		TimeoutSec: cfg.Jenkins.TimeoutSec,
 	})
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
+	syncPipelineParamDefs := usecase.NewSyncPipelineParamDefs(pipelineParamRepo, jenkinsClient)
 
 	handler := httpapi.NewApplicationHandler(
 		usecase.NewCreateApplication(repo),
@@ -68,23 +79,42 @@ func main() {
 		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
 		usecase.NewPipelineBindingManager(pipelineRepo, repo),
 	)
+	platformParamHandler := httpapi.NewPlatformParamHandler(
+		usecase.NewPlatformParamDictManager(platformParamRepo, pipelineParamRepo),
+	)
+	pipelineParamHandler := httpapi.NewPipelineParamHandler(
+		usecase.NewPipelineParamDefManager(pipelineParamRepo, repo, pipelineRepo, platformParamRepo),
+		syncPipelineParamDefs,
+	)
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
-		result, err := syncPipelines.Execute(ctx)
+		pipelineResult, err := syncPipelines.Execute(ctx)
 		if err != nil {
 			return err
 		}
 		log.Printf(
 			"jenkins auto sync completed: total=%d created=%d updated=%d skipped=%d",
-			result.Total,
-			result.Created,
-			result.Updated,
-			result.Skipped,
+			pipelineResult.Total,
+			pipelineResult.Created,
+			pipelineResult.Updated,
+			pipelineResult.Skipped,
+		)
+
+		paramResult, err := syncPipelineParamDefs.Execute(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf(
+			"jenkins param auto sync completed: total=%d created=%d updated=%d skipped=%d",
+			paramResult.Total,
+			paramResult.Created,
+			paramResult.Updated,
+			paramResult.Skipped,
 		)
 		return nil
 	})
 	defer syncTask.Stop()
 
-	router := httpapi.NewRouter(handler, pipelineHandler)
+	router := httpapi.NewRouter(handler, pipelineHandler, platformParamHandler, pipelineParamHandler)
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
