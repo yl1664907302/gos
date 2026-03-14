@@ -1,13 +1,28 @@
 <script setup lang="ts">
-import { AppstoreOutlined, ClusterOutlined, RocketOutlined } from '@ant-design/icons-vue'
+import {
+  AppstoreOutlined,
+  ClusterOutlined,
+  LogoutOutlined,
+  RocketOutlined,
+  SettingOutlined,
+  UserOutlined,
+} from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 
 const activeMenuKey = computed(() => {
+  if (route.path.startsWith('/system/users')) {
+    return ['system-users']
+  }
+  if (route.path.startsWith('/system/permissions')) {
+    return ['system-permissions']
+  }
   if (route.path.includes('/pipeline-bindings')) {
     return ['pipeline-bindings']
   }
@@ -23,6 +38,9 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/releases')) {
     return ['release-orders']
   }
+  if (route.path.startsWith('/release-templates')) {
+    return ['release-templates']
+  }
   if (route.path.startsWith('/applications')) {
     return ['my-applications']
   }
@@ -36,13 +54,51 @@ const openMenuKeys = computed(() => {
   if (route.path.startsWith('/releases')) {
     return ['release-management']
   }
+  if (route.path.startsWith('/release-templates')) {
+    return ['release-management']
+  }
   if (route.path.startsWith('/applications') || route.path.startsWith('/platform-param-dicts')) {
     return ['application-management']
+  }
+  if (route.path.startsWith('/system/')) {
+    return ['system-management']
   }
   return []
 })
 
 const pageTitle = computed(() => String(route.meta.title || '应用管理'))
+const displayName = computed(() => {
+  const name = String(authStore.profile?.display_name || '').trim()
+  if (name) {
+    return name
+  }
+  return String(authStore.profile?.username || '')
+})
+const roleText = computed(() => (authStore.isAdmin ? '管理员' : '普通用户'))
+
+const canViewApplications = computed(() => authStore.hasPermission('application.view'))
+const canManageApplications = computed(() => authStore.hasPermission('application.manage'))
+const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
+const canManagePlatformParam = computed(() => authStore.hasPermission('platform_param.manage'))
+const canViewComponent = computed(() => authStore.hasPermission('component.view'))
+const canManagePipelineParam = computed(() => authStore.hasPermission('pipeline_param.manage'))
+const canViewRelease = computed(() => authStore.hasPermission('release.view'))
+const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
+const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
+const canManagePermission = computed(() => authStore.hasPermission('system.permission.manage'))
+
+const showApplicationMenu = computed(
+  () =>
+    canViewApplications.value ||
+    canManageApplications.value ||
+    canViewPipeline.value ||
+    canManagePlatformParam.value,
+)
+const showComponentMenu = computed(() => canViewComponent.value || canManagePipelineParam.value)
+const showReleaseMenu = computed(
+  () => canViewRelease.value || authStore.hasPermission('release.create') || canManageReleaseTemplate.value,
+)
+const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value)
 
 function goToApplications() {
   void router.push('/applications')
@@ -78,6 +134,24 @@ function goToPipelineParamManagement() {
 function goToReleaseOrders() {
   void router.push('/releases')
 }
+
+function goToReleaseTemplates() {
+  void router.push('/release-templates')
+}
+
+function goToSystemUsers() {
+  void router.push('/system/users')
+}
+
+function goToSystemPermissions() {
+  void router.push('/system/permissions')
+}
+
+async function handleLogout() {
+  await authStore.logout()
+  message.success('已退出登录')
+  void router.replace('/login')
+}
 </script>
 
 <template>
@@ -91,34 +165,61 @@ function goToReleaseOrders() {
         :open-keys="openMenuKeys"
         class="sider-menu"
       >
-        <a-sub-menu key="application-management">
+        <a-sub-menu v-if="showApplicationMenu" key="application-management">
           <template #icon>
             <AppstoreOutlined />
           </template>
           <template #title>应用管理</template>
 
-          <a-menu-item key="my-applications" @click="goToApplications">我的应用</a-menu-item>
-          <a-menu-item key="pipeline-bindings" @click="goToPipelineBindings">管线绑定</a-menu-item>
-          <a-menu-item key="platform-param-dicts" @click="goToPlatformParamDicts">标准字库</a-menu-item>
+          <a-menu-item v-if="canViewApplications || canManageApplications" key="my-applications" @click="goToApplications">
+            我的应用
+          </a-menu-item>
+          <a-menu-item v-if="canViewPipeline" key="pipeline-bindings" @click="goToPipelineBindings">
+            管线绑定
+          </a-menu-item>
+          <a-menu-item v-if="canManagePlatformParam" key="platform-param-dicts" @click="goToPlatformParamDicts">
+            标准字库
+          </a-menu-item>
         </a-sub-menu>
 
-        <a-sub-menu key="component-management">
+        <a-sub-menu v-if="showComponentMenu" key="component-management">
           <template #icon>
             <ClusterOutlined />
           </template>
           <template #title>组件管理</template>
 
-          <a-menu-item key="jenkins-management" @click="goToJenkinsManagement">Jenkins管理</a-menu-item>
-          <a-menu-item key="pipeline-param-management" @click="goToPipelineParamManagement">管线参数</a-menu-item>
+          <a-menu-item v-if="canViewComponent" key="jenkins-management" @click="goToJenkinsManagement">
+            Jenkins管理
+          </a-menu-item>
+          <a-menu-item v-if="canManagePipelineParam" key="pipeline-param-management" @click="goToPipelineParamManagement">
+            管线参数
+          </a-menu-item>
         </a-sub-menu>
 
-        <a-sub-menu key="release-management">
+        <a-sub-menu v-if="showReleaseMenu" key="release-management">
           <template #icon>
             <RocketOutlined />
           </template>
           <template #title>发布管理</template>
 
           <a-menu-item key="release-orders" @click="goToReleaseOrders">发布单</a-menu-item>
+          <a-menu-item v-if="canManageReleaseTemplate" key="release-templates" @click="goToReleaseTemplates">
+            发布模板
+          </a-menu-item>
+        </a-sub-menu>
+
+        <a-sub-menu v-if="showSystemMenu" key="system-management">
+          <template #icon>
+            <SettingOutlined />
+          </template>
+          <template #title>系统管理</template>
+
+          <a-menu-item v-if="canManageUser" key="system-users" @click="goToSystemUsers">
+            用户管理
+          </a-menu-item>
+          <a-menu-item v-if="canManagePermission" key="system-permissions" @click="goToSystemPermissions">
+            权限授权
+          </a-menu-item>
         </a-sub-menu>
       </a-menu>
     </a-layout-sider>
@@ -126,6 +227,19 @@ function goToReleaseOrders() {
     <a-layout>
       <a-layout-header class="app-header">
         <div class="header-title">{{ pageTitle }}</div>
+        <a-space class="header-right">
+          <a-tag color="blue">{{ roleText }}</a-tag>
+          <span class="username">
+            <UserOutlined />
+            {{ displayName }}
+          </span>
+          <a-button type="text" @click="handleLogout">
+            <template #icon>
+              <LogoutOutlined />
+            </template>
+            退出
+          </a-button>
+        </a-space>
       </a-layout-header>
 
       <a-layout-content class="app-content">
@@ -166,6 +280,7 @@ function goToReleaseOrders() {
 .app-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   height: 64px;
   padding: 0 24px;
   background: #fff;
@@ -176,6 +291,18 @@ function goToReleaseOrders() {
   font-size: 16px;
   font-weight: 600;
   color: #1f1f1f;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+}
+
+.username {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #595959;
 }
 
 .app-content {
@@ -217,6 +344,18 @@ function goToReleaseOrders() {
 
   .app-header {
     padding: 0 16px;
+    gap: 8px;
+  }
+
+  .header-right {
+    gap: 8px;
+  }
+
+  .username {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .app-content {

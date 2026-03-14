@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -14,20 +15,36 @@ import (
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/pipelineparam"
 	platformparamdomain "gos/internal/domain/platformparam"
+	userdomain "gos/internal/domain/user"
 )
 
 type PipelineParamHandler struct {
 	manager *usecase.PipelineParamDefManager
 	syncer  *usecase.SyncPipelineParamDefs
+	authz   RequestAuthorizer
+	access  PipelineParamAccessResolver
+}
+
+type PipelineParamAccessResolver interface {
+	ResolveParamAccess(
+		ctx context.Context,
+		user userdomain.User,
+		applicationID string,
+		paramKey string,
+	) (canView bool, canEdit bool, err error)
 }
 
 func NewPipelineParamHandler(
 	manager *usecase.PipelineParamDefManager,
 	syncer *usecase.SyncPipelineParamDefs,
+	authz RequestAuthorizer,
+	access PipelineParamAccessResolver,
 ) *PipelineParamHandler {
 	return &PipelineParamHandler{
 		manager: manager,
 		syncer:  syncer,
+		authz:   authz,
+		access:  access,
 	}
 }
 
@@ -59,6 +76,8 @@ type PipelineParamDefResponse struct {
 	SourceFrom        string    `json:"source_from"`
 	RawMeta           string    `json:"raw_meta"`
 	SortNo            int       `json:"sort_no"`
+	CanView           bool      `json:"can_view"`
+	CanEdit           bool      `json:"can_edit"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -133,9 +152,83 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 		return
 	}
 
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	manageAll := false
+	hasReleaseCreate := false
+	if currentUser.Role != userdomain.RoleAdmin {
+		if h.authz == nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+			return
+		}
+		allowed, authErr := h.authz.HasPermission(c.Request.Context(), currentUser, "pipeline_param.manage", "", "")
+		if authErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		manageAll = allowed
+
+		createAllowed, createErr := h.authz.HasPermission(
+			c.Request.Context(),
+			currentUser,
+			"release.create",
+			"application",
+			c.Param("id"),
+		)
+		if createErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		hasReleaseCreate = createAllowed
+		if !manageAll && !hasReleaseCreate {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+			return
+		}
+	}
+
 	resp := make([]PipelineParamDefResponse, 0, len(items))
 	for _, item := range items {
-		resp = append(resp, toPipelineParamResponse(item))
+		entry := toPipelineParamResponse(item)
+		if currentUser.Role == userdomain.RoleAdmin || manageAll {
+			entry.CanView = true
+			entry.CanEdit = true
+			resp = append(resp, entry)
+			continue
+		}
+		if h.access == nil {
+			if hasReleaseCreate && strings.TrimSpace(item.ParamKey) != "" {
+				entry.CanView = true
+				entry.CanEdit = true
+				resp = append(resp, entry)
+			}
+			continue
+		}
+		canView, canEdit, accessErr := h.access.ResolveParamAccess(
+			c.Request.Context(),
+			currentUser,
+			c.Param("id"),
+			item.ParamKey,
+		)
+		if accessErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		if hasReleaseCreate && strings.TrimSpace(item.ParamKey) != "" {
+			entry.CanView = true
+			entry.CanEdit = true
+			resp = append(resp, entry)
+			continue
+		}
+		if !canView {
+			continue
+		}
+		entry.CanView = canView
+		entry.CanEdit = canEdit
+		resp = append(resp, entry)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"data":      resp,
@@ -162,6 +255,9 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipelines/{id}/param-defs [get]
 func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
+		return
+	}
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -199,7 +295,10 @@ func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
 
 	resp := make([]PipelineParamDefResponse, 0, len(items))
 	for _, item := range items {
-		resp = append(resp, toPipelineParamResponse(item))
+		entry := toPipelineParamResponse(item)
+		entry.CanView = entry.Visible
+		entry.CanEdit = entry.Editable
+		resp = append(resp, entry)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"data":      resp,
@@ -220,12 +319,18 @@ func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipeline-param-defs/{id} [get]
 func (h *PipelineParamHandler) GetByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
+		return
+	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writePipelineParamHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": toPipelineParamResponse(item)})
+	resp := toPipelineParamResponse(item)
+	resp.CanView = resp.Visible
+	resp.CanEdit = resp.Editable
+	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 // Update godoc
@@ -241,6 +346,9 @@ func (h *PipelineParamHandler) GetByID(c *gin.Context) {
 // @Failure      500      {object}  ErrorResponse
 // @Router       /pipeline-param-defs/{id} [put]
 func (h *PipelineParamHandler) Update(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
+		return
+	}
 	var req UpdatePipelineParamDefRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -252,7 +360,10 @@ func (h *PipelineParamHandler) Update(c *gin.Context) {
 		writePipelineParamHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": toPipelineParamResponse(item)})
+	resp := toPipelineParamResponse(item)
+	resp.CanView = resp.Visible
+	resp.CanEdit = resp.Editable
+	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 // Sync godoc
@@ -263,6 +374,9 @@ func (h *PipelineParamHandler) Update(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /jenkins/pipeline-param-defs/sync [post]
 func (h *PipelineParamHandler) Sync(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
+		return
+	}
 	result, err := h.syncer.Execute(c.Request.Context())
 	if err != nil {
 		writePipelineParamHTTPError(c, err)
@@ -288,6 +402,8 @@ func toPipelineParamResponse(item domain.PipelineParamDef) PipelineParamDefRespo
 		SourceFrom:        string(item.SourceFrom),
 		RawMeta:           item.RawMeta,
 		SortNo:            item.SortNo,
+		CanView:           item.Visible,
+		CanEdit:           item.Editable,
 		CreatedAt:         item.CreatedAt,
 		UpdatedAt:         item.UpdatedAt,
 	}

@@ -126,3 +126,47 @@ type ReleaseOrderStep struct {
 	FinishedAt     *time.Time
 	CreatedAt      time.Time
 }
+
+type TemplateStatus string
+
+const (
+	TemplateStatusActive   TemplateStatus = "active"
+	TemplateStatusInactive TemplateStatus = "inactive"
+)
+
+func (s TemplateStatus) Valid() bool {
+	switch s {
+	case TemplateStatusActive, TemplateStatusInactive:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseTemplate struct {
+	ID              string
+	Name            string
+	ApplicationID   string
+	ApplicationName string
+	BindingID       string
+	BindingName     string
+	BindingType     string
+	Status          TemplateStatus
+	Remark          string
+	ParamCount      int
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type ReleaseTemplateParam struct {
+	ID                 string
+	TemplateID         string
+	PipelineParamDefID string
+	ParamKey           string
+	ParamName          string
+	ExecutorParamName  string
+	Required           bool
+	SortNo             int
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}

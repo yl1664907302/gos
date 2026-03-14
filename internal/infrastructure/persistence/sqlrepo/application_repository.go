@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	app_key VARCHAR(128) NOT NULL,
 	repo_url TEXT NOT NULL,
 	description TEXT NOT NULL,
+	owner_user_id VARCHAR(64) NOT NULL DEFAULT '',
 	owner VARCHAR(128) NOT NULL,
 	status VARCHAR(32) NOT NULL,
 	artifact_type VARCHAR(64) NOT NULL,
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	app_key TEXT NOT NULL UNIQUE,
 	repo_url TEXT NOT NULL,
 	description TEXT NOT NULL,
+	owner_user_id TEXT NOT NULL DEFAULT '',
 	owner TEXT NOT NULL,
 	status TEXT NOT NULL,
 	artifact_type TEXT NOT NULL,
@@ -60,15 +62,50 @@ CREATE TABLE IF NOT EXISTS applications (
 		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
 	}
 
-	_, err := r.db.ExecContext(ctx, schema)
-	return err
+	if _, err := r.db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	return r.migrateSchema(ctx)
+}
+
+func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
+	switch r.dbDriver {
+	case "mysql":
+		exists, err := r.mysqlColumnExists(ctx, "applications", "owner_user_id")
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`ALTER TABLE applications ADD COLUMN owner_user_id VARCHAR(64) NOT NULL DEFAULT '' AFTER description;`,
+		)
+		return err
+	case "sqlite":
+		columns, err := r.sqliteTableColumns(ctx, "applications")
+		if err != nil {
+			return err
+		}
+		if _, ok := columns["owner_user_id"]; ok {
+			return nil
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`ALTER TABLE applications ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';`,
+		)
+		return err
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
 }
 
 func (r *ApplicationRepository) Create(ctx context.Context, app domain.Application) error {
 	const q = `
 INSERT INTO applications (
-	id, name, app_key, repo_url, description, owner, status, artifact_type, language, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err := r.db.ExecContext(
 		ctx,
@@ -78,6 +115,7 @@ INSERT INTO applications (
 		app.Key,
 		app.RepoURL,
 		app.Description,
+		app.OwnerUserID,
 		app.Owner,
 		string(app.Status),
 		app.ArtifactType,
@@ -96,7 +134,7 @@ INSERT INTO applications (
 
 func (r *ApplicationRepository) GetByID(ctx context.Context, id string) (domain.Application, error) {
 	const q = `
-SELECT id, name, app_key, repo_url, description, owner, status, artifact_type, language, created_at, updated_at
+SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
 FROM applications
 WHERE id = ?;`
 
@@ -141,7 +179,7 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 	}
 
 	builder.WriteString(`
-SELECT id, name, app_key, repo_url, description, owner, status, artifact_type, language, created_at, updated_at
+SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
 FROM applications`)
 	if len(where) > 0 {
 		builder.WriteString(" WHERE ")
@@ -175,7 +213,7 @@ FROM applications`)
 func (r *ApplicationRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.Application, error) {
 	const q = `
 UPDATE applications
-SET name = ?, app_key = ?, repo_url = ?, description = ?, owner = ?, status = ?, artifact_type = ?, language = ?, updated_at = ?
+SET name = ?, app_key = ?, repo_url = ?, description = ?, owner_user_id = ?, owner = ?, status = ?, artifact_type = ?, language = ?, updated_at = ?
 WHERE id = ?;`
 
 	res, err := r.db.ExecContext(
@@ -185,6 +223,7 @@ WHERE id = ?;`
 		input.Key,
 		input.RepoURL,
 		input.Description,
+		input.OwnerUserID,
 		input.Owner,
 		string(input.Status),
 		input.ArtifactType,
@@ -246,6 +285,7 @@ func scanApplication(s scanner) (domain.Application, error) {
 		&app.Key,
 		&app.RepoURL,
 		&app.Description,
+		&app.OwnerUserID,
 		&app.Owner,
 		&statusRaw,
 		&app.ArtifactType,
@@ -261,6 +301,48 @@ func scanApplication(s scanner) (domain.Application, error) {
 	app.CreatedAt = time.Unix(0, createdAt).UTC()
 	app.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return app, nil
+}
+
+func (r *ApplicationRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {
+	const q = `
+SELECT COUNT(1)
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?;`
+
+	var count int
+	if err := r.db.QueryRowContext(ctx, q, table, column).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *ApplicationRepository) sqliteTableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
+	q := fmt.Sprintf("PRAGMA table_info(%q);", table)
+	rows, err := r.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			typ       string
+			notNull   int
+			defaultV  sql.NullString
+			primaryID int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultV, &primaryID); err != nil {
+			return nil, err
+		}
+		columns[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func isDuplicateKeyError(dbDriver string, err error) bool {

@@ -13,6 +13,7 @@ import (
 type JenkinsPipelineClient interface {
 	ListJobs(ctx context.Context) ([]domain.JenkinsJob, error)
 	GetJob(ctx context.Context, fullName string) (domain.JenkinsJob, error)
+	GetPipelineScript(ctx context.Context, fullName string) (domain.JenkinsPipelineScript, error)
 }
 
 type SyncPipelines struct {

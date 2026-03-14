@@ -35,6 +35,18 @@ export interface PipelineListResponse {
   total: number
 }
 
+export interface PipelineRawScriptData {
+  pipeline: Pipeline
+  definition_class: string
+  script: string
+  script_path: string
+  from_scm: boolean
+}
+
+export interface PipelineRawScriptDataResponse {
+  data: PipelineRawScriptData
+}
+
 export interface PipelineBinding {
   id: string
   name: string
@@ -104,6 +116,8 @@ export interface PipelineParamDef {
   source_from: string
   raw_meta: string
   sort_no: number
+  can_view: boolean
+  can_edit: boolean
   created_at: string
   updated_at: string
 }

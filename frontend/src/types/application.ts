@@ -6,6 +6,7 @@ export interface Application {
   key: string
   repo_url: string
   description: string
+  owner_user_id: string
   owner: string
   status: ApplicationStatus
   artifact_type: string
@@ -19,7 +20,7 @@ export interface ApplicationPayload {
   key: string
   repo_url: string
   description: string
-  owner: string
+  owner_user_id: string
   status: ApplicationStatus
   artifact_type: string
   language: string

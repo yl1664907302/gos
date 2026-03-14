@@ -1,15 +1,38 @@
 <script setup lang="ts">
 import { ArrowLeftOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { createApplication } from '../../api/application'
+import { listUserOptions } from '../../api/user'
 import type { ApplicationPayload } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 import ApplicationForm from './ApplicationForm.vue'
 
+interface OwnerOption {
+  label: string
+  value: string
+}
+
 const router = useRouter()
 const submitting = ref(false)
+const ownerLoading = ref(false)
+const ownerOptions = ref<OwnerOption[]>([])
+
+async function loadOwnerOptions() {
+  ownerLoading.value = true
+  try {
+    const response = await listUserOptions()
+    ownerOptions.value = response.data.map((item) => ({
+      label: `${item.display_name} (${item.username})`,
+      value: item.id,
+    }))
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '负责人下拉加载失败'))
+  } finally {
+    ownerLoading.value = false
+  }
+}
 
 async function handleSubmit(payload: ApplicationPayload) {
   submitting.value = true
@@ -27,6 +50,10 @@ async function handleSubmit(payload: ApplicationPayload) {
 function goBack() {
   void router.push('/applications')
 }
+
+onMounted(() => {
+  void loadOwnerOptions()
+})
 </script>
 
 <template>
@@ -41,7 +68,14 @@ function goBack() {
       <h2 class="page-title">新增应用</h2>
     </div>
 
-    <ApplicationForm :loading="submitting" submit-text="创建应用" @submit="handleSubmit" @cancel="goBack" />
+    <ApplicationForm
+      :owner-options="ownerOptions"
+      :owner-loading="ownerLoading"
+      :loading="submitting"
+      submit-text="创建应用"
+      @submit="handleSubmit"
+      @cancel="goBack"
+    />
   </div>
 </template>
 

@@ -1,16 +1,16 @@
 <script setup lang="ts">
 import { ArrowLeftOutlined, LinkOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import type { FormInstance, TableColumnsType } from 'ant-design-vue'
+import type { FormInstance } from 'ant-design-vue'
 import type { Rule } from 'ant-design-vue/es/form'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listApplications } from '../../api/application'
 import { listPipelineBindings, listApplicationPipelineParamDefs } from '../../api/pipeline'
-import { createReleaseOrder } from '../../api/release'
-import { useResizableColumns } from '../../composables/useResizableColumns'
-import type { PipelineParamDef, PipelineBinding } from '../../types/pipeline'
-import type { ReleaseTriggerType } from '../../types/release'
+import { createReleaseOrder, getReleaseTemplateByID, listReleaseTemplates } from '../../api/release'
+import { useAuthStore } from '../../stores/auth'
+import type { PipelineBinding, PipelineParamDef } from '../../types/pipeline'
+import type { ReleaseTemplate, ReleaseTemplateParam, ReleaseTriggerType } from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 interface SelectOption {
@@ -34,47 +34,38 @@ interface BindingOption {
 interface CreateFormState {
   application_id: string
   binding_id: string
-  env_code: string
-  son_service: string
-  git_ref: string
-  image_tag: string
+  template_id: string
   trigger_type: ReleaseTriggerType
-  triggered_by: string
   remark: string
 }
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 
 const formRef = ref<FormInstance>()
 const loadingApplications = ref(false)
 const loadingBindings = ref(false)
+const loadingTemplates = ref(false)
+const loadingTemplateDetail = ref(false)
 const loadingParamDefs = ref(false)
 const submitting = ref(false)
 
-const applicationOptions = ref<SelectOption[]>([])
+const allApplicationOptions = ref<SelectOption[]>([])
 const bindingOptions = ref<BindingOption[]>([])
 const paramDefs = ref<PipelineParamDef[]>([])
+const selectedTemplate = ref<ReleaseTemplate | null>(null)
+const selectedTemplateParams = ref<ReleaseTemplateParam[]>([])
+const templateWarning = ref('')
 const paramValues = reactive<Record<string, string>>({})
 
 const formState = reactive<CreateFormState>({
   application_id: '',
   binding_id: '',
-  env_code: 'dev',
-  son_service: '',
-  git_ref: '',
-  image_tag: '',
+  template_id: '',
   trigger_type: 'manual',
-  triggered_by: '',
   remark: '',
 })
-
-const envOptions = [
-  { label: 'dev', value: 'dev' },
-  { label: 'test', value: 'test' },
-  { label: 'staging', value: 'staging' },
-  { label: 'prod', value: 'prod' },
-]
 
 const triggerTypeOptions = [
   { label: 'manual', value: 'manual' },
@@ -88,8 +79,16 @@ const defaultChoiceMeta: ChoiceMeta = {
   delimiter: ',',
 }
 
-const selectedBinding = computed(() => {
-  return bindingOptions.value.find((item) => item.value === formState.binding_id)
+const selectedBinding = computed(() => bindingOptions.value.find((item) => item.value === formState.binding_id))
+
+const canManagePipelineParams = computed(() => authStore.hasPermission('pipeline_param.manage'))
+
+const currentUserDisplayName = computed(() => {
+  const profile = authStore.profile
+  if (!profile) {
+    return '-'
+  }
+  return String(profile.display_name || '').trim() || String(profile.username || '').trim() || '-'
 })
 
 const canLoadPipelineParams = computed(() => {
@@ -99,75 +98,63 @@ const canLoadPipelineParams = computed(() => {
   return selectedBinding.value.provider === 'jenkins'
 })
 
-const paramHintText = computed(() => {
-  if (!formState.application_id || !formState.binding_id) {
-    return '请选择应用和管线绑定后加载参数。'
+const allowedApplicationIDs = computed(() => {
+  if (authStore.isAdmin) {
+    return null
   }
-  if (!selectedBinding.value) {
-    return '当前绑定不存在，请重新选择。'
-  }
-  if (!canLoadPipelineParams.value) {
-    return '当前绑定不是 Jenkins 类型，发布参数区不展示真实参数。'
-  }
-  return '参数来自该应用已绑定 Jenkins 管线的真实参数定义。'
+  return new Set(
+    authStore.permissions
+      .filter(
+        (item) =>
+          item.enabled &&
+          String(item.permission_code || '').trim().toLowerCase() === 'release.create' &&
+          String(item.scope_type || '').trim().toLowerCase() === 'application' &&
+          String(item.scope_value || '').trim() !== '',
+      )
+      .map((item) => String(item.scope_value || '').trim()),
+  )
 })
 
-const branchParamDefs = computed(() =>
-  paramDefs.value.filter((item) => String(item.param_key || '').trim().toLowerCase() === 'branch'),
-)
-
-const projectNameParamDefs = computed(() =>
-  paramDefs.value.filter((item) => {
-    const paramKey = String(item.param_key || '').trim().toLowerCase()
-    const executorName = String(item.executor_param_name || '').trim().toLowerCase()
-    return paramKey === 'project_name' || executorName === 'project_name'
-  }),
-)
-
-const gitRefOptions = computed<SelectOption[]>(() => {
-  const result: SelectOption[] = []
-  const seen = new Set<string>()
-
-  const appendValue = (value: string) => {
-    const next = String(value || '').trim()
-    if (!next || seen.has(next)) {
-      return
-    }
-    seen.add(next)
-    result.push({ label: next, value: next })
+const applicationOptions = computed<SelectOption[]>(() => {
+  const allowed = allowedApplicationIDs.value
+  if (!allowed) {
+    return allApplicationOptions.value
   }
-
-  for (const item of branchParamDefs.value) {
-    const meta = getChoiceMeta(item)
-    meta.options.forEach((option) => appendValue(option.value))
-    appendValue(item.default_value)
-    appendValue(paramValues[item.id] || '')
-  }
-  appendValue(formState.git_ref)
-  return result
+  return allApplicationOptions.value.filter((item) => allowed.has(item.value))
 })
 
-const sonServiceOptions = computed<SelectOption[]>(() => {
-  const result: SelectOption[] = []
-  const seen = new Set<string>()
+const templateParamDefIDSet = computed(() => new Set(selectedTemplateParams.value.map((item) => item.pipeline_param_def_id)))
 
-  const appendValue = (value: string) => {
-    const next = String(value || '').trim()
-    if (!next || seen.has(next)) {
-      return
-    }
-    seen.add(next)
-    result.push({ label: next, value: next })
-  }
+const templateParamMetaMap = computed<Record<string, ReleaseTemplateParam>>(() => {
+  const map: Record<string, ReleaseTemplateParam> = {}
+  selectedTemplateParams.value.forEach((item) => {
+    map[item.pipeline_param_def_id] = item
+  })
+  return map
+})
 
-  for (const item of projectNameParamDefs.value) {
-    const meta = getChoiceMeta(item)
-    meta.options.forEach((option) => appendValue(option.value))
-    appendValue(item.default_value)
-    appendValue(paramValues[item.id] || '')
+const templateParamDefs = computed(() =>
+  paramDefs.value.filter((item) => templateParamDefIDSet.value.has(item.id)),
+)
+
+const hasTemplateParamDefs = computed(() => templateParamDefs.value.length > 0)
+const extraParamsLoading = computed(() => loadingTemplates.value || loadingTemplateDetail.value || loadingParamDefs.value)
+const hasResolvedTemplate = computed(() => Boolean(formState.template_id && selectedTemplate.value))
+const canSubmitRelease = computed(
+  () =>
+    Boolean(formState.application_id && formState.binding_id) &&
+    hasResolvedTemplate.value &&
+    !templateWarning.value &&
+    !extraParamsLoading.value,
+)
+const showExtraParamArea = computed(() => extraParamsLoading.value || hasTemplateParamDefs.value)
+
+const templateParamRows = computed(() => {
+  const rows: PipelineParamDef[][] = []
+  for (let index = 0; index < templateParamDefs.value.length; index += 2) {
+    rows.push(templateParamDefs.value.slice(index, index + 2))
   }
-  appendValue(formState.son_service)
-  return result
+  return rows
 })
 
 const choiceMetaMap = computed<Record<string, ChoiceMeta>>(() => {
@@ -178,20 +165,31 @@ const choiceMetaMap = computed<Record<string, ChoiceMeta>>(() => {
   return map
 })
 
-const initialColumns: TableColumnsType<PipelineParamDef> = [
-  { title: '真实参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
-  { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
-  { title: '必填', dataIndex: 'required', key: 'required', width: 90 },
-  { title: '默认值', dataIndex: 'default_value', key: 'default_value', width: 180, ellipsis: true },
-  { title: '参数描述', dataIndex: 'description', key: 'description', width: 260, ellipsis: true },
-  { title: '发布值', key: 'param_value', width: 320, fixed: 'right' },
-]
-const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
+const paramHintText = computed(() => {
+  if (!formState.application_id || !formState.binding_id) {
+    return '请选择应用和管线选择后加载发布模板。'
+  }
+  if (extraParamsLoading.value) {
+    return '正在加载额外参数，请稍候。'
+  }
+  if (!selectedBinding.value) {
+    return '当前管线选择不存在，请重新选择。'
+  }
+  if (!canLoadPipelineParams.value) {
+    return '当前管线选择不是 Jenkins 类型，暂无可填写的模板参数。'
+  }
+  if (templateWarning.value) {
+    return templateWarning.value
+  }
+  if (!selectedTemplate.value) {
+    return '当前应用与管线选择尚未配置启用中的发布模板，将只创建基础发布单。'
+  }
+  return '额外参数已根据当前应用与管线选择自动带出，并以平台标准字段名称展示。'
+})
 
 const rules: Record<string, Rule[]> = {
   application_id: [{ required: true, message: '请选择应用', trigger: 'change' }],
-  binding_id: [{ required: true, message: '请选择管线绑定', trigger: 'change' }],
-  env_code: [{ required: true, message: '请选择环境', trigger: 'change' }],
+  binding_id: [{ required: true, message: '请选择管线选择', trigger: 'change' }],
   trigger_type: [{ required: true, message: '请选择触发方式', trigger: 'change' }],
 }
 
@@ -206,50 +204,6 @@ function fillParamValues(items: PipelineParamDef[]) {
   items.forEach((item) => {
     paramValues[item.id] = item.default_value || ''
   })
-}
-
-function syncGitRefFromBranchParams() {
-  for (const item of branchParamDefs.value) {
-    const value = String(paramValues[item.id] || '').trim()
-    if (value) {
-      formState.git_ref = value
-      return
-    }
-  }
-}
-
-function syncBranchParamValuesFromGitRef(value: string) {
-  const next = String(value || '').trim()
-  for (const item of branchParamDefs.value) {
-    paramValues[item.id] = next
-  }
-}
-
-function syncSonServiceFromProjectNameParams() {
-  for (const item of projectNameParamDefs.value) {
-    const value = String(paramValues[item.id] || '').trim()
-    if (value) {
-      formState.son_service = value
-      return
-    }
-  }
-}
-
-function syncProjectNameParamValuesFromSonService(value: string) {
-  const next = String(value || '').trim()
-  for (const item of projectNameParamDefs.value) {
-    paramValues[item.id] = next
-  }
-}
-
-function isBranchParam(item: PipelineParamDef) {
-  return String(item.param_key || '').trim().toLowerCase() === 'branch'
-}
-
-function isProjectNameParam(item: PipelineParamDef) {
-  const paramKey = String(item.param_key || '').trim().toLowerCase()
-  const executorName = String(item.executor_param_name || '').trim().toLowerCase()
-  return paramKey === 'project_name' || executorName === 'project_name'
 }
 
 function resolveChoiceMeta(item: PipelineParamDef): ChoiceMeta {
@@ -392,7 +346,6 @@ function splitByDelimiter(value: string, delimiter: string) {
   if (!text) {
     return []
   }
-
   if (delimiter && text.includes(delimiter)) {
     return text
       .split(delimiter)
@@ -425,14 +378,7 @@ function getChoiceMultiValues(item: PipelineParamDef): string[] {
 }
 
 function handleChoiceSingleChange(item: PipelineParamDef, value: unknown) {
-  const nextValue = String(value || '').trim()
-  paramValues[item.id] = nextValue
-  if (isBranchParam(item)) {
-    formState.git_ref = nextValue
-  }
-  if (isProjectNameParam(item)) {
-    formState.son_service = nextValue
-  }
+  paramValues[item.id] = String(value || '').trim()
 }
 
 function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
@@ -443,33 +389,10 @@ function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
     : []
   const delimiter = getChoiceMeta(item).delimiter || ','
   paramValues[item.id] = list.join(delimiter)
-  if (isBranchParam(item)) {
-    formState.git_ref = String(paramValues[item.id] || '').trim()
-  }
-  if (isProjectNameParam(item)) {
-    formState.son_service = String(paramValues[item.id] || '').trim()
-  }
 }
 
 function handleParamValueInput(item: PipelineParamDef, value: string) {
-  const nextValue = String(value || '')
-  paramValues[item.id] = nextValue
-  if (isBranchParam(item)) {
-    formState.git_ref = nextValue.trim()
-  }
-  if (isProjectNameParam(item)) {
-    formState.son_service = nextValue.trim()
-  }
-}
-
-function handleGitRefChange(value: string | undefined) {
-  formState.git_ref = String(value || '').trim()
-  syncBranchParamValuesFromGitRef(formState.git_ref)
-}
-
-function handleSonServiceChange(value: string | undefined) {
-  formState.son_service = String(value || '').trim()
-  syncProjectNameParamValuesFromSonService(formState.son_service)
+  paramValues[item.id] = String(value || '')
 }
 
 function applyRouteQuery() {
@@ -487,10 +410,14 @@ async function loadApplicationOptions() {
   loadingApplications.value = true
   try {
     const response = await listApplications({ page: 1, page_size: 100 })
-    applicationOptions.value = response.data.map((item) => ({
+    allApplicationOptions.value = response.data.map((item) => ({
       label: `${item.name} (${item.key})`,
       value: item.id,
     }))
+
+    if (!authStore.isAdmin && applicationOptions.value.length === 0) {
+      message.warning('当前账号未配置应用发布权限，请联系管理员授权')
+    }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
   } finally {
@@ -498,11 +425,35 @@ async function loadApplicationOptions() {
   }
 }
 
+function resetSelectionIfUnauthorized() {
+  const hasCurrentApplication = applicationOptions.value.some((item) => item.value === formState.application_id)
+  if (hasCurrentApplication) {
+    return
+  }
+  formState.application_id = ''
+  resetBindingAndTemplateState()
+}
+
+function resetBindingAndTemplateState() {
+  formState.binding_id = ''
+  formState.template_id = ''
+  bindingOptions.value = []
+  selectedTemplate.value = null
+  selectedTemplateParams.value = []
+  templateWarning.value = ''
+  paramDefs.value = []
+  resetParamValues()
+}
+
 async function loadBindingOptions(preferredBindingID = '') {
   const applicationID = formState.application_id.trim()
   if (!applicationID) {
     bindingOptions.value = []
     formState.binding_id = ''
+    selectedTemplate.value = null
+    selectedTemplateParams.value = []
+    formState.template_id = ''
+    templateWarning.value = ''
     paramDefs.value = []
     resetParamValues()
     return
@@ -531,20 +482,75 @@ async function loadBindingOptions(preferredBindingID = '') {
   } catch (error) {
     bindingOptions.value = []
     formState.binding_id = ''
-    message.error(extractHTTPErrorMessage(error, '管线绑定下拉加载失败'))
+    message.error(extractHTTPErrorMessage(error, '管线选择下拉加载失败'))
   } finally {
     loadingBindings.value = false
   }
 }
 
-async function loadPipelineParamDefs() {
-  if (!formState.application_id || !formState.binding_id || !selectedBinding.value) {
-    paramDefs.value = []
-    resetParamValues()
+async function loadAutoTemplate() {
+  selectedTemplate.value = null
+  selectedTemplateParams.value = []
+  formState.template_id = ''
+  templateWarning.value = ''
+
+  if (!formState.application_id || !formState.binding_id) {
     return
   }
 
-  if (!canLoadPipelineParams.value) {
+  loadingTemplates.value = true
+  try {
+    const response = await listReleaseTemplates({
+      application_id: formState.application_id,
+      binding_id: formState.binding_id,
+      status: 'active',
+      page: 1,
+      page_size: 10,
+    })
+    if (response.total === 0 || response.data.length === 0) {
+      return
+    }
+    if (response.total > 1 || response.data.length > 1) {
+      templateWarning.value = '当前管线选择存在多个启用中的发布模板，请先在“发布模板”中保留一个启用模板。'
+      return
+    }
+    const matchedTemplate = response.data[0]
+    if (!matchedTemplate) {
+      return
+    }
+    formState.template_id = matchedTemplate.id
+    await loadSelectedTemplateDetail()
+  } catch (error) {
+    templateWarning.value = ''
+    message.error(extractHTTPErrorMessage(error, '发布模板自动加载失败'))
+  } finally {
+    loadingTemplates.value = false
+  }
+}
+
+async function loadSelectedTemplateDetail() {
+  if (!formState.template_id) {
+    selectedTemplate.value = null
+    selectedTemplateParams.value = []
+    return
+  }
+  loadingTemplateDetail.value = true
+  try {
+    const response = await getReleaseTemplateByID(formState.template_id)
+    selectedTemplate.value = response.data.template
+    selectedTemplateParams.value = response.data.params
+  } catch (error) {
+    selectedTemplate.value = null
+    selectedTemplateParams.value = []
+    formState.template_id = ''
+    message.error(extractHTTPErrorMessage(error, '发布模板详情加载失败'))
+  } finally {
+    loadingTemplateDetail.value = false
+  }
+}
+
+async function loadPipelineParamDefs() {
+  if (!formState.application_id || !formState.binding_id || !selectedBinding.value || !canLoadPipelineParams.value) {
     paramDefs.value = []
     resetParamValues()
     return
@@ -555,12 +561,10 @@ async function loadPipelineParamDefs() {
     const response = await listApplicationPipelineParamDefs(formState.application_id, {
       binding_type: selectedBinding.value.binding_type,
       page: 1,
-      page_size: 100,
+      page_size: 200,
     })
     paramDefs.value = response.data
     fillParamValues(response.data)
-    syncGitRefFromBranchParams()
-    syncSonServiceFromProjectNameParams()
   } catch (error) {
     paramDefs.value = []
     resetParamValues()
@@ -572,20 +576,23 @@ async function loadPipelineParamDefs() {
 
 async function handleApplicationChange(value: string | undefined) {
   formState.application_id = String(value || '')
-  formState.binding_id = ''
-  paramDefs.value = []
-  resetParamValues()
+  resetBindingAndTemplateState()
   await loadBindingOptions()
 }
 
 async function handleBindingChange(value: string | undefined) {
   formState.binding_id = String(value || '')
+  formState.template_id = ''
+  selectedTemplate.value = null
+  selectedTemplateParams.value = []
+  templateWarning.value = ''
   await loadPipelineParamDefs()
+  await loadAutoTemplate()
 }
 
 function toPipelineParams() {
   if (!formState.application_id || !selectedBinding.value) {
-    message.info('请先选择应用与绑定')
+    message.info('请先选择应用与管线选择')
     return
   }
   const query: Record<string, string> = {
@@ -600,6 +607,14 @@ function toList() {
   void router.push('/releases')
 }
 
+function resolveTemplateParamLabel(item: PipelineParamDef) {
+  const meta = templateParamMetaMap.value[item.id]
+  if (meta?.param_name) {
+    return meta.param_name
+  }
+  return item.param_key || item.executor_param_name || item.id
+}
+
 function buildParamsPayload() {
   const payload: Array<{
     param_key: string
@@ -608,14 +623,10 @@ function buildParamsPayload() {
     value_source: 'release_input'
   }> = []
 
-  for (const item of paramDefs.value) {
-    let value = String(paramValues[item.id] || '').trim()
-    if (isProjectNameParam(item) && String(formState.son_service || '').trim()) {
-      value = String(formState.son_service || '').trim()
-      paramValues[item.id] = value
-    }
+  for (const item of templateParamDefs.value) {
+    const value = String(paramValues[item.id] || '').trim()
     const paramKey = String(item.param_key || '').trim()
-    const displayName = item.executor_param_name || item.id
+    const displayName = resolveTemplateParamLabel(item)
 
     if (item.required && !value) {
       throw new Error(`参数 ${displayName} 为必填，请填写发布值`)
@@ -624,11 +635,7 @@ function buildParamsPayload() {
       continue
     }
     if (!paramKey) {
-      if (item.required) {
-        throw new Error(`参数 ${displayName} 尚未映射平台标准 Key，请先在“管线参数”页配置`)
-      }
-      // 非必填且未映射的平台参数自动跳过，不阻塞发布提交。
-      continue
+      throw new Error(`参数 ${displayName} 尚未映射平台标准 Key，请先在“管线参数”页配置`)
     }
 
     payload.push({
@@ -643,9 +650,19 @@ function buildParamsPayload() {
 }
 
 async function handleSubmit() {
+  if (!canSubmitRelease.value) {
+    message.warning('当前应用或管线选择尚未匹配可用发布模板，请先完成模板配置')
+    return
+  }
+
   try {
     await formRef.value?.validate()
   } catch {
+    return
+  }
+
+  if (templateWarning.value) {
+    message.error(templateWarning.value)
     return
   }
 
@@ -669,12 +686,8 @@ async function handleSubmit() {
     const response = await createReleaseOrder({
       application_id: formState.application_id.trim(),
       binding_id: formState.binding_id.trim(),
-      env_code: formState.env_code.trim(),
-      son_service: formState.son_service.trim() || undefined,
-      git_ref: formState.git_ref.trim() || undefined,
-      image_tag: formState.image_tag.trim() || undefined,
+      template_id: formState.template_id.trim() || undefined,
       trigger_type: formState.trigger_type,
-      triggered_by: formState.triggered_by.trim() || undefined,
       remark: formState.remark.trim() || undefined,
       params: paramsPayload.length > 0 ? paramsPayload : undefined,
     })
@@ -687,11 +700,21 @@ async function handleSubmit() {
   }
 }
 
+watch(
+  applicationOptions,
+  () => {
+    resetSelectionIfUnauthorized()
+  },
+  { deep: true },
+)
+
 onMounted(async () => {
+  await authStore.loadMe(true)
   applyRouteQuery()
   await loadApplicationOptions()
   await loadBindingOptions(formState.binding_id)
   await loadPipelineParamDefs()
+  await loadAutoTemplate()
 })
 </script>
 
@@ -707,10 +730,10 @@ onMounted(async () => {
         </a-button>
         <div>
           <h2 class="page-title">新建发布单</h2>
-          <p class="page-subtitle">选择应用和绑定，填写发布参数后创建发布任务。</p>
+          <p class="page-subtitle">选择应用与管线选择后，系统会自动匹配发布模板并带出额外参数。</p>
         </div>
       </div>
-      <a-button @click="toPipelineParams">
+      <a-button v-if="canManagePipelineParams" @click="toPipelineParams">
         <template #icon>
           <LinkOutlined />
         </template>
@@ -743,13 +766,13 @@ onMounted(async () => {
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
-            <a-form-item label="管线绑定" name="binding_id">
+            <a-form-item label="管线选择" name="binding_id">
               <a-select
                 v-model:value="formState.binding_id"
                 show-search
                 allow-clear
                 option-filter-prop="label"
-                placeholder="请选择管线绑定"
+                placeholder="请选择管线选择"
                 :loading="loadingBindings"
                 :options="bindingOptions"
                 @change="handleBindingChange"
@@ -760,11 +783,6 @@ onMounted(async () => {
 
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
-            <a-form-item label="环境" name="env_code">
-              <a-select v-model:value="formState.env_code" :options="envOptions" placeholder="请选择环境" />
-            </a-form-item>
-          </a-col>
-          <a-col :xs="24" :md="12">
             <a-form-item label="触发方式" name="trigger_type">
               <a-select
                 v-model:value="formState.trigger_type"
@@ -773,137 +791,96 @@ onMounted(async () => {
               />
             </a-form-item>
           </a-col>
-        </a-row>
-
-        <a-row :gutter="16">
           <a-col :xs="24" :md="12">
-            <a-form-item label="子服务（son_service）" name="son_service">
-              <a-select
-                v-model:value="formState.son_service"
-                show-search
-                allow-clear
-                option-filter-prop="label"
-                :options="sonServiceOptions"
-                :disabled="sonServiceOptions.length === 0"
-                placeholder="从 project_name 参数候选值中选择（选填）"
-                @change="handleSonServiceChange"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :xs="24" :md="12">
-            <a-form-item label="Git 版本" name="git_ref">
-              <a-select
-                v-if="gitRefOptions.length > 0"
-                v-model:value="formState.git_ref"
-                show-search
-                allow-clear
-                option-filter-prop="label"
-                :options="gitRefOptions"
-                placeholder="请选择分支版本（来源于 branch 参数）"
-                @change="handleGitRefChange"
-              />
-              <a-input
-                v-else
-                :value="formState.git_ref"
-                placeholder="暂无 branch 选项，可手动输入"
-                @update:value="handleGitRefChange(String($event || ''))"
-              />
+            <a-form-item label="触发人">
+              <a-input :value="currentUserDisplayName" disabled />
             </a-form-item>
           </a-col>
         </a-row>
 
         <a-row :gutter="16">
-          <a-col :xs="24" :md="12">
-            <a-form-item label="镜像版本" name="image_tag">
-              <a-input v-model:value="formState.image_tag" placeholder="例如 20260313-01" />
-            </a-form-item>
-          </a-col>
-          <a-col :xs="24" :md="12">
-            <a-form-item label="触发人" name="triggered_by">
-              <a-input v-model:value="formState.triggered_by" placeholder="例如 lingyun" />
-            </a-form-item>
-          </a-col>
-        </a-row>
-
-        <a-row :gutter="16">
-          <a-col :xs="24" :md="12">
+          <a-col :xs="24" :md="24">
             <a-form-item label="备注" name="remark">
               <a-input v-model:value="formState.remark" placeholder="本次发布说明" />
             </a-form-item>
           </a-col>
         </a-row>
-      </a-card>
 
-      <a-card class="param-card" :bordered="true" title="发布参数">
-        <template #extra>
-          <a-tag v-if="selectedBinding" color="blue">
-            {{ selectedBinding.binding_type }}/{{ selectedBinding.provider }}
-          </a-tag>
-        </template>
-
-        <p class="param-hint">{{ paramHintText }}</p>
-
-        <a-empty v-if="!canLoadPipelineParams || paramDefs.length === 0" description="暂无可填写参数" />
-        <a-table
+        <a-alert
+          v-if="selectedTemplate"
+          type="info"
+          show-icon
+          class="selected-template-alert"
+          :message="`当前模板：${selectedTemplate.name}，已自动带出 ${selectedTemplateParams.length} 个模板参数`"
+        />
+        <a-alert v-else-if="templateWarning" type="warning" show-icon class="selected-template-alert" :message="templateWarning" />
+        <a-alert
           v-else
-          row-key="id"
-          :columns="columns"
-          :data-source="paramDefs"
-          :loading="loadingParamDefs"
-          :pagination="false"
-          :scroll="{ x: 1450 }"
-        >
-          <template #bodyCell="{ column, record }">
-            <template v-if="column.key === 'required'">
-              <a-tag :color="record.required ? 'red' : 'default'">{{ record.required ? '是' : '否' }}</a-tag>
-            </template>
-            <template v-else-if="column.key === 'param_key'">
-              <span v-if="record.param_key">{{ record.param_key }}</span>
-              <span v-else class="missing-key">未映射</span>
-            </template>
-            <template v-else-if="column.key === 'default_value'">
-              {{ record.default_value || '-' }}
-            </template>
-            <template v-else-if="column.key === 'description'">
-              {{ record.description || '-' }}
-            </template>
-            <template v-else-if="column.key === 'param_value'">
-              <a-select
-                v-if="useSelectForChoice(record) && isMultipleChoice(record)"
-                mode="multiple"
-                class="param-value-control"
-                :value="getChoiceMultiValues(record)"
-                :options="getChoiceMeta(record).options"
-                :placeholder="record.required ? '必填，请选择发布值' : '选填，可多选'"
-                allow-clear
-                @change="handleChoiceMultiChange(record, $event)"
-              />
-              <a-select
-                v-else-if="useSelectForChoice(record)"
-                class="param-value-control"
-                :value="getChoiceSingleValue(record)"
-                :options="getChoiceMeta(record).options"
-                :placeholder="record.required ? '必填，请选择发布值' : '选填，留空将不下发'"
-                allow-clear
-                @change="handleChoiceSingleChange(record, $event)"
-              />
-              <a-input
-                v-else
-                :value="paramValues[record.id]"
-                class="param-value-control"
-                :placeholder="record.required ? '必填，请输入发布值' : '选填，留空将不下发'"
-                allow-clear
-                @update:value="handleParamValueInput(record, String($event || ''))"
-              />
-            </template>
-          </template>
-        </a-table>
+          type="info"
+          show-icon
+          class="selected-template-alert"
+          message="当前应用与管线选择未命中启用中的发布模板，创建后将仅保留基础发布信息。"
+        />
+
+        <template v-if="showExtraParamArea">
+          <a-divider class="extra-param-divider">额外参数</a-divider>
+          <div class="extra-param-header">
+            <p class="param-hint">{{ paramHintText }}</p>
+            <a-tag v-if="selectedBinding" color="blue">
+              {{ selectedBinding.binding_type }}/{{ selectedBinding.provider }}
+            </a-tag>
+          </div>
+
+          <a-spin :spinning="extraParamsLoading" tip="正在加载额外参数...">
+            <div class="extra-param-form">
+              <template v-if="hasTemplateParamDefs">
+                <a-row v-for="(row, rowIndex) in templateParamRows" :key="`row-${rowIndex}`" :gutter="16">
+                  <a-col v-for="item in row" :key="item.id" :xs="24" :md="12">
+                    <a-form-item
+                      :label="resolveTemplateParamLabel(item)"
+                      :required="item.required"
+                    >
+                      <a-select
+                        v-if="useSelectForChoice(item) && isMultipleChoice(item)"
+                        mode="multiple"
+                        class="param-value-control"
+                        :value="getChoiceMultiValues(item)"
+                        :options="getChoiceMeta(item).options"
+                        :placeholder="item.required ? '必填，请选择发布值' : '选填，可多选'"
+                        allow-clear
+                        @change="handleChoiceMultiChange(item, $event)"
+                      />
+                      <a-select
+                        v-else-if="useSelectForChoice(item)"
+                        class="param-value-control"
+                        :value="getChoiceSingleValue(item)"
+                        :options="getChoiceMeta(item).options"
+                        :placeholder="item.required ? '必填，请选择发布值' : '选填，留空将不下发'"
+                        allow-clear
+                        @change="handleChoiceSingleChange(item, $event)"
+                      />
+                      <a-input
+                        v-else
+                        :value="paramValues[item.id]"
+                        class="param-value-control"
+                        :placeholder="item.required ? '必填，请输入发布值' : '选填，留空将不下发'"
+                        allow-clear
+                        @update:value="handleParamValueInput(item, String($event || ''))"
+                      />
+                    </a-form-item>
+                  </a-col>
+                </a-row>
+              </template>
+              <div v-else class="extra-param-loading-placeholder"></div>
+            </div>
+          </a-spin>
+        </template>
       </a-card>
 
       <div class="action-area">
         <a-space>
           <a-button @click="toList">取消</a-button>
-          <a-button type="primary" :loading="submitting" @click="handleSubmit">创建发布单</a-button>
+          <a-button type="primary" :loading="submitting" :disabled="!canSubmitRelease" @click="handleSubmit">创建发布单</a-button>
         </a-space>
       </div>
     </a-form>
@@ -930,23 +907,41 @@ onMounted(async () => {
   gap: var(--space-6);
 }
 
-.form-card,
-.param-card {
+.form-card {
   border-radius: var(--radius-xl);
 }
 
 .param-hint {
-  margin: 0 0 12px;
+  margin: 0;
   color: #595959;
 }
 
-.missing-key {
-  color: #ff4d4f;
+.selected-template-alert {
+  margin-top: 8px;
+}
+
+.extra-param-divider {
+  margin: 20px 0 16px;
+}
+
+.extra-param-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .param-value-control {
   width: 100%;
-  min-width: 220px;
+}
+
+.extra-param-form {
+  min-height: 72px;
+}
+
+.extra-param-loading-placeholder {
+  min-height: 72px;
 }
 
 .action-area {
@@ -961,6 +956,11 @@ onMounted(async () => {
   }
 
   .header-left {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .extra-param-header {
     flex-direction: column;
     align-items: flex-start;
   }

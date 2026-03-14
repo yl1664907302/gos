@@ -92,6 +92,45 @@ func (c *Client) GetJob(ctx context.Context, fullName string) (domain.JenkinsJob
 	}, nil
 }
 
+func (c *Client) GetPipelineScript(ctx context.Context, fullName string) (domain.JenkinsPipelineScript, error) {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return domain.JenkinsPipelineScript{}, fmt.Errorf("job full name is required")
+	}
+
+	endpoint := c.baseURL + buildJenkinsJobConfigPath(fullName)
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return domain.JenkinsPipelineScript{}, err
+	}
+	body = normalizeXMLVersion(body)
+
+	var config struct {
+		Definition struct {
+			Class      string `xml:"class,attr"`
+			Script     string `xml:"script"`
+			ScriptPath string `xml:"scriptPath"`
+		} `xml:"definition"`
+	}
+	if err := xml.Unmarshal(body, &config); err != nil {
+		return domain.JenkinsPipelineScript{}, err
+	}
+
+	definitionClass := strings.TrimSpace(config.Definition.Class)
+	script := strings.ReplaceAll(config.Definition.Script, "\r\n", "\n")
+	script = strings.ReplaceAll(script, "\r", "\n")
+	script = strings.TrimSpace(script)
+	scriptPath := strings.TrimSpace(config.Definition.ScriptPath)
+	fromSCM := strings.EqualFold(definitionClass, "org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition")
+
+	return domain.JenkinsPipelineScript{
+		DefinitionClass: definitionClass,
+		Script:          script,
+		ScriptPath:      scriptPath,
+		FromSCM:         fromSCM,
+	}, nil
+}
+
 func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[string]string) (string, error) {
 	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
 	if fullName == "" {
@@ -922,33 +961,20 @@ func buildJenkinsJobAPIPath(fullName string) string {
 }
 
 func buildJenkinsAPIEndpoint(baseURL string, resourceURL string, tree string) string {
-	trimmed := strings.TrimSpace(resourceURL)
-	if trimmed == "" {
+	prefix := resolveJenkinsResourcePrefix(baseURL, resourceURL)
+	if prefix == "" {
 		return ""
 	}
-	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
-		return strings.TrimRight(trimmed, "/") + "/api/json?tree=" + tree
+	if strings.TrimSpace(tree) == "" {
+		return prefix + "/api/json"
 	}
-	if strings.HasPrefix(trimmed, "/") {
-		return strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/") + "/api/json?tree=" + tree
-	}
-	return strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/") + "/api/json?tree=" + tree
+	return prefix + "/api/json?tree=" + tree
 }
 
 func buildJenkinsProgressiveTextEndpoint(baseURL string, buildURL string, start int64) string {
-	trimmed := strings.TrimSpace(buildURL)
-	if trimmed == "" {
+	prefix := resolveJenkinsResourcePrefix(baseURL, buildURL)
+	if prefix == "" {
 		return ""
-	}
-
-	var prefix string
-	switch {
-	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
-		prefix = strings.TrimRight(trimmed, "/")
-	case strings.HasPrefix(trimmed, "/"):
-		prefix = strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/")
-	default:
-		prefix = strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/")
 	}
 	if start < 0 {
 		start = 0
@@ -957,19 +983,9 @@ func buildJenkinsProgressiveTextEndpoint(baseURL string, buildURL string, start 
 }
 
 func buildJenkinsActionEndpoint(baseURL string, resourceURL string, action string) string {
-	trimmed := strings.TrimSpace(resourceURL)
-	if trimmed == "" {
+	prefix := resolveJenkinsResourcePrefix(baseURL, resourceURL)
+	if prefix == "" {
 		return ""
-	}
-
-	var prefix string
-	switch {
-	case strings.HasPrefix(trimmed, "http://"), strings.HasPrefix(trimmed, "https://"):
-		prefix = strings.TrimRight(trimmed, "/")
-	case strings.HasPrefix(trimmed, "/"):
-		prefix = strings.TrimRight(baseURL, "/") + strings.TrimRight(trimmed, "/")
-	default:
-		prefix = strings.TrimRight(baseURL, "/") + "/" + strings.Trim(trimmed, "/")
 	}
 
 	action = strings.Trim(strings.TrimSpace(action), "/")
@@ -977,6 +993,31 @@ func buildJenkinsActionEndpoint(baseURL string, resourceURL string, action strin
 		return prefix
 	}
 	return prefix + "/" + action
+}
+
+func resolveJenkinsResourcePrefix(baseURL string, resourceURL string) string {
+	trimmed := strings.TrimSpace(resourceURL)
+	if trimmed == "" {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		parsedResource, resourceErr := url.Parse(trimmed)
+		parsedBase, baseErr := url.Parse(base)
+		if resourceErr == nil && baseErr == nil && parsedBase.Scheme != "" && parsedBase.Host != "" {
+			parsedResource.Scheme = parsedBase.Scheme
+			parsedResource.Host = parsedBase.Host
+			parsedResource.User = parsedBase.User
+			parsedResource.Fragment = ""
+			return strings.TrimRight(parsedResource.String(), "/")
+		}
+		return strings.TrimRight(trimmed, "/")
+	}
+	if strings.HasPrefix(trimmed, "/") {
+		return base + strings.TrimRight(trimmed, "/")
+	}
+	return base + "/" + strings.Trim(trimmed, "/")
 }
 
 func buildJenkinsJobConfigPath(fullName string) string {

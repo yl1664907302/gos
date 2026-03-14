@@ -3,12 +3,17 @@ import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 import { reactive, ref, watch } from 'vue'
 import type { ApplicationPayload } from '../../types/application'
 
+interface OwnerOption {
+  label: string
+  value: string
+}
+
 interface ApplicationFormModel {
   name: string
   key: string
   repo_url: string
   description: string
-  owner: string
+  owner_user_id: string
   status: ApplicationPayload['status']
   artifact_type: string
   language: string
@@ -17,11 +22,15 @@ interface ApplicationFormModel {
 const props = withDefaults(
   defineProps<{
     initialValues?: Partial<ApplicationPayload>
+    ownerOptions?: OwnerOption[]
+    ownerLoading?: boolean
     loading?: boolean
     submitText?: string
   }>(),
   {
     initialValues: () => ({}),
+    ownerOptions: () => [],
+    ownerLoading: false,
     loading: false,
     submitText: '保存',
   },
@@ -52,7 +61,7 @@ const model = reactive<ApplicationFormModel>({
   key: '',
   repo_url: '',
   description: '',
-  owner: '',
+  owner_user_id: '',
   status: 'active',
   artifact_type: '',
   language: '',
@@ -61,6 +70,7 @@ const model = reactive<ApplicationFormModel>({
 const rules: Record<string, Rule[]> = {
   name: [{ required: true, message: '请输入应用名称', trigger: 'blur' }],
   key: [{ required: true, message: '请输入应用 Key', trigger: 'blur' }],
+  owner_user_id: [{ required: true, message: '请选择负责人', trigger: 'change' }],
   status: [{ required: true, message: '请选择状态', trigger: 'change' }],
   artifact_type: [{ required: true, message: '请选择制品类型', trigger: 'change' }],
   language: [{ required: true, message: '请选择语言', trigger: 'change' }],
@@ -73,7 +83,7 @@ watch(
     model.key = values.key ?? ''
     model.repo_url = values.repo_url ?? ''
     model.description = values.description ?? ''
-    model.owner = values.owner ?? ''
+    model.owner_user_id = values.owner_user_id ?? ''
     model.status = values.status ?? 'active'
     model.artifact_type = values.artifact_type ?? ''
     model.language = values.language ?? ''
@@ -86,7 +96,7 @@ async function handleSubmit() {
     await formRef.value?.validate()
     emit('submit', { ...model })
   } catch {
-    // 校验失败由表单项自身提示，这里不再额外处理。
+    // 校验失败由表单项自身提示。
   }
 }
 
@@ -119,8 +129,16 @@ function handleCancel() {
 
     <a-row :gutter="16">
       <a-col :xs="24" :md="12">
-        <a-form-item label="负责人" name="owner">
-          <a-input v-model:value="model.owner" placeholder="例如：lingyun" />
+        <a-form-item label="负责人" name="owner_user_id">
+          <a-select
+            v-model:value="model.owner_user_id"
+            show-search
+            allow-clear
+            option-filter-prop="label"
+            :options="ownerOptions"
+            :loading="ownerLoading"
+            placeholder="请选择负责人"
+          />
         </a-form-item>
       </a-col>
       <a-col :xs="24" :md="12">

@@ -27,6 +27,11 @@ type Repository interface {
 		stepCode string,
 		input StepUpdateInput,
 	) (ReleaseOrderStep, error)
+	CreateTemplate(ctx context.Context, template ReleaseTemplate, params []ReleaseTemplateParam) error
+	GetTemplateByID(ctx context.Context, id string) (ReleaseTemplate, []ReleaseTemplateParam, error)
+	ListTemplates(ctx context.Context, filter TemplateListFilter) ([]ReleaseTemplate, int64, error)
+	UpdateTemplate(ctx context.Context, template ReleaseTemplate, params []ReleaseTemplateParam) error
+	DeleteTemplate(ctx context.Context, id string) error
 }
 
 type ListFilter struct {
@@ -44,4 +49,12 @@ type StepUpdateInput struct {
 	Message    string
 	StartedAt  *time.Time
 	FinishedAt *time.Time
+}
+
+type TemplateListFilter struct {
+	ApplicationID string
+	BindingID     string
+	Status        TemplateStatus
+	Page          int
+	PageSize      int
 }

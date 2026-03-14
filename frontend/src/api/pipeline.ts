@@ -7,6 +7,7 @@ import type {
   PipelineBindingListResponse,
   PipelineParamDefDataResponse,
   PipelineParamDefListResponse,
+  PipelineRawScriptDataResponse,
   PipelineListParams,
   PipelineListResponse,
   UpdatePipelineParamDefPayload,
@@ -15,6 +16,11 @@ import type {
 
 export async function listPipelines(params: PipelineListParams): Promise<PipelineListResponse> {
   const response = await http.get<PipelineListResponse>('/pipelines', { params })
+  return response.data
+}
+
+export async function getPipelineRawScript(id: string): Promise<PipelineRawScriptDataResponse> {
+  const response = await http.get<PipelineRawScriptDataResponse>(`/pipelines/${id}/raw-script`)
   return response.data
 }
 

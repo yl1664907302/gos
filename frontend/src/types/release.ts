@@ -2,6 +2,7 @@ export type ReleaseTriggerType = 'manual' | 'webhook' | 'schedule'
 export type ReleaseOrderStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 export type ReleaseStepStatus = 'pending' | 'running' | 'success' | 'failed'
 export type ReleaseValueSource = 'application' | 'environment' | 'release_input' | 'fixed'
+export type ReleaseTemplateStatus = 'active' | 'inactive'
 
 export interface ReleaseOrder {
   id: string
@@ -11,6 +12,8 @@ export interface ReleaseOrder {
   binding_id: string
   pipeline_id: string
   env_code: string
+  template_id?: string
+  project_name: string
   son_service: string
   git_ref: string
   image_tag: string
@@ -105,7 +108,9 @@ export interface CreateReleaseOrderStepPayload {
 export interface CreateReleaseOrderPayload {
   application_id: string
   binding_id: string
-  env_code: string
+  template_id?: string
+  env_code?: string
+  project_name?: string
   son_service?: string
   git_ref?: string
   image_tag?: string
@@ -114,4 +119,70 @@ export interface CreateReleaseOrderPayload {
   triggered_by?: string
   params?: CreateReleaseOrderParamPayload[]
   steps?: CreateReleaseOrderStepPayload[]
+}
+
+export interface ReleaseTemplate {
+  id: string
+  name: string
+  application_id: string
+  application_name: string
+  binding_id: string
+  binding_name: string
+  binding_type: string
+  status: ReleaseTemplateStatus
+  remark: string
+  param_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ReleaseTemplateParam {
+  id: string
+  template_id: string
+  pipeline_param_def_id: string
+  param_key: string
+  param_name: string
+  executor_param_name: string
+  required: boolean
+  sort_no: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ReleaseTemplateListParams {
+  application_id?: string
+  binding_id?: string
+  status?: ReleaseTemplateStatus
+  page?: number
+  page_size?: number
+}
+
+export interface ReleaseTemplateListResponse {
+  data: ReleaseTemplate[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface ReleaseTemplateDataResponse {
+  data: {
+    template: ReleaseTemplate
+    params: ReleaseTemplateParam[]
+  }
+}
+
+export interface ReleaseTemplatePayload {
+  name: string
+  application_id: string
+  binding_id: string
+  status: ReleaseTemplateStatus
+  remark?: string
+  param_def_ids: string[]
+}
+
+export interface UpdateReleaseTemplatePayload {
+  name: string
+  status: ReleaseTemplateStatus
+  remark?: string
+  param_def_ids: string[]
 }

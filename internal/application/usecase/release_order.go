@@ -25,6 +25,7 @@ type ReleaseOrderManager struct {
 type CreateReleaseOrderInput struct {
 	ApplicationID string
 	BindingID     string
+	TemplateID    string
 	EnvCode       string
 	SonService    string
 	GitRef        string
@@ -94,9 +95,8 @@ func (uc *ReleaseOrderManager) Create(
 ) (domain.ReleaseOrder, error) {
 	applicationID := strings.TrimSpace(input.ApplicationID)
 	bindingID := strings.TrimSpace(input.BindingID)
-	envCode := strings.TrimSpace(input.EnvCode)
-	if applicationID == "" || bindingID == "" || envCode == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id, binding_id and env_code are required", ErrInvalidInput)
+	if applicationID == "" || bindingID == "" {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id and binding_id are required", ErrInvalidInput)
 	}
 
 	app, err := uc.appRepo.GetByID(ctx, applicationID)
@@ -120,6 +120,20 @@ func (uc *ReleaseOrderManager) Create(
 		return domain.ReleaseOrder{}, ErrInvalidInput
 	}
 
+	resolvedTemplateID, templateParams, err := uc.resolveTemplateForCreate(
+		ctx,
+		applicationID,
+		bindingID,
+		strings.TrimSpace(input.TemplateID),
+	)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if err := uc.validateCreateTemplateParams(resolvedTemplateID, templateParams, input.Params); err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	summary := resolveReleaseOrderSummaryFields(input.Params)
+
 	now := uc.now()
 	order := domain.ReleaseOrder{
 		ID:              generateID("ro"),
@@ -128,10 +142,10 @@ func (uc *ReleaseOrderManager) Create(
 		ApplicationName: app.Name,
 		BindingID:       bindingID,
 		PipelineID:      strings.TrimSpace(binding.PipelineID),
-		EnvCode:         envCode,
-		SonService:      strings.TrimSpace(input.SonService),
-		GitRef:          strings.TrimSpace(input.GitRef),
-		ImageTag:        strings.TrimSpace(input.ImageTag),
+		EnvCode:         summary.EnvCode,
+		SonService:      firstNonEmpty(summary.ProjectName, strings.TrimSpace(input.SonService)),
+		GitRef:          firstNonEmpty(summary.GitRef, strings.TrimSpace(input.GitRef)),
+		ImageTag:        firstNonEmpty(summary.ImageTag, strings.TrimSpace(input.ImageTag)),
 		TriggerType:     triggerType,
 		Status:          domain.OrderStatusPending,
 		Remark:          strings.TrimSpace(input.Remark),
@@ -153,6 +167,204 @@ func (uc *ReleaseOrderManager) Create(
 		return domain.ReleaseOrder{}, err
 	}
 	return uc.repo.GetByID(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) validateCreateTemplateParams(
+	templateID string,
+	templateParams []domain.ReleaseTemplateParam,
+	params []CreateReleaseOrderParamInput,
+) error {
+	allowed := make(map[string]releasedTemplateParamRule)
+	allowedByParamKey := make(map[string]releasedTemplateParamRule)
+	duplicateParamKeys := make(map[string]struct{})
+	required := make(map[string]releasedTemplateParamRule)
+
+	if templateID != "" {
+		for _, item := range templateParams {
+			key := buildReleaseTemplateParamKey(item.ParamKey, item.ExecutorParamName)
+			rule := releasedTemplateParamRule{
+				ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
+				ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
+				Required:          item.Required,
+			}
+			allowed[key] = rule
+			paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+			if paramKey != "" {
+				if _, exists := allowedByParamKey[paramKey]; exists {
+					delete(allowedByParamKey, paramKey)
+					duplicateParamKeys[paramKey] = struct{}{}
+				} else if _, duplicated := duplicateParamKeys[paramKey]; !duplicated {
+					allowedByParamKey[paramKey] = rule
+				}
+			}
+			if item.Required {
+				required[key] = rule
+			}
+		}
+	}
+
+	submitted := make(map[string]struct{}, len(params))
+	for _, item := range params {
+		paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		executorParamName := strings.TrimSpace(item.ExecutorParamName)
+		if templateID == "" {
+			return fmt.Errorf("%w: extra release params require release template", ErrInvalidInput)
+		}
+		rule, key, ok := resolveReleaseTemplateRule(allowed, allowedByParamKey, paramKey, executorParamName)
+		if !ok {
+			return fmt.Errorf("%w: param %s is not included in selected release template", ErrInvalidInput, executorParamNameOrKey(executorParamName, paramKey))
+		}
+		if strings.TrimSpace(item.ParamValue) == "" {
+			if rule.Required {
+				return fmt.Errorf("%w: param %s is required by selected release template", ErrInvalidInput, executorParamNameOrKey(executorParamName, paramKey))
+			}
+			continue
+		}
+		submitted[key] = struct{}{}
+	}
+
+	for key, rule := range required {
+		if _, ok := submitted[key]; ok {
+			continue
+		}
+		return fmt.Errorf("%w: param %s is required by selected release template", ErrInvalidInput, executorParamNameOrKey(rule.ExecutorParamName, rule.ParamKey))
+	}
+	return nil
+}
+
+type releasedTemplateParamRule struct {
+	ParamKey          string
+	ExecutorParamName string
+	Required          bool
+}
+
+func buildReleaseTemplateParamKey(paramKey string, executorParamName string) string {
+	return strings.ToLower(strings.TrimSpace(paramKey)) + "::" + strings.ToLower(strings.TrimSpace(executorParamName))
+}
+
+func resolveReleaseTemplateRule(
+	allowed map[string]releasedTemplateParamRule,
+	allowedByParamKey map[string]releasedTemplateParamRule,
+	paramKey string,
+	executorParamName string,
+) (releasedTemplateParamRule, string, bool) {
+	key := buildReleaseTemplateParamKey(paramKey, executorParamName)
+	if rule, ok := allowed[key]; ok {
+		return rule, key, true
+	}
+	if strings.TrimSpace(executorParamName) != "" {
+		return releasedTemplateParamRule{}, "", false
+	}
+	rule, ok := allowedByParamKey[strings.ToLower(strings.TrimSpace(paramKey))]
+	if !ok {
+		return releasedTemplateParamRule{}, "", false
+	}
+	return rule, buildReleaseTemplateParamKey(rule.ParamKey, rule.ExecutorParamName), true
+}
+
+func executorParamNameOrKey(executorParamName string, paramKey string) string {
+	if strings.TrimSpace(executorParamName) != "" {
+		return strings.TrimSpace(executorParamName)
+	}
+	return strings.TrimSpace(paramKey)
+}
+
+func (uc *ReleaseOrderManager) resolveTemplateForCreate(
+	ctx context.Context,
+	applicationID string,
+	bindingID string,
+	templateID string,
+) (string, []domain.ReleaseTemplateParam, error) {
+	templateID = strings.TrimSpace(templateID)
+	if templateID != "" {
+		template, templateParams, err := uc.repo.GetTemplateByID(ctx, templateID)
+		if err != nil {
+			return "", nil, err
+		}
+		if template.Status != domain.TemplateStatusActive {
+			return "", nil, fmt.Errorf("%w: release template is disabled", ErrInvalidInput)
+		}
+		if strings.TrimSpace(template.ApplicationID) != strings.TrimSpace(applicationID) {
+			return "", nil, fmt.Errorf("%w: release template does not belong to application", ErrInvalidInput)
+		}
+		if strings.TrimSpace(template.BindingID) != strings.TrimSpace(bindingID) {
+			return "", nil, fmt.Errorf("%w: release template does not belong to binding", ErrInvalidInput)
+		}
+		return template.ID, templateParams, nil
+	}
+
+	templates, total, err := uc.repo.ListTemplates(ctx, domain.TemplateListFilter{
+		ApplicationID: applicationID,
+		BindingID:     bindingID,
+		Status:        domain.TemplateStatusActive,
+		Page:          1,
+		PageSize:      2,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	if total == 0 || len(templates) == 0 {
+		return "", nil, nil
+	}
+	if total > 1 || len(templates) > 1 {
+		return "", nil, fmt.Errorf("%w: multiple active release templates found for selected binding", ErrInvalidInput)
+	}
+
+	template, templateParams, err := uc.repo.GetTemplateByID(ctx, templates[0].ID)
+	if err != nil {
+		return "", nil, err
+	}
+	if template.Status != domain.TemplateStatusActive {
+		return "", nil, fmt.Errorf("%w: release template is disabled", ErrInvalidInput)
+	}
+	return template.ID, templateParams, nil
+}
+
+type releaseOrderSummaryFields struct {
+	EnvCode     string
+	ProjectName string
+	GitRef      string
+	ImageTag    string
+}
+
+func resolveReleaseOrderSummaryFields(params []CreateReleaseOrderParamInput) releaseOrderSummaryFields {
+	result := releaseOrderSummaryFields{}
+	for _, item := range params {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		value := strings.TrimSpace(item.ParamValue)
+		if value == "" {
+			continue
+		}
+		switch key {
+		case "env":
+			if result.EnvCode == "" {
+				result.EnvCode = value
+			}
+		case "project_name":
+			if result.ProjectName == "" {
+				result.ProjectName = value
+			}
+		case "branch":
+			if result.GitRef == "" {
+				result.GitRef = value
+			}
+		case "image_tag":
+			if result.ImageTag == "" {
+				result.ImageTag = value
+			}
+		}
+	}
+	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderInput) ([]domain.ReleaseOrder, int64, error) {
@@ -395,7 +607,25 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		triggerMessage = triggerMessage + "，queue: " + strings.TrimSpace(queueURL)
 	}
 	_ = uc.markStepFinished(ctx, order.ID, "trigger_pipeline", domain.StepStatusSuccess, triggerMessage)
-	_ = uc.markStepRunning(ctx, order.ID, "pipeline_running", "管线已触发，等待执行结果回传")
+
+	runningMessage := "管线已触发，等待执行结果回传"
+	if strings.TrimSpace(queueURL) != "" {
+		runningMessage += "，queue: " + strings.TrimSpace(queueURL)
+		if buildURL, cancelled, why, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL); queueErr == nil {
+			buildURL = strings.TrimSpace(buildURL)
+			if buildURL != "" {
+				runningMessage += "，build: " + buildURL
+			}
+			if cancelled {
+				cancelReason := strings.TrimSpace(why)
+				if cancelReason == "" {
+					cancelReason = "Jenkins 队列任务已取消"
+				}
+				runningMessage += "，queue_cancelled: " + cancelReason
+			}
+		}
+	}
+	_ = uc.markStepRunning(ctx, order.ID, "pipeline_running", runningMessage)
 
 	return uc.repo.GetByID(ctx, order.ID)
 }

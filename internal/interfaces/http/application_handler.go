@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"gos/internal/application/usecase"
 	domain "gos/internal/domain/application"
+	userdomain "gos/internal/domain/user"
 )
 
 type ApplicationHandler struct {
@@ -18,6 +21,12 @@ type ApplicationHandler struct {
 	query   *usecase.QueryApplication
 	updater *usecase.UpdateApplication
 	deleter *usecase.DeleteApplication
+	users   ApplicationUserReader
+	authz   RequestAuthorizer
+}
+
+type ApplicationUserReader interface {
+	GetUserByID(ctx context.Context, id string) (userdomain.User, error)
 }
 
 func NewApplicationHandler(
@@ -25,12 +34,16 @@ func NewApplicationHandler(
 	query *usecase.QueryApplication,
 	updater *usecase.UpdateApplication,
 	deleter *usecase.DeleteApplication,
+	users ApplicationUserReader,
+	authz RequestAuthorizer,
 ) *ApplicationHandler {
 	return &ApplicationHandler{
 		creator: creator,
 		query:   query,
 		updater: updater,
 		deleter: deleter,
+		users:   users,
+		authz:   authz,
 	}
 }
 
@@ -47,6 +60,7 @@ type CreateApplicationRequest struct {
 	Key          string `json:"key"`
 	RepoURL      string `json:"repo_url"`
 	Description  string `json:"description"`
+	OwnerUserID  string `json:"owner_user_id"`
 	Owner        string `json:"owner"`
 	Status       string `json:"status"`
 	ArtifactType string `json:"artifact_type"`
@@ -58,6 +72,7 @@ type UpdateApplicationRequest struct {
 	Key          string `json:"key"`
 	RepoURL      string `json:"repo_url"`
 	Description  string `json:"description"`
+	OwnerUserID  string `json:"owner_user_id"`
 	Owner        string `json:"owner"`
 	Status       string `json:"status"`
 	ArtifactType string `json:"artifact_type"`
@@ -70,6 +85,7 @@ type ApplicationResponse struct {
 	Key          string    `json:"key"`
 	RepoURL      string    `json:"repo_url"`
 	Description  string    `json:"description"`
+	OwnerUserID  string    `json:"owner_user_id"`
 	Owner        string    `json:"owner"`
 	Status       string    `json:"status"`
 	ArtifactType string    `json:"artifact_type"`
@@ -105,9 +121,24 @@ type ErrorResponse struct {
 // @Failure      500      {object}  ErrorResponse
 // @Router       /applications [post]
 func (h *ApplicationHandler) Create(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "application.manage", "", "") {
+		return
+	}
+
 	var req CreateApplicationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	ownerUserID := strings.TrimSpace(req.OwnerUserID)
+	if ownerUserID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "owner_user_id is required"})
+		return
+	}
+	ownerName, ownerErr := h.resolveOwnerDisplayName(c, ownerUserID)
+	if ownerErr != nil {
+		writeHTTPError(c, ownerErr)
 		return
 	}
 
@@ -116,7 +147,8 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 		Key:          req.Key,
 		RepoURL:      req.RepoURL,
 		Description:  req.Description,
-		Owner:        req.Owner,
+		OwnerUserID:  ownerUserID,
+		Owner:        ownerName,
 		Status:       domain.Status(strings.TrimSpace(req.Status)),
 		ArtifactType: req.ArtifactType,
 		Language:     req.Language,
@@ -139,6 +171,9 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id} [get]
 func (h *ApplicationHandler) GetByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "application.view", "", "") {
+		return
+	}
 	app, err := h.query.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeHTTPError(c, err)
@@ -161,6 +196,9 @@ func (h *ApplicationHandler) GetByID(c *gin.Context) {
 // @Failure      500     {object}  ErrorResponse
 // @Router       /applications [get]
 func (h *ApplicationHandler) List(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "application.view", "", "") {
+		return
+	}
 	page, err := parsePositiveIntQuery(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -210,9 +248,24 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 // @Failure      500      {object}  ErrorResponse
 // @Router       /applications/{id} [put]
 func (h *ApplicationHandler) Update(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "application.manage", "", "") {
+		return
+	}
+
 	var req UpdateApplicationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	ownerUserID := strings.TrimSpace(req.OwnerUserID)
+	if ownerUserID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "owner_user_id is required"})
+		return
+	}
+	ownerName, ownerErr := h.resolveOwnerDisplayName(c, ownerUserID)
+	if ownerErr != nil {
+		writeHTTPError(c, ownerErr)
 		return
 	}
 
@@ -221,7 +274,8 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 		Key:          req.Key,
 		RepoURL:      req.RepoURL,
 		Description:  req.Description,
-		Owner:        req.Owner,
+		OwnerUserID:  ownerUserID,
+		Owner:        ownerName,
 		Status:       domain.Status(strings.TrimSpace(req.Status)),
 		ArtifactType: req.ArtifactType,
 		Language:     req.Language,
@@ -244,6 +298,9 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id} [delete]
 func (h *ApplicationHandler) Delete(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "application.manage", "", "") {
+		return
+	}
 	err := h.deleter.Execute(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeHTTPError(c, err)
@@ -259,6 +316,7 @@ func toResponse(app domain.Application) ApplicationResponse {
 		Key:          app.Key,
 		RepoURL:      app.RepoURL,
 		Description:  app.Description,
+		OwnerUserID:  app.OwnerUserID,
 		Owner:        app.Owner,
 		Status:       string(app.Status),
 		ArtifactType: app.ArtifactType,
@@ -268,11 +326,31 @@ func toResponse(app domain.Application) ApplicationResponse {
 	}
 }
 
+func (h *ApplicationHandler) resolveOwnerDisplayName(c *gin.Context, ownerUserID string) (string, error) {
+	if h.users == nil {
+		return "", errors.New("owner user resolver is not configured")
+	}
+	user, err := h.users.GetUserByID(c.Request.Context(), ownerUserID)
+	if err != nil {
+		return "", err
+	}
+	if user.Status != userdomain.StatusActive {
+		return "", fmt.Errorf("%w: owner user is inactive", usecase.ErrInvalidInput)
+	}
+	name := strings.TrimSpace(user.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(user.Username)
+	}
+	return name, nil
+}
+
 func writeHTTPError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, usecase.ErrInvalidInput), errors.Is(err, usecase.ErrInvalidID), errors.Is(err, usecase.ErrInvalidStatus):
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, userdomain.ErrUserNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrKeyDuplicated):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})

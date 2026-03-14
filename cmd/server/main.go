@@ -62,6 +62,10 @@ func main() {
 	if err := bootstrap.InitSchema(releaseRepo); err != nil {
 		log.Fatalf("init release schema: %v", err)
 	}
+	userRepo := sqlrepo.NewUserRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(userRepo); err != nil {
+		log.Fatalf("init user schema: %v", err)
+	}
 
 	jenkinsClient := jenkins.NewClient(jenkins.Config{
 		BaseURL:    cfg.Jenkins.BaseURL,
@@ -71,28 +75,59 @@ func main() {
 	})
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
 	syncPipelineParamDefs := usecase.NewSyncPipelineParamDefs(pipelineParamRepo, jenkinsClient)
+	userManagement := usecase.NewUserManagement(userRepo)
+	authSessionManager := usecase.NewAuthSessionManager(
+		userRepo,
+		time.Duration(cfg.Auth.SessionTTLHours)*time.Hour,
+	)
+	if err := userManagement.EnsureSeedData(
+		context.Background(),
+		cfg.Auth.AdminUsername,
+		cfg.Auth.AdminDisplayName,
+		cfg.Auth.AdminPassword,
+	); err != nil {
+		log.Fatalf("ensure auth seed data: %v", err)
+	}
 
+	authHandler := httpapi.NewAuthHandler(authSessionManager, userManagement)
+	userHandler := httpapi.NewUserHandler(userManagement, authSessionManager)
 	handler := httpapi.NewApplicationHandler(
 		usecase.NewCreateApplication(repo),
 		usecase.NewQueryApplication(repo),
 		usecase.NewUpdateApplication(repo),
 		usecase.NewDeleteApplication(repo),
+		userManagement,
+		authSessionManager,
 	)
 	pipelineHandler := httpapi.NewPipelineHandler(
 		syncPipelines,
 		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
 		usecase.NewPipelineBindingManager(pipelineRepo, repo),
+		authSessionManager,
 	)
 	platformParamHandler := httpapi.NewPlatformParamHandler(
 		usecase.NewPlatformParamDictManager(platformParamRepo, pipelineParamRepo),
+		authSessionManager,
 	)
 	pipelineParamHandler := httpapi.NewPipelineParamHandler(
 		usecase.NewPipelineParamDefManager(pipelineParamRepo, repo, pipelineRepo, platformParamRepo),
 		syncPipelineParamDefs,
+		authSessionManager,
+		authSessionManager,
 	)
 	releaseOrderManager := usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, jenkinsClient)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, pipelineRepo, pipelineParamRepo, platformParamRepo)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
-	releaseOrderHandler := httpapi.NewReleaseOrderHandler(releaseOrderManager, releaseOrderLogStreamer)
+	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
+		releaseOrderManager,
+		releaseOrderLogStreamer,
+		authSessionManager,
+		authSessionManager,
+	)
+	releaseTemplateHandler := httpapi.NewReleaseTemplateHandler(
+		releaseTemplateManager,
+		authSessionManager,
+	)
 	releaseTracker := usecase.NewTrackReleaseExecution(
 		releaseOrderManager,
 		jenkinsClient,
@@ -142,7 +177,17 @@ func main() {
 	})
 	defer releaseTrackTask.Stop()
 
-	router := httpapi.NewRouter(handler, pipelineHandler, platformParamHandler, pipelineParamHandler, releaseOrderHandler)
+	router := httpapi.NewRouter(
+		authHandler,
+		userHandler,
+		authSessionManager,
+		handler,
+		pipelineHandler,
+		platformParamHandler,
+		pipelineParamHandler,
+		releaseOrderHandler,
+		releaseTemplateHandler,
+	)
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,

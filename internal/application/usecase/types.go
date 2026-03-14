@@ -7,6 +7,7 @@ type CreateInput struct {
 	Key          string
 	RepoURL      string
 	Description  string
+	OwnerUserID  string
 	Owner        string
 	Status       domain.Status
 	ArtifactType string

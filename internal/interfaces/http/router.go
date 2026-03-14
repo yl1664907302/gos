@@ -12,22 +12,43 @@ import (
 )
 
 func NewRouter(
+	authHandler *AuthHandler,
+	userHandler *UserHandler,
+	sessionResolver SessionUserResolver,
 	applicationHandler *ApplicationHandler,
 	pipelineHandler *PipelineHandler,
 	platformParamHandler *PlatformParamHandler,
 	pipelineParamHandler *PipelineParamHandler,
 	releaseOrderHandler *ReleaseOrderHandler,
+	releaseTemplateHandler *ReleaseTemplateHandler,
 ) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
 	router.Use(cors())
 	registerSystemRoutes(router)
+	registerPublicAuthRoutes(router, authHandler)
+	router.Use(authMiddleware(sessionResolver))
+	registerProtectedAuthRoutes(router, authHandler)
+	registerUserRoutes(router, userHandler)
 	registerApplicationRoutes(router, applicationHandler)
 	registerPipelineRoutes(router, pipelineHandler)
 	registerPlatformParamRoutes(router, platformParamHandler)
 	registerPipelineParamRoutes(router, pipelineParamHandler)
 	registerReleaseOrderRoutes(router, releaseOrderHandler)
+	registerReleaseTemplateRoutes(router, releaseTemplateHandler)
 	return router
+}
+
+func registerPublicAuthRoutes(router gin.IRouter, authHandler *AuthHandler) {
+	authHandler.RegisterPublicRoutes(router)
+}
+
+func registerProtectedAuthRoutes(router gin.IRouter, authHandler *AuthHandler) {
+	authHandler.RegisterProtectedRoutes(router)
+}
+
+func registerUserRoutes(router gin.IRouter, userHandler *UserHandler) {
+	userHandler.RegisterRoutes(router)
 }
 
 func registerApplicationRoutes(router gin.IRouter, applicationHandler *ApplicationHandler) {
@@ -48,6 +69,10 @@ func registerPipelineParamRoutes(router gin.IRouter, pipelineParamHandler *Pipel
 
 func registerReleaseOrderRoutes(router gin.IRouter, releaseOrderHandler *ReleaseOrderHandler) {
 	releaseOrderHandler.RegisterRoutes(router)
+}
+
+func registerReleaseTemplateRoutes(router gin.IRouter, releaseTemplateHandler *ReleaseTemplateHandler) {
+	releaseTemplateHandler.RegisterRoutes(router)
 }
 
 func registerSystemRoutes(router gin.IRouter) {

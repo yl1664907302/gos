@@ -14,6 +14,7 @@ type Config struct {
 	Server      ServerConfig   `json:"server"`
 	Database    DatabaseConfig `json:"database"`
 	Jenkins     JenkinsConfig  `json:"jenkins"`
+	Auth        AuthConfig     `json:"auth"`
 }
 
 type ServerConfig struct {
@@ -51,6 +52,13 @@ type JenkinsConfig struct {
 	AutoSyncIntervalSec     int    `json:"auto_sync_interval_sec"`
 	ReleaseTrackEnabled     bool   `json:"release_track_enabled"`
 	ReleaseTrackIntervalSec int    `json:"release_track_interval_sec"`
+}
+
+type AuthConfig struct {
+	SessionTTLHours  int    `json:"session_ttl_hours"`
+	AdminUsername    string `json:"admin_username"`
+	AdminDisplayName string `json:"admin_display_name"`
+	AdminPassword    string `json:"admin_password"`
 }
 
 func LoadConfig() (Config, error) {
@@ -109,6 +117,12 @@ func defaultConfig() Config {
 			AutoSyncIntervalSec:     300,
 			ReleaseTrackEnabled:     true,
 			ReleaseTrackIntervalSec: 10,
+		},
+		Auth: AuthConfig{
+			SessionTTLHours:  24,
+			AdminUsername:    "admin",
+			AdminDisplayName: "Administrator",
+			AdminPassword:    "admin123",
 		},
 	}
 }
@@ -183,6 +197,18 @@ func overrideFromEnv(cfg *Config) {
 	if v, ok := intFromEnv("JENKINS_RELEASE_TRACK_INTERVAL_SEC"); ok {
 		cfg.Jenkins.ReleaseTrackIntervalSec = v
 	}
+	if v, ok := intFromEnv("AUTH_SESSION_TTL_HOURS"); ok {
+		cfg.Auth.SessionTTLHours = v
+	}
+	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_USERNAME")); v != "" {
+		cfg.Auth.AdminUsername = v
+	}
+	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_DISPLAY_NAME")); v != "" {
+		cfg.Auth.AdminDisplayName = v
+	}
+	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_PASSWORD")); v != "" {
+		cfg.Auth.AdminPassword = v
+	}
 }
 
 func applyConfigDefaults(cfg *Config) {
@@ -256,6 +282,22 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.Jenkins.ReleaseTrackIntervalSec <= 0 {
 		cfg.Jenkins.ReleaseTrackIntervalSec = 10
+	}
+
+	if cfg.Auth.SessionTTLHours <= 0 {
+		cfg.Auth.SessionTTLHours = 24
+	}
+	cfg.Auth.AdminUsername = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminUsername))
+	cfg.Auth.AdminDisplayName = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminDisplayName))
+	cfg.Auth.AdminPassword = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminPassword))
+	if cfg.Auth.AdminUsername == "" {
+		cfg.Auth.AdminUsername = "admin"
+	}
+	if cfg.Auth.AdminDisplayName == "" {
+		cfg.Auth.AdminDisplayName = "Administrator"
+	}
+	if cfg.Auth.AdminPassword == "" {
+		cfg.Auth.AdminPassword = "admin123"
 	}
 }
 

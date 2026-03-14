@@ -3,21 +3,26 @@ import { ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { deleteApplication, listApplications } from '../../api/application'
+import { listAllReleaseTemplates } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useApplicationListStore } from '../../stores/application-list'
+import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 const router = useRouter()
 const listStore = useApplicationListStore()
+const authStore = useAuthStore()
 
 const loading = ref(false)
 const deletingId = ref('')
 const dataSource = ref<Application[]>([])
 const total = ref(0)
+const loadingTemplateAvailability = ref(false)
+const templateApplicationIDs = ref<Set<string>>(new Set())
 
 const initialColumns: TableColumnsType<Application> = [
   { title: '应用名称', dataIndex: 'name', key: 'name', width: 180 },
@@ -31,6 +36,16 @@ const initialColumns: TableColumnsType<Application> = [
   { title: '操作', key: 'actions', width: 360, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 520, hitArea: 10 })
+
+const canManageApplication = computed(() => authStore.hasPermission('application.manage'))
+const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
+function canReleaseApplication(applicationID: string) {
+  return (
+    authStore.hasApplicationPermission('release.create', applicationID) &&
+    templateApplicationIDs.value.has(String(applicationID || '').trim()) &&
+    !loadingTemplateAvailability.value
+  )
+}
 
 async function loadApplications() {
   loading.value = true
@@ -49,6 +64,21 @@ async function loadApplications() {
     message.error(extractHTTPErrorMessage(error, '应用列表加载失败'))
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTemplateAvailability() {
+  loadingTemplateAvailability.value = true
+  try {
+    const items = await listAllReleaseTemplates({ status: 'active' })
+    templateApplicationIDs.value = new Set(
+      items.map((item) => String(item.application_id || '').trim()).filter(Boolean),
+    )
+  } catch (error) {
+    templateApplicationIDs.value = new Set()
+    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+  } finally {
+    loadingTemplateAvailability.value = false
   }
 }
 
@@ -84,6 +114,9 @@ function toBindings(id: string) {
 }
 
 function toRelease(id: string) {
+  if (!canReleaseApplication(id)) {
+    return
+  }
   void router.push({
     path: '/releases/new',
     query: { application_id: id },
@@ -121,7 +154,7 @@ function formatTime(value: string) {
 }
 
 onMounted(() => {
-  void loadApplications()
+  void Promise.all([loadApplications(), loadTemplateAvailability()])
 })
 </script>
 
@@ -132,7 +165,7 @@ onMounted(() => {
         <h2 class="page-title">我的应用</h2>
         <p class="page-subtitle">管理应用基础信息，支持筛选、分页、编辑与删除。</p>
       </div>
-      <a-button type="primary" @click="toCreate">
+      <a-button v-if="canManageApplication" type="primary" @click="toCreate">
         <template #icon>
           <PlusOutlined />
         </template>
@@ -203,10 +236,18 @@ onMounted(() => {
           <template v-else-if="column.key === 'actions'">
             <a-space>
               <a-button type="link" size="small" @click="toDetail(record.id)">查看</a-button>
-              <a-button type="link" size="small" @click="toEdit(record.id)">编辑</a-button>
-              <a-button type="link" size="small" @click="toBindings(record.id)">管线绑定</a-button>
-              <a-button type="link" size="small" @click="toRelease(record.id)">发布</a-button>
+              <a-button v-if="canManageApplication" type="link" size="small" @click="toEdit(record.id)">编辑</a-button>
+              <a-button v-if="canViewPipeline" type="link" size="small" @click="toBindings(record.id)">管线绑定</a-button>
+              <a-button
+                type="link"
+                size="small"
+                :disabled="!canReleaseApplication(record.id)"
+                @click="toRelease(record.id)"
+              >
+                发布
+              </a-button>
               <a-popconfirm
+                v-if="canManageApplication"
                 title="确认删除当前应用吗？"
                 ok-text="删除"
                 cancel-text="取消"

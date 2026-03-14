@@ -135,8 +135,11 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 		if queueURL == "" {
 			queueURL = extractQueueURLFromSteps(steps)
 		}
+		if buildURL == "" {
+			buildURL = extractBuildURLFromSteps(steps)
+		}
 
-		if queueURL == "" {
+		if queueURL == "" && buildURL == "" {
 			if order.Status.IsTerminal() {
 				return uc.emitDone(emit, order, offset, "")
 			}

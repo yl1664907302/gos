@@ -18,17 +18,20 @@ type PipelineHandler struct {
 	syncer  *usecase.SyncPipelines
 	query   *usecase.QueryPipeline
 	binding *usecase.PipelineBindingManager
+	authz   RequestAuthorizer
 }
 
 func NewPipelineHandler(
 	syncer *usecase.SyncPipelines,
 	query *usecase.QueryPipeline,
 	binding *usecase.PipelineBindingManager,
+	authz RequestAuthorizer,
 ) *PipelineHandler {
 	return &PipelineHandler{
 		syncer:  syncer,
 		query:   query,
 		binding: binding,
+		authz:   authz,
 	}
 }
 
@@ -36,6 +39,7 @@ func (h *PipelineHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/jenkins/pipelines/sync", h.Sync)
 	router.GET("/pipelines", h.ListPipelines)
 	router.GET("/pipelines/:id", h.GetPipelineByID)
+	router.GET("/pipelines/:id/raw-script", h.GetPipelineRawScript)
 	router.POST("/pipelines/:id/verify", h.VerifyPipeline)
 
 	router.POST("/applications/:id/pipeline-bindings", h.CreateBinding)
@@ -63,6 +67,16 @@ type PipelineResponse struct {
 
 type PipelineDataResponse struct {
 	Data PipelineResponse `json:"data"`
+}
+
+type PipelineRawScriptDataResponse struct {
+	Data struct {
+		Pipeline        PipelineResponse `json:"pipeline"`
+		DefinitionClass string           `json:"definition_class"`
+		Script          string           `json:"script"`
+		ScriptPath      string           `json:"script_path"`
+		FromSCM         bool             `json:"from_scm"`
+	} `json:"data"`
 }
 
 type PipelineListResponse struct {
@@ -138,6 +152,9 @@ type PipelineBindingListResponse struct {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /jenkins/pipelines/sync [post]
 func (h *PipelineHandler) Sync(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
 	result, err := h.syncer.Execute(c.Request.Context())
 	if err != nil {
 		writePipelineHTTPError(c, err)
@@ -160,6 +177,9 @@ func (h *PipelineHandler) Sync(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipelines [get]
 func (h *PipelineHandler) ListPipelines(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.view", "", "") {
+		return
+	}
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -206,12 +226,46 @@ func (h *PipelineHandler) ListPipelines(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipelines/{id} [get]
 func (h *PipelineHandler) GetPipelineByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.view", "", "") {
+		return
+	}
 	item, err := h.query.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writePipelineHTTPError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": toPipelineResponse(item)})
+}
+
+// GetPipelineRawScript godoc
+// @Summary      Get Jenkins pipeline raw script
+// @Tags         pipelines
+// @Produce      json
+// @Param        id   path      string  true  "Pipeline ID"
+// @Success      200  {object}  PipelineRawScriptDataResponse
+// @Failure      400  {object}  ErrorResponse
+// @Failure      404  {object}  ErrorResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /pipelines/{id}/raw-script [get]
+func (h *PipelineHandler) GetPipelineRawScript(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.view", "", "") {
+		return
+	}
+	result, err := h.query.GetRawScript(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"pipeline":         toPipelineResponse(result.Pipeline),
+			"definition_class": result.DefinitionClass,
+			"script":           result.Script,
+			"script_path":      result.ScriptPath,
+			"from_scm":         result.FromSCM,
+		},
+	})
 }
 
 // VerifyPipeline godoc
@@ -225,6 +279,9 @@ func (h *PipelineHandler) GetPipelineByID(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipelines/{id}/verify [post]
 func (h *PipelineHandler) VerifyPipeline(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
 	result, err := h.query.Verify(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writePipelineHTTPError(c, err)
@@ -255,6 +312,9 @@ func (h *PipelineHandler) VerifyPipeline(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id}/pipeline-bindings [post]
 func (h *PipelineHandler) CreateBinding(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
 	var req CreateBindingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -293,6 +353,17 @@ func (h *PipelineHandler) CreateBinding(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id}/pipeline-bindings [get]
 func (h *PipelineHandler) ListBindings(c *gin.Context) {
+	if !ensureAnyPermission(
+		c,
+		h.authz,
+		"pipeline.view",
+		"release.view",
+		"release.create",
+		"release.execute",
+		"release.cancel",
+	) {
+		return
+	}
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -340,6 +411,9 @@ func (h *PipelineHandler) ListBindings(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipeline-bindings/{id} [get]
 func (h *PipelineHandler) GetBindingByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.view", "", "") {
+		return
+	}
 	item, err := h.binding.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writePipelineHTTPError(c, err)
@@ -361,6 +435,9 @@ func (h *PipelineHandler) GetBindingByID(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipeline-bindings/{id} [put]
 func (h *PipelineHandler) UpdateBinding(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
 	var req UpdateBindingRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -393,6 +470,9 @@ func (h *PipelineHandler) UpdateBinding(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipeline-bindings/{id} [delete]
 func (h *PipelineHandler) DeleteBinding(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
 	if err := h.binding.Delete(c.Request.Context(), c.Param("id")); err != nil {
 		writePipelineHTTPError(c, err)
 		return

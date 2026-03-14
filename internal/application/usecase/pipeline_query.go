@@ -21,6 +21,14 @@ type VerifyPipelineOutput struct {
 	Pipeline domain.Pipeline `json:"pipeline"`
 }
 
+type PipelineRawScriptOutput struct {
+	Pipeline        domain.Pipeline `json:"pipeline"`
+	DefinitionClass string          `json:"definition_class"`
+	Script          string          `json:"script"`
+	ScriptPath      string          `json:"script_path"`
+	FromSCM         bool            `json:"from_scm"`
+}
+
 func NewQueryPipeline(repo domain.Repository, jenkins JenkinsPipelineClient) *QueryPipeline {
 	return &QueryPipeline{
 		repo:    repo,
@@ -92,5 +100,35 @@ func (uc *QueryPipeline) Verify(ctx context.Context, id string) (VerifyPipelineO
 		JobName:  job.Name,
 		JobURL:   job.URL,
 		Pipeline: updated,
+	}, nil
+}
+
+func (uc *QueryPipeline) GetRawScript(ctx context.Context, id string) (PipelineRawScriptOutput, error) {
+	if strings.TrimSpace(id) == "" {
+		return PipelineRawScriptOutput{}, ErrInvalidID
+	}
+
+	p, err := uc.repo.GetPipelineByID(ctx, id)
+	if err != nil {
+		return PipelineRawScriptOutput{}, err
+	}
+	if p.Provider != domain.ProviderJenkins {
+		return PipelineRawScriptOutput{}, ErrInvalidProvider
+	}
+	if strings.TrimSpace(p.JobFullName) == "" {
+		return PipelineRawScriptOutput{}, ErrInvalidInput
+	}
+
+	script, err := uc.jenkins.GetPipelineScript(ctx, p.JobFullName)
+	if err != nil {
+		return PipelineRawScriptOutput{}, err
+	}
+
+	return PipelineRawScriptOutput{
+		Pipeline:        p,
+		DefinitionClass: script.DefinitionClass,
+		Script:          script.Script,
+		ScriptPath:      script.ScriptPath,
+		FromSCM:         script.FromSCM,
 	}, nil
 }

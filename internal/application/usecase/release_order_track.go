@@ -11,6 +11,7 @@ import (
 )
 
 var queueURLPattern = regexp.MustCompile(`queue:\s*([^\s]+)`)
+var buildURLPattern = regexp.MustCompile(`build:\s*([^\s]+)`)
 
 type JenkinsReleaseStatusClient interface {
 	GetQueueItem(ctx context.Context, queueURL string) (executableURL string, cancelled bool, why string, err error)
@@ -108,40 +109,57 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	}
 
 	queueURL := extractQueueURLFromSteps(steps)
-	if queueURL == "" {
-		return false, true, nil
-	}
-
-	buildURL, cancelled, why, err := uc.jenkins.GetQueueItem(ctx, queueURL)
-	if err != nil {
-		if isResourceNotFoundError(err) {
-			if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
-				return false, true, nil
-			}
-			updated, finishErr := uc.finishStep(
-				ctx,
-				order.ID,
-				"pipeline_running",
-				domain.StepStatusFailed,
-				"Jenkins 队列记录已过期，无法追踪结果",
-			)
-			return updated, false, finishErr
+	buildURL := extractBuildURLFromSteps(steps)
+	if queueURL == "" && buildURL == "" {
+		if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
+			return false, true, nil
 		}
-		return false, false, err
-	}
-	if cancelled {
-		updated, finishErr := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, "Jenkins 队列已取消: "+strings.TrimSpace(why))
+		updated, finishErr := uc.finishStep(
+			ctx,
+			order.ID,
+			"pipeline_running",
+			domain.StepStatusFailed,
+			"未记录 Jenkins 队列/构建地址，无法追踪执行结果",
+		)
 		return updated, false, finishErr
 	}
 
-	buildURL = strings.TrimSpace(buildURL)
 	if buildURL == "" {
-		return false, false, nil
+		resolvedBuildURL, cancelled, why, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL)
+		if queueErr != nil {
+			if isResourceNotFoundError(queueErr) {
+				if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
+					return false, true, nil
+				}
+				updated, finishErr := uc.finishStep(
+					ctx,
+					order.ID,
+					"pipeline_running",
+					domain.StepStatusFailed,
+					"Jenkins 队列记录已过期，无法追踪结果",
+				)
+				return updated, false, finishErr
+			}
+			return false, false, queueErr
+		}
+
+		if cancelled {
+			updated, finishErr := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, "Jenkins 队列已取消: "+strings.TrimSpace(why))
+			return updated, false, finishErr
+		}
+
+		buildURL = strings.TrimSpace(resolvedBuildURL)
+		if buildURL == "" {
+			return false, false, nil
+		}
+		if rememberErr := uc.rememberBuildURL(ctx, order.ID, steps, buildURL); rememberErr != nil {
+			return false, false, rememberErr
+		}
 	}
 
-	building, result, err := uc.jenkins.GetBuildStatus(ctx, buildURL)
-	if err != nil {
-		if isResourceNotFoundError(err) {
+	building, result, statusErr := uc.jenkins.GetBuildStatus(ctx, buildURL)
+	if statusErr != nil {
+		if isResourceNotFoundError(statusErr) {
 			if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
 				return false, true, nil
 			}
@@ -154,7 +172,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			)
 			return updated, false, finishErr
 		}
-		return false, false, err
+		return false, false, statusErr
 	}
 	if building {
 		return false, false, nil
@@ -182,6 +200,43 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	default:
 		return false, false, nil
 	}
+}
+
+func (uc *TrackReleaseExecution) rememberBuildURL(
+	ctx context.Context,
+	orderID string,
+	steps []domain.ReleaseOrderStep,
+	buildURL string,
+) error {
+	buildURL = strings.TrimSpace(buildURL)
+	if buildURL == "" {
+		return nil
+	}
+	runningStep := findStepByCode(steps, "pipeline_running")
+	if runningStep == nil {
+		return nil
+	}
+	if strings.TrimSpace(extractBuildURL(runningStep.Message)) != "" {
+		return nil
+	}
+
+	message := strings.TrimSpace(runningStep.Message)
+	message = strings.TrimRight(message, "，,;； ")
+	if message == "" {
+		message = "管线运行中"
+	}
+	message += "，build: " + buildURL
+
+	_, err := uc.manager.repo.UpdateStep(ctx, orderID, "pipeline_running", domain.StepUpdateInput{
+		Status:     runningStep.Status,
+		Message:    message,
+		StartedAt:  runningStep.StartedAt,
+		FinishedAt: runningStep.FinishedAt,
+	})
+	if err != nil && !errors.Is(err, domain.ErrStepNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (uc *TrackReleaseExecution) finishStep(
@@ -257,6 +312,22 @@ func extractQueueURLFromSteps(steps []domain.ReleaseOrderStep) string {
 	return ""
 }
 
+func extractBuildURLFromSteps(steps []domain.ReleaseOrderStep) string {
+	for _, step := range steps {
+		if step.StepCode == "pipeline_running" || step.StepCode == "trigger_pipeline" {
+			if buildURL := extractBuildURL(step.Message); buildURL != "" {
+				return buildURL
+			}
+		}
+	}
+	for _, step := range steps {
+		if buildURL := extractBuildURL(step.Message); buildURL != "" {
+			return buildURL
+		}
+	}
+	return ""
+}
+
 func extractQueueURL(message string) string {
 	matches := queueURLPattern.FindStringSubmatch(strings.TrimSpace(message))
 	if len(matches) < 2 {
@@ -265,6 +336,16 @@ func extractQueueURL(message string) string {
 	queueURL := strings.TrimSpace(matches[1])
 	queueURL = strings.TrimRight(queueURL, "，,;；")
 	return queueURL
+}
+
+func extractBuildURL(message string) string {
+	matches := buildURLPattern.FindStringSubmatch(strings.TrimSpace(message))
+	if len(matches) < 2 {
+		return ""
+	}
+	buildURL := strings.TrimSpace(matches[1])
+	buildURL = strings.TrimRight(buildURL, "，,;；")
+	return buildURL
 }
 
 func isResourceNotFoundError(err error) bool {

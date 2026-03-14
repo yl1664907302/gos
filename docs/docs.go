@@ -988,6 +988,52 @@ const docTemplate = `{
                 }
             }
         },
+        "/pipelines/{id}/raw-script": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pipelines"
+                ],
+                "summary": "Get Jenkins pipeline raw script",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Pipeline ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.PipelineRawScriptDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/pipelines/{id}/verify": {
             "post": {
                 "produces": [
@@ -1578,6 +1624,55 @@ const docTemplate = `{
                 }
             }
         },
+        "/release-orders/{id}/logs/stream": {
+            "get": {
+                "produces": [
+                    "text/event-stream"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Stream release order logs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Release order ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Start offset for progressive logs",
+                        "name": "start",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK"
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/release-orders/{id}/params": {
             "get": {
                 "produces": [
@@ -1855,6 +1950,9 @@ const docTemplate = `{
                 "owner": {
                     "type": "string"
                 },
+                "owner_user_id": {
+                    "type": "string"
+                },
                 "repo_url": {
                     "type": "string"
                 },
@@ -1885,6 +1983,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "owner": {
+                    "type": "string"
+                },
+                "owner_user_id": {
                     "type": "string"
                 },
                 "repo_url": {
@@ -2169,6 +2270,12 @@ const docTemplate = `{
         "httpapi.PipelineParamDefResponse": {
             "type": "object",
             "properties": {
+                "can_edit": {
+                    "type": "boolean"
+                },
+                "can_view": {
+                    "type": "boolean"
+                },
                 "created_at": {
                     "type": "string"
                 },
@@ -2219,6 +2326,31 @@ const docTemplate = `{
                 },
                 "visible": {
                     "type": "boolean"
+                }
+            }
+        },
+        "httpapi.PipelineRawScriptDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "definition_class": {
+                            "type": "string"
+                        },
+                        "from_scm": {
+                            "type": "boolean"
+                        },
+                        "pipeline": {
+                            "$ref": "#/definitions/httpapi.PipelineResponse"
+                        },
+                        "script": {
+                            "type": "string"
+                        },
+                        "script_path": {
+                            "type": "string"
+                        }
+                    }
                 }
             }
         },
@@ -2558,6 +2690,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "owner": {
+                    "type": "string"
+                },
+                "owner_user_id": {
                     "type": "string"
                 },
                 "repo_url": {

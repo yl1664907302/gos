@@ -5,15 +5,28 @@ import dayjs from 'dayjs'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApplicationByID } from '../../api/application'
+import { listReleaseTemplates } from '../../api/release'
+import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const loading = ref(false)
 const application = ref<Application | null>(null)
+const loadingTemplateAvailability = ref(false)
+const hasActiveTemplate = ref(false)
 
 const applicationId = computed(() => String(route.params.id || ''))
+const canManageApplication = computed(() => authStore.hasPermission('application.manage'))
+const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
+const canCreateRelease = computed(
+  () =>
+    authStore.hasApplicationPermission('release.create', applicationId.value) &&
+    hasActiveTemplate.value &&
+    !loadingTemplateAvailability.value,
+)
 
 const detailItems = computed(() => {
   if (!application.value) {
@@ -61,6 +74,28 @@ async function loadDetail() {
   }
 }
 
+async function loadTemplateAvailability() {
+  if (!applicationId.value) {
+    hasActiveTemplate.value = false
+    return
+  }
+  loadingTemplateAvailability.value = true
+  try {
+    const response = await listReleaseTemplates({
+      application_id: applicationId.value,
+      status: 'active',
+      page: 1,
+      page_size: 1,
+    })
+    hasActiveTemplate.value = response.total > 0
+  } catch (error) {
+    hasActiveTemplate.value = false
+    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+  } finally {
+    loadingTemplateAvailability.value = false
+  }
+}
+
 function goBack() {
   void router.push('/applications')
 }
@@ -80,7 +115,7 @@ function toBindings() {
 }
 
 function toRelease() {
-  if (!applicationId.value) {
+  if (!applicationId.value || !canCreateRelease.value) {
     return
   }
   void router.push({
@@ -90,7 +125,7 @@ function toRelease() {
 }
 
 onMounted(() => {
-  void loadDetail()
+  void Promise.all([loadDetail(), loadTemplateAvailability()])
 })
 </script>
 
@@ -104,19 +139,19 @@ onMounted(() => {
           </template>
           返回列表
         </a-button>
-        <a-button type="primary" @click="toEdit">
+        <a-button v-if="canManageApplication" type="primary" @click="toEdit">
           <template #icon>
             <EditOutlined />
           </template>
           去编辑
         </a-button>
-        <a-button @click="toBindings">
+        <a-button v-if="canViewPipeline" @click="toBindings">
           <template #icon>
             <LinkOutlined />
           </template>
           管线绑定
         </a-button>
-        <a-button type="primary" ghost @click="toRelease">发起发布</a-button>
+        <a-button type="primary" ghost :disabled="!canCreateRelease" @click="toRelease">发起发布</a-button>
       </a-space>
     </div>
 

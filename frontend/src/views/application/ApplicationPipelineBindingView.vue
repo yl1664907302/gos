@@ -14,7 +14,9 @@ import {
   listPipelines,
   updatePipelineBinding,
 } from '../../api/pipeline'
+import { listAllReleaseTemplates } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
+import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
 import type {
   BindingType,
@@ -41,12 +43,15 @@ interface BindingFormState {
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 
 const application = ref<Application | null>(null)
 const loading = ref(false)
 const dataSource = ref<PipelineBinding[]>([])
 const total = ref(0)
 const deletingID = ref('')
+const loadingTemplateAvailability = ref(false)
+const activeTemplateBindingIDs = ref<Set<string>>(new Set())
 
 const detailVisible = ref(false)
 const detailLoading = ref(false)
@@ -81,6 +86,9 @@ const formState = reactive<BindingFormState>({
 
 const applicationID = computed(() => String(route.params.id || ''))
 const pageTitle = computed(() => (application.value ? `${application.value.name} · 管线绑定` : '管线绑定'))
+const canManageBinding = computed(() => authStore.hasPermission('pipeline.manage'))
+const canViewPipelineParams = computed(() => authStore.hasPermission('pipeline_param.manage'))
+const canCreateRelease = computed(() => authStore.hasApplicationPermission('release.create', applicationID.value))
 const existingBindingTypes = computed(() => new Set(dataSource.value.map((item) => item.binding_type)))
 const isCI = computed(() => formState.binding_type === 'ci')
 const isUsingJenkins = computed(
@@ -152,6 +160,9 @@ function toPipelineParams(record: PipelineBinding) {
 }
 
 function toCreateRelease(record: PipelineBinding) {
+  if (!canCreateReleaseForBinding(record.id)) {
+    return
+  }
   void router.push({
     path: '/releases/new',
     query: {
@@ -159,6 +170,14 @@ function toCreateRelease(record: PipelineBinding) {
       binding_id: record.id,
     },
   })
+}
+
+function canCreateReleaseForBinding(bindingID: string) {
+  return (
+    canCreateRelease.value &&
+    activeTemplateBindingIDs.value.has(String(bindingID || '').trim()) &&
+    !loadingTemplateAvailability.value
+  )
 }
 
 async function loadApplication() {
@@ -197,6 +216,28 @@ async function loadBindings() {
     message.error(extractHTTPErrorMessage(error, '绑定列表加载失败'))
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTemplateAvailability() {
+  if (!applicationID.value) {
+    activeTemplateBindingIDs.value = new Set()
+    return
+  }
+  loadingTemplateAvailability.value = true
+  try {
+    const items = await listAllReleaseTemplates({
+      application_id: applicationID.value,
+      status: 'active',
+    })
+    activeTemplateBindingIDs.value = new Set(
+      items.map((item) => String(item.binding_id || '').trim()).filter(Boolean),
+    )
+  } catch (error) {
+    activeTemplateBindingIDs.value = new Set()
+    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+  } finally {
+    loadingTemplateAvailability.value = false
   }
 }
 
@@ -431,8 +472,7 @@ const externalRefRules = [
 ]
 
 onMounted(async () => {
-  await loadApplication()
-  await loadBindings()
+  await Promise.all([loadApplication(), loadBindings(), loadTemplateAvailability()])
 })
 </script>
 
@@ -451,7 +491,7 @@ onMounted(async () => {
           <p class="page-subtitle">应用ID：{{ applicationID }}</p>
         </div>
       </div>
-      <a-button type="primary" @click="openCreateModal">
+      <a-button v-if="canManageBinding" type="primary" @click="openCreateModal">
         <template #icon>
           <PlusOutlined />
         </template>
@@ -525,8 +565,9 @@ onMounted(async () => {
           <template v-else-if="column.key === 'actions'">
             <a-space>
               <a-button type="link" size="small" @click="openDetailDrawer(record)">查看</a-button>
-              <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+              <a-button v-if="canManageBinding" type="link" size="small" @click="openEditModal(record)">编辑</a-button>
               <a-button
+                v-if="canViewPipelineParams"
                 type="link"
                 size="small"
                 :disabled="record.provider !== 'jenkins'"
@@ -534,8 +575,11 @@ onMounted(async () => {
               >
                 管线参数
               </a-button>
-              <a-button type="link" size="small" @click="toCreateRelease(record)">发布</a-button>
+              <a-button type="link" size="small" :disabled="!canCreateReleaseForBinding(record.id)" @click="toCreateRelease(record)">
+                发布
+              </a-button>
               <a-popconfirm
+                v-if="canManageBinding"
                 title="确认删除当前绑定吗？"
                 ok-text="删除"
                 cancel-text="取消"

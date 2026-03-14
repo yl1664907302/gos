@@ -15,10 +15,14 @@ import (
 
 type PlatformParamHandler struct {
 	manager *usecase.PlatformParamDictManager
+	authz   RequestAuthorizer
 }
 
-func NewPlatformParamHandler(manager *usecase.PlatformParamDictManager) *PlatformParamHandler {
-	return &PlatformParamHandler{manager: manager}
+func NewPlatformParamHandler(manager *usecase.PlatformParamDictManager, authz RequestAuthorizer) *PlatformParamHandler {
+	return &PlatformParamHandler{
+		manager: manager,
+		authz:   authz,
+	}
 }
 
 func (h *PlatformParamHandler) RegisterRoutes(router gin.IRouter) {
@@ -85,6 +89,9 @@ type PlatformParamDictListResponse struct {
 // @Failure      500      {object}  ErrorResponse
 // @Router       /platform-param-dicts [post]
 func (h *PlatformParamHandler) Create(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "platform_param.manage", "", "") {
+		return
+	}
 	var req CreatePlatformParamDictRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -122,6 +129,9 @@ func (h *PlatformParamHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /platform-param-dicts [get]
 func (h *PlatformParamHandler) List(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "platform_param.manage", "", "") {
+		return
+	}
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -179,6 +189,9 @@ func (h *PlatformParamHandler) List(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /platform-param-dicts/{id} [get]
 func (h *PlatformParamHandler) GetByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "platform_param.manage", "", "") {
+		return
+	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writePlatformParamHTTPError(c, err)
@@ -201,6 +214,9 @@ func (h *PlatformParamHandler) GetByID(c *gin.Context) {
 // @Failure      500      {object}  ErrorResponse
 // @Router       /platform-param-dicts/{id} [put]
 func (h *PlatformParamHandler) Update(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "platform_param.manage", "", "") {
+		return
+	}
 	var req UpdatePlatformParamDictRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -235,6 +251,9 @@ func (h *PlatformParamHandler) Update(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /platform-param-dicts/{id} [delete]
 func (h *PlatformParamHandler) Delete(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "platform_param.manage", "", "") {
+		return
+	}
 	if err := h.manager.Delete(c.Request.Context(), c.Param("id")); err != nil {
 		writePlatformParamHTTPError(c, err)
 		return

@@ -30,6 +30,9 @@ func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (do
 	if strings.TrimSpace(input.ArtifactType) == "" || strings.TrimSpace(input.Language) == "" {
 		return domain.Application{}, fmt.Errorf("%w: artifact_type and language are required", ErrInvalidInput)
 	}
+	if strings.TrimSpace(input.OwnerUserID) == "" {
+		return domain.Application{}, fmt.Errorf("%w: owner_user_id is required", ErrInvalidInput)
+	}
 	if input.Status != "" && !input.Status.Valid() {
 		return domain.Application{}, ErrInvalidStatus
 	}
@@ -46,6 +49,7 @@ func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (do
 		Key:          strings.TrimSpace(input.Key),
 		RepoURL:      strings.TrimSpace(input.RepoURL),
 		Description:  strings.TrimSpace(input.Description),
+		OwnerUserID:  strings.TrimSpace(input.OwnerUserID),
 		Owner:        strings.TrimSpace(input.Owner),
 		Status:       status,
 		ArtifactType: strings.TrimSpace(input.ArtifactType),

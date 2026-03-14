@@ -17,11 +17,23 @@ import (
 	appdomain "gos/internal/domain/application"
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
+	userdomain "gos/internal/domain/user"
 )
 
 type ReleaseOrderHandler struct {
 	manager     *usecase.ReleaseOrderManager
 	logStreamer ReleaseOrderLogStreamer
+	authz       RequestAuthorizer
+	access      ReleaseParamAccessResolver
+}
+
+type ReleaseParamAccessResolver interface {
+	ResolveParamAccess(
+		ctx context.Context,
+		user userdomain.User,
+		applicationID string,
+		paramKey string,
+	) (canView bool, canEdit bool, err error)
 }
 
 type ReleaseOrderLogStreamer interface {
@@ -35,10 +47,14 @@ type ReleaseOrderLogStreamer interface {
 func NewReleaseOrderHandler(
 	manager *usecase.ReleaseOrderManager,
 	logStreamer ReleaseOrderLogStreamer,
+	authz RequestAuthorizer,
+	access ReleaseParamAccessResolver,
 ) *ReleaseOrderHandler {
 	return &ReleaseOrderHandler{
 		manager:     manager,
 		logStreamer: logStreamer,
+		authz:       authz,
+		access:      access,
 	}
 }
 
@@ -59,7 +75,9 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 type CreateReleaseOrderRequest struct {
 	ApplicationID string                           `json:"application_id"`
 	BindingID     string                           `json:"binding_id"`
+	TemplateID    string                           `json:"template_id"`
 	EnvCode       string                           `json:"env_code"`
+	ProjectName   string                           `json:"project_name"`
 	SonService    string                           `json:"son_service"`
 	GitRef        string                           `json:"git_ref"`
 	ImageTag      string                           `json:"image_tag"`
@@ -100,6 +118,7 @@ type ReleaseOrderResponse struct {
 	BindingID       string     `json:"binding_id"`
 	PipelineID      string     `json:"pipeline_id"`
 	EnvCode         string     `json:"env_code"`
+	ProjectName     string     `json:"project_name"`
 	SonService      string     `json:"son_service"`
 	GitRef          string     `json:"git_ref"`
 	ImageTag        string     `json:"image_tag"`
@@ -180,11 +199,20 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", req.ApplicationID) {
+		return
+	}
+
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 
 	params := make([]usecase.CreateReleaseOrderParamInput, 0, len(req.Params))
 	for _, item := range req.Params {
 		params = append(params, usecase.CreateReleaseOrderParamInput{
-			ParamKey:          item.ParamKey,
+			ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
 			ExecutorParamName: item.ExecutorParamName,
 			ParamValue:        item.ParamValue,
 			ValueSource:       domain.ValueSource(strings.TrimSpace(item.ValueSource)),
@@ -203,13 +231,14 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 	order, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseOrderInput{
 		ApplicationID: req.ApplicationID,
 		BindingID:     req.BindingID,
+		TemplateID:    req.TemplateID,
 		EnvCode:       req.EnvCode,
-		SonService:    req.SonService,
+		SonService:    "",
 		GitRef:        req.GitRef,
 		ImageTag:      req.ImageTag,
 		TriggerType:   domain.TriggerType(strings.TrimSpace(req.TriggerType)),
 		Remark:        req.Remark,
-		TriggeredBy:   req.TriggeredBy,
+		TriggeredBy:   resolveTriggeredBy(currentUser),
 		Params:        params,
 		Steps:         steps,
 	})
@@ -237,6 +266,9 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders [get]
 func (h *ReleaseOrderHandler) List(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "release.view", "", "") {
+		return
+	}
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -285,6 +317,9 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id} [get]
 func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "release.view", "", "") {
+		return
+	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -304,6 +339,14 @@ func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/cancel [post]
 func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.cancel", existing.ApplicationID) {
+		return
+	}
 	item, err := h.manager.Cancel(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -323,6 +366,14 @@ func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/execute [post]
 func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+		return
+	}
 	item, err := h.manager.Execute(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -343,6 +394,9 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/logs/stream [get]
 func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "release.view", "", "") {
+		return
+	}
 	if h.logStreamer == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "log stream is not configured"})
 		return
@@ -409,6 +463,9 @@ func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/params [get]
 func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "release.view", "", "") {
+		return
+	}
 	items, err := h.manager.ListParams(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -433,6 +490,9 @@ func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/steps [get]
 func (h *ReleaseOrderHandler) ListSteps(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "release.view", "", "") {
+		return
+	}
 	items, err := h.manager.ListSteps(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -460,6 +520,14 @@ func (h *ReleaseOrderHandler) ListSteps(c *gin.Context) {
 // @Failure      500        {object}  ErrorResponse
 // @Router       /release-orders/{id}/steps/{step_code}/start [post]
 func (h *ReleaseOrderHandler) StartStep(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+		return
+	}
 	var req StartReleaseOrderStepRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -494,6 +562,14 @@ func (h *ReleaseOrderHandler) StartStep(c *gin.Context) {
 // @Failure      500        {object}  ErrorResponse
 // @Router       /release-orders/{id}/steps/{step_code}/finish [post]
 func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+		return
+	}
 	var req FinishReleaseOrderStepRequest
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -526,6 +602,7 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		BindingID:       item.BindingID,
 		PipelineID:      item.PipelineID,
 		EnvCode:         item.EnvCode,
+		ProjectName:     item.SonService,
 		SonService:      item.SonService,
 		GitRef:          item.GitRef,
 		ImageTag:        item.ImageTag,
@@ -578,10 +655,12 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 	case errors.Is(err, appdomain.ErrNotFound),
 		errors.Is(err, pipelinedomain.ErrBindingNotFound),
 		errors.Is(err, domain.ErrOrderNotFound),
-		errors.Is(err, domain.ErrStepNotFound):
+		errors.Is(err, domain.ErrStepNotFound),
+		errors.Is(err, domain.ErrTemplateNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 
-	case errors.Is(err, domain.ErrOrderDuplicated):
+	case errors.Is(err, domain.ErrOrderDuplicated),
+		errors.Is(err, domain.ErrTemplateDuplicated):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 
 	default:
@@ -619,6 +698,30 @@ func normalizeReleaseOrderErrorMessage(err error) string {
 		return message[:220] + "..."
 	}
 	return message
+}
+
+func ensureReleaseApplicationPermission(
+	c *gin.Context,
+	authz RequestAuthorizer,
+	permissionCode string,
+	applicationID string,
+) bool {
+	return ensurePermissionWithMessage(
+		c,
+		authz,
+		permissionCode,
+		"application",
+		strings.TrimSpace(applicationID),
+		"无权限：当前应用的发布权限已变更，请刷新页面后重试",
+	)
+}
+
+func resolveTriggeredBy(user userdomain.User) string {
+	displayName := strings.TrimSpace(user.DisplayName)
+	if displayName != "" {
+		return displayName
+	}
+	return strings.TrimSpace(user.Username)
 }
 
 func parseNonNegativeInt64Query(c *gin.Context, name string) (int64, error) {

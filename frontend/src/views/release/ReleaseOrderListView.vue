@@ -15,6 +15,7 @@ import {
   listReleaseOrders,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
+import { useAuthStore } from '../../stores/auth'
 import type { PipelineBinding } from '../../types/pipeline'
 import type { ReleaseOrder, ReleaseOrderParam, ReleaseOrderStatus, ReleaseTriggerType } from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -26,6 +27,7 @@ interface SelectOption {
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 5000
 
 const loading = ref(false)
@@ -89,6 +91,10 @@ const hasFilter = computed(() => {
   )
 })
 
+const canCreateRelease = computed(() => authStore.hasPermission('release.create'))
+const canExecuteRelease = computed(() => authStore.hasPermission('release.execute'))
+const canCancelRelease = computed(() => authStore.hasPermission('release.cancel'))
+
 function applyActiveQueryFromFilters() {
   activeQuery.application_id = filters.application_id
   activeQuery.binding_id = filters.binding_id
@@ -141,11 +147,11 @@ function isRunningStatus(status: ReleaseOrderStatus) {
 }
 
 function canCancel(record: ReleaseOrder) {
-  return record.status === 'pending' || record.status === 'running'
+  return canCancelRelease.value && (record.status === 'pending' || record.status === 'running')
 }
 
 function canExecute(record: ReleaseOrder) {
-  return record.status === 'pending'
+  return canExecuteRelease.value && record.status === 'pending'
 }
 
 async function loadApplicationOptions() {
@@ -380,7 +386,7 @@ onBeforeUnmount(() => {
           </template>
           刷新
         </a-button>
-        <a-button type="primary" @click="toCreate">
+        <a-button v-if="canCreateRelease" type="primary" @click="toCreate">
           <template #icon>
             <PlusOutlined />
           </template>
@@ -529,7 +535,7 @@ onBeforeUnmount(() => {
     <a-modal
       :open="executePreviewVisible"
       title="发布预审"
-      width="760"
+      :width="620"
       ok-text="确认发布"
       cancel-text="取消"
       :confirm-loading="executeSubmitting"
@@ -538,7 +544,7 @@ onBeforeUnmount(() => {
     >
       <a-skeleton v-if="executePreviewLoading" active :paragraph="{ rows: 6 }" />
       <template v-else-if="executePreviewOrder">
-        <a-descriptions :column="2" bordered size="small">
+        <a-descriptions :column="1" layout="vertical" bordered size="small">
           <a-descriptions-item label="发布单号">{{ executePreviewOrder.order_no }}</a-descriptions-item>
           <a-descriptions-item label="应用名称">{{ executePreviewOrder.application_name || '-' }}</a-descriptions-item>
           <a-descriptions-item label="环境">{{ executePreviewOrder.env_code || '-' }}</a-descriptions-item>
@@ -558,12 +564,12 @@ onBeforeUnmount(() => {
           :pagination="false"
           :data-source="executePreviewParams"
           :columns="[
-            { title: '平台 Key', dataIndex: 'param_key', key: 'param_key', width: 150 },
-            { title: '执行器参数', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 170 },
+            { title: '平台 Key', dataIndex: 'param_key', key: 'param_key', width: 130 },
+            { title: '执行器参数', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 150 },
             { title: '参数值', dataIndex: 'param_value', key: 'param_value', ellipsis: true },
-            { title: '来源', dataIndex: 'value_source', key: 'value_source', width: 120 },
+            { title: '来源', dataIndex: 'value_source', key: 'value_source', width: 100 },
           ]"
-          :scroll="{ x: 680 }"
+          :scroll="{ x: 560 }"
         />
       </template>
     </a-modal>

@@ -102,3 +102,10 @@ type JenkinsJob struct {
 	FullName string
 	URL      string
 }
+
+type JenkinsPipelineScript struct {
+	DefinitionClass string
+	Script          string
+	ScriptPath      string
+	FromSCM         bool
+}

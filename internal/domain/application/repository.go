@@ -27,6 +27,7 @@ type UpdateInput struct {
 	Key          string
 	RepoURL      string
 	Description  string
+	OwnerUserID  string
 	Owner        string
 	Status       Status
 	ArtifactType string

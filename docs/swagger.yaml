@@ -36,6 +36,8 @@ definitions:
         type: string
       owner:
         type: string
+      owner_user_id:
+        type: string
       repo_url:
         type: string
       status:
@@ -56,6 +58,8 @@ definitions:
       name:
         type: string
       owner:
+        type: string
+      owner_user_id:
         type: string
       repo_url:
         type: string
@@ -240,6 +244,10 @@ definitions:
     type: object
   httpapi.PipelineParamDefResponse:
     properties:
+      can_edit:
+        type: boolean
+      can_view:
+        type: boolean
       created_at:
         type: string
       default_value:
@@ -274,6 +282,22 @@ definitions:
         type: string
       visible:
         type: boolean
+    type: object
+  httpapi.PipelineRawScriptDataResponse:
+    properties:
+      data:
+        properties:
+          definition_class:
+            type: string
+          from_scm:
+            type: boolean
+          pipeline:
+            $ref: '#/definitions/httpapi.PipelineResponse'
+          script:
+            type: string
+          script_path:
+            type: string
+        type: object
     type: object
   httpapi.PipelineResponse:
     properties:
@@ -494,6 +518,8 @@ definitions:
       name:
         type: string
       owner:
+        type: string
+      owner_user_id:
         type: string
       repo_url:
         type: string
@@ -1217,6 +1243,36 @@ paths:
       summary: List pipeline param definitions
       tags:
       - pipeline-param-defs
+  /pipelines/{id}/raw-script:
+    get:
+      parameters:
+      - description: Pipeline ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.PipelineRawScriptDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get Jenkins pipeline raw script
+      tags:
+      - pipelines
   /pipelines/{id}/verify:
     post:
       parameters:
@@ -1601,6 +1657,38 @@ paths:
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
       summary: Execute release order
+      tags:
+      - release-orders
+  /release-orders/{id}/logs/stream:
+    get:
+      parameters:
+      - description: Release order ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Start offset for progressive logs
+        in: query
+        name: start
+        type: integer
+      produces:
+      - text/event-stream
+      responses:
+        "200":
+          description: OK
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Stream release order logs
       tags:
       - release-orders
   /release-orders/{id}/params:

@@ -4,18 +4,41 @@ import { message } from 'ant-design-vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApplicationByID, updateApplication } from '../../api/application'
+import { listUserOptions } from '../../api/user'
 import type { ApplicationPayload } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 import ApplicationForm from './ApplicationForm.vue'
+
+interface OwnerOption {
+  label: string
+  value: string
+}
 
 const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
 const submitting = ref(false)
+const ownerLoading = ref(false)
+const ownerOptions = ref<OwnerOption[]>([])
 const initialValues = ref<Partial<ApplicationPayload>>({})
 
 const applicationId = computed(() => String(route.params.id || ''))
+
+async function loadOwnerOptions() {
+  ownerLoading.value = true
+  try {
+    const response = await listUserOptions()
+    ownerOptions.value = response.data.map((item) => ({
+      label: `${item.display_name} (${item.username})`,
+      value: item.id,
+    }))
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '负责人下拉加载失败'))
+  } finally {
+    ownerLoading.value = false
+  }
+}
 
 async function loadDetail() {
   if (!applicationId.value) {
@@ -33,7 +56,7 @@ async function loadDetail() {
       key: app.key,
       repo_url: app.repo_url,
       description: app.description,
-      owner: app.owner,
+      owner_user_id: app.owner_user_id,
       status: app.status,
       artifact_type: app.artifact_type,
       language: app.language,
@@ -72,8 +95,8 @@ function goBack() {
   void router.push(`/applications/${applicationId.value}`)
 }
 
-onMounted(() => {
-  void loadDetail()
+onMounted(async () => {
+  await Promise.all([loadOwnerOptions(), loadDetail()])
 })
 </script>
 
@@ -93,6 +116,8 @@ onMounted(() => {
     <ApplicationForm
       v-else
       :initial-values="initialValues"
+      :owner-options="ownerOptions"
+      :owner-loading="ownerLoading"
       :loading="submitting"
       submit-text="保存修改"
       @submit="handleSubmit"

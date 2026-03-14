@@ -14,6 +14,7 @@ import {
   listReleaseOrderSteps,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
+import { useAuthStore } from '../../stores/auth'
 import type {
   ReleaseOrder,
   ReleaseOrderLogStreamEvent,
@@ -25,6 +26,7 @@ import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 const route = useRoute()
 const router = useRouter()
+const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 5000
 
 const loading = ref(false)
@@ -93,7 +95,7 @@ const detailItems = computed(() => {
     { label: '绑定 ID', value: order.value.binding_id || '-' },
     { label: '管线 ID', value: order.value.pipeline_id || '-' },
     { label: '环境', value: order.value.env_code || '-' },
-    { label: '子服务', value: order.value.son_service || '-' },
+    { label: '项目名称', value: order.value.project_name || order.value.son_service || '-' },
     { label: '触发方式', value: order.value.trigger_type || '-' },
     { label: '触发人', value: order.value.triggered_by || '-' },
     { label: 'Git 版本', value: order.value.git_ref || '-' },
@@ -265,7 +267,11 @@ async function startLogStream(reset: boolean) {
     logStreamStatusText.value = '准备连接'
   }
 
-  const streamURL = buildReleaseOrderLogStreamURL(orderID.value, logOffset.value)
+  const streamURL = buildReleaseOrderLogStreamURL(
+    orderID.value,
+    logOffset.value,
+    authStore.accessToken,
+  )
   const source = new EventSource(streamURL)
   logStreamRef.value = source
   logStreamConnecting.value = true

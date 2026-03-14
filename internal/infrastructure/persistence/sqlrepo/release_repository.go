@@ -88,6 +88,37 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE KEY uk_release_order_step_code (release_order_id, step_code),
 	KEY idx_release_order_step_order_sort (release_order_id, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_template (
+	id VARCHAR(64) PRIMARY KEY,
+	name VARCHAR(128) NOT NULL,
+	application_id VARCHAR(64) NOT NULL,
+	application_name VARCHAR(128) NOT NULL DEFAULT '',
+	binding_id VARCHAR(64) NOT NULL,
+	binding_name VARCHAR(128) NOT NULL DEFAULT '',
+	binding_type VARCHAR(32) NOT NULL DEFAULT '',
+	status VARCHAR(32) NOT NULL DEFAULT 'active',
+	remark VARCHAR(500) NOT NULL DEFAULT '',
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_template_binding_name (binding_id, name),
+	KEY idx_release_template_application (application_id),
+	KEY idx_release_template_binding (binding_id),
+	KEY idx_release_template_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_template_param (
+	id VARCHAR(64) PRIMARY KEY,
+	template_id VARCHAR(64) NOT NULL,
+	pipeline_param_def_id VARCHAR(64) NOT NULL,
+	param_key VARCHAR(100) NOT NULL,
+	param_name VARCHAR(100) NOT NULL DEFAULT '',
+	executor_param_name VARCHAR(100) NOT NULL DEFAULT '',
+	required TINYINT(1) NOT NULL DEFAULT 0,
+	sort_no INT NOT NULL DEFAULT 0,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_template_param_unique (template_id, pipeline_param_def_id),
+	KEY idx_release_template_param_template_sort (template_id, sort_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		}, nil
 
 	case "sqlite":
@@ -139,6 +170,37 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE(release_order_id, step_code)
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_step_order_sort ON release_order_step (release_order_id, sort_no);`,
+			`CREATE TABLE IF NOT EXISTS release_template (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	application_id TEXT NOT NULL,
+	application_name TEXT NOT NULL DEFAULT '',
+	binding_id TEXT NOT NULL,
+	binding_name TEXT NOT NULL DEFAULT '',
+	binding_type TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'active',
+	remark TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(binding_id, name)
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_application ON release_template (application_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_binding ON release_template (binding_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_created_at ON release_template (created_at);`,
+			`CREATE TABLE IF NOT EXISTS release_template_param (
+	id TEXT PRIMARY KEY,
+	template_id TEXT NOT NULL,
+	pipeline_param_def_id TEXT NOT NULL,
+	param_key TEXT NOT NULL,
+	param_name TEXT NOT NULL DEFAULT '',
+	executor_param_name TEXT NOT NULL DEFAULT '',
+	required INTEGER NOT NULL DEFAULT 0,
+	sort_no INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(template_id, pipeline_param_def_id)
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_param_template_sort ON release_template_param (template_id, sort_no);`,
 		}, nil
 
 	default:
@@ -568,6 +630,301 @@ WHERE release_order_id = ? AND step_code = ?;`
 	return r.GetStepByCode(ctx, releaseOrderID, stepCode)
 }
 
+func (r *ReleaseRepository) CreateTemplate(
+	ctx context.Context,
+	template domain.ReleaseTemplate,
+	params []domain.ReleaseTemplateParam,
+) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	const insertTemplate = `
+INSERT INTO release_template (
+	id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	if _, err = tx.ExecContext(
+		ctx,
+		insertTemplate,
+		template.ID,
+		template.Name,
+		template.ApplicationID,
+		template.ApplicationName,
+		template.BindingID,
+		template.BindingName,
+		template.BindingType,
+		string(template.Status),
+		template.Remark,
+		template.CreatedAt.UTC().UnixNano(),
+		template.UpdatedAt.UTC().UnixNano(),
+	); err != nil {
+		if isDuplicateKeyError(r.dbDriver, err) {
+			return domain.ErrTemplateDuplicated
+		}
+		return err
+	}
+
+	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func (r *ReleaseRepository) GetTemplateByID(
+	ctx context.Context,
+	id string,
+) (domain.ReleaseTemplate, []domain.ReleaseTemplateParam, error) {
+	const q = `
+SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
+FROM release_template
+WHERE id = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, strings.TrimSpace(id))
+	item, err := scanReleaseTemplate(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ReleaseTemplate{}, nil, domain.ErrTemplateNotFound
+		}
+		return domain.ReleaseTemplate{}, nil, err
+	}
+	params, err := r.listTemplateParams(ctx, item.ID)
+	if err != nil {
+		return domain.ReleaseTemplate{}, nil, err
+	}
+	item.ParamCount = len(params)
+	return item, params, nil
+}
+
+func (r *ReleaseRepository) ListTemplates(
+	ctx context.Context,
+	filter domain.TemplateListFilter,
+) ([]domain.ReleaseTemplate, int64, error) {
+	where := make([]string, 0, 4)
+	args := make([]any, 0, 6)
+
+	if filter.ApplicationID != "" {
+		where = append(where, "application_id = ?")
+		args = append(args, filter.ApplicationID)
+	}
+	if filter.BindingID != "" {
+		where = append(where, "binding_id = ?")
+		args = append(args, filter.BindingID)
+	}
+	if filter.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(filter.Status))
+	}
+
+	countQuery := "SELECT COUNT(1) FROM release_template"
+	if len(where) > 0 {
+		countQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int64
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	listQuery := `
+SELECT
+	t.id, t.name, t.application_id, t.application_name, t.binding_id, t.binding_name, t.binding_type, t.status, t.remark, t.created_at, t.updated_at,
+	COALESCE(p.param_count, 0)
+FROM release_template t
+LEFT JOIN (
+	SELECT template_id, COUNT(1) AS param_count
+	FROM release_template_param
+	GROUP BY template_id
+) p ON p.template_id = t.id`
+	if len(where) > 0 {
+		listQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	listQuery += " ORDER BY t.created_at DESC LIMIT ? OFFSET ?;"
+
+	offset := (filter.Page - 1) * filter.PageSize
+	rows, err := r.db.QueryContext(ctx, listQuery, append(args, filter.PageSize, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseTemplate, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseTemplateWithCount(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
+func (r *ReleaseRepository) UpdateTemplate(
+	ctx context.Context,
+	template domain.ReleaseTemplate,
+	params []domain.ReleaseTemplateParam,
+) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	const updateTemplate = `
+UPDATE release_template
+SET name = ?, application_name = ?, binding_name = ?, binding_type = ?, status = ?, remark = ?, updated_at = ?
+WHERE id = ?;`
+	res, err := tx.ExecContext(
+		ctx,
+		updateTemplate,
+		template.Name,
+		template.ApplicationName,
+		template.BindingName,
+		template.BindingType,
+		string(template.Status),
+		template.Remark,
+		template.UpdatedAt.UTC().UnixNano(),
+		template.ID,
+	)
+	if err != nil {
+		if isDuplicateKeyError(r.dbDriver, err) {
+			return domain.ErrTemplateDuplicated
+		}
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return domain.ErrTemplateNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, template.ID); err != nil {
+		return err
+	}
+	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM release_template WHERE id = ?;`, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return domain.ErrTemplateNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func (r *ReleaseRepository) insertTemplateParams(
+	ctx context.Context,
+	tx *sql.Tx,
+	params []domain.ReleaseTemplateParam,
+) error {
+	const insertParam = `
+INSERT INTO release_template_param (
+	id, template_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	for _, item := range params {
+		if _, err := tx.ExecContext(
+			ctx,
+			insertParam,
+			item.ID,
+			item.TemplateID,
+			item.PipelineParamDefID,
+			item.ParamKey,
+			item.ParamName,
+			item.ExecutorParamName,
+			boolToInt(item.Required),
+			item.SortNo,
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *ReleaseRepository) listTemplateParams(
+	ctx context.Context,
+	templateID string,
+) ([]domain.ReleaseTemplateParam, error) {
+	const q = `
+SELECT id, template_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+FROM release_template_param
+WHERE template_id = ?
+ORDER BY sort_no ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseTemplateParam, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseTemplateParam(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	var (
 		item        domain.ReleaseOrder
@@ -670,6 +1027,90 @@ func scanReleaseOrderStep(s scanner) (domain.ReleaseOrderStep, error) {
 		item.FinishedAt = &t
 	}
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
+	var (
+		item      domain.ReleaseTemplate
+		statusRaw string
+		createdAt int64
+		updatedAt int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.Name,
+		&item.ApplicationID,
+		&item.ApplicationName,
+		&item.BindingID,
+		&item.BindingName,
+		&item.BindingType,
+		&statusRaw,
+		&item.Remark,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseTemplate{}, err
+	}
+	item.Status = domain.TemplateStatus(statusRaw)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
+	var (
+		item      domain.ReleaseTemplate
+		statusRaw string
+		createdAt int64
+		updatedAt int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.Name,
+		&item.ApplicationID,
+		&item.ApplicationName,
+		&item.BindingID,
+		&item.BindingName,
+		&item.BindingType,
+		&statusRaw,
+		&item.Remark,
+		&createdAt,
+		&updatedAt,
+		&item.ParamCount,
+	); err != nil {
+		return domain.ReleaseTemplate{}, err
+	}
+	item.Status = domain.TemplateStatus(statusRaw)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
+	var (
+		item      domain.ReleaseTemplateParam
+		required  int
+		createdAt int64
+		updatedAt int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.TemplateID,
+		&item.PipelineParamDefID,
+		&item.ParamKey,
+		&item.ParamName,
+		&item.ExecutorParamName,
+		&required,
+		&item.SortNo,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseTemplateParam{}, err
+	}
+	item.Required = required > 0
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
 }
 
