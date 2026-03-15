@@ -26,7 +26,6 @@ type ReleaseOrderManager struct {
 
 type CreateReleaseOrderInput struct {
 	ApplicationID string
-	BindingID     string
 	TemplateID    string
 	EnvCode       string
 	SonService    string
@@ -41,6 +40,7 @@ type CreateReleaseOrderInput struct {
 }
 
 type CreateReleaseOrderParamInput struct {
+	PipelineScope     domain.PipelineScope
 	ParamKey          string
 	ExecutorParamName string
 	ParamValue        string
@@ -103,31 +103,14 @@ func (uc *ReleaseOrderManager) Create(
 	input CreateReleaseOrderInput,
 ) (domain.ReleaseOrder, error) {
 	applicationID := strings.TrimSpace(input.ApplicationID)
-	bindingID := strings.TrimSpace(input.BindingID)
-	if applicationID == "" || bindingID == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id and binding_id are required", ErrInvalidInput)
+	templateID := strings.TrimSpace(input.TemplateID)
+	if applicationID == "" || templateID == "" {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id and template_id are required", ErrInvalidInput)
 	}
 
 	app, err := uc.appRepo.GetByID(ctx, applicationID)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
-	}
-
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, bindingID)
-	if err != nil {
-		return domain.ReleaseOrder{}, err
-	}
-	if binding.ApplicationID != applicationID {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: binding does not belong to application", ErrInvalidInput)
-	}
-	if strings.TrimSpace(binding.PipelineID) != "" {
-		pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, binding.PipelineID)
-		if err != nil {
-			return domain.ReleaseOrder{}, err
-		}
-		if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
-			return domain.ReleaseOrder{}, err
-		}
 	}
 
 	triggerType := input.TriggerType
@@ -138,19 +121,19 @@ func (uc *ReleaseOrderManager) Create(
 		return domain.ReleaseOrder{}, ErrInvalidInput
 	}
 
-	resolvedTemplateID, templateParams, err := uc.resolveTemplateForCreate(
-		ctx,
-		applicationID,
-		bindingID,
-		strings.TrimSpace(input.TemplateID),
-	)
+	template, templateBindings, templateParams, err := uc.resolveTemplateForCreate(ctx, applicationID, templateID)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	if err := uc.validateCreateTemplateParams(ctx, resolvedTemplateID, templateParams, input.Params); err != nil {
+	if err := uc.validateCreateTemplateParams(ctx, template.ID, templateBindings, templateParams, input.Params); err != nil {
 		return domain.ReleaseOrder{}, err
 	}
+	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
 	summary := resolveReleaseOrderSummaryFields(input.Params)
+	primaryExecution, ok := pickPrimaryExecution(executions)
+	if !ok {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
+	}
 
 	now := uc.now()
 	order := domain.ReleaseOrder{
@@ -158,8 +141,10 @@ func (uc *ReleaseOrderManager) Create(
 		OrderNo:         generateOrderNo(now),
 		ApplicationID:   applicationID,
 		ApplicationName: app.Name,
-		BindingID:       bindingID,
-		PipelineID:      strings.TrimSpace(binding.PipelineID),
+		TemplateID:      template.ID,
+		TemplateName:    template.Name,
+		BindingID:       primaryExecution.BindingID,
+		PipelineID:      primaryExecution.PipelineID,
 		EnvCode:         summary.EnvCode,
 		SonService:      firstNonEmpty(summary.ProjectName, strings.TrimSpace(input.SonService)),
 		GitRef:          firstNonEmpty(summary.GitRef, strings.TrimSpace(input.GitRef)),
@@ -173,16 +158,17 @@ func (uc *ReleaseOrderManager) Create(
 		UpdatedAt:       now,
 	}
 
-	params, err := uc.buildCreateParams(order.ID, now, input.Params)
+	executions = uc.buildCreateExecutions(order.ID, now, templateBindings)
+	params, err := uc.buildCreateParams(order.ID, now, input.Params, executions)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	steps, err := uc.buildCreateSteps(order.ID, now, input.Steps)
+	steps, err := uc.buildCreateSteps(order.ID, now, executions, input.Steps)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
 
-	if err := uc.repo.Create(ctx, order, params, steps); err != nil {
+	if err := uc.repo.Create(ctx, order, executions, params, steps); err != nil {
 		return domain.ReleaseOrder{}, err
 	}
 	return uc.repo.GetByID(ctx, order.ID)
@@ -191,6 +177,7 @@ func (uc *ReleaseOrderManager) Create(
 func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 	ctx context.Context,
 	templateID string,
+	templateBindings []domain.ReleaseTemplateBinding,
 	templateParams []domain.ReleaseTemplateParam,
 	params []CreateReleaseOrderParamInput,
 ) error {
@@ -198,6 +185,10 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 	allowedByParamKey := make(map[string]releasedTemplateParamRule)
 	duplicateParamKeys := make(map[string]struct{})
 	required := make(map[string]releasedTemplateParamRule)
+	bindingByScope := make(map[domain.PipelineScope]domain.ReleaseTemplateBinding, len(templateBindings))
+	for _, item := range templateBindings {
+		bindingByScope[item.PipelineScope] = item
+	}
 
 	if templateID != "" {
 		for _, item := range templateParams {
@@ -210,14 +201,15 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 					return err
 				}
 			}
-			key := buildReleaseTemplateParamKey(item.ParamKey, item.ExecutorParamName)
+			key := buildReleaseTemplateParamKey(item.PipelineScope, item.ParamKey, item.ExecutorParamName)
 			rule := releasedTemplateParamRule{
+				PipelineScope:     item.PipelineScope,
 				ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
 				ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
 				Required:          item.Required,
 			}
 			allowed[key] = rule
-			paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+			paramKey := buildReleaseTemplateScopeParamKey(item.PipelineScope, item.ParamKey)
 			if paramKey != "" {
 				if _, exists := allowedByParamKey[paramKey]; exists {
 					delete(allowedByParamKey, paramKey)
@@ -234,12 +226,19 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 
 	submitted := make(map[string]struct{}, len(params))
 	for _, item := range params {
+		scope := item.PipelineScope
 		paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
 		executorParamName := strings.TrimSpace(item.ExecutorParamName)
 		if templateID == "" {
 			return fmt.Errorf("%w: extra release params require release template", ErrInvalidInput)
 		}
-		rule, key, ok := resolveReleaseTemplateRule(allowed, allowedByParamKey, paramKey, executorParamName)
+		if !scope.Valid() {
+			return fmt.Errorf("%w: pipeline_scope is required", ErrInvalidInput)
+		}
+		if _, ok := bindingByScope[scope]; !ok {
+			return fmt.Errorf("%w: scope %s is not enabled in selected release template", ErrInvalidInput, strings.ToUpper(string(scope)))
+		}
+		rule, key, ok := resolveReleaseTemplateRule(allowed, allowedByParamKey, scope, paramKey, executorParamName)
 		if !ok {
 			return fmt.Errorf("%w: param %s is not included in selected release template", ErrInvalidInput, executorParamNameOrKey(executorParamName, paramKey))
 		}
@@ -262,33 +261,39 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 }
 
 type releasedTemplateParamRule struct {
+	PipelineScope     domain.PipelineScope
 	ParamKey          string
 	ExecutorParamName string
 	Required          bool
 }
 
-func buildReleaseTemplateParamKey(paramKey string, executorParamName string) string {
-	return strings.ToLower(strings.TrimSpace(paramKey)) + "::" + strings.ToLower(strings.TrimSpace(executorParamName))
+func buildReleaseTemplateScopeParamKey(scope domain.PipelineScope, paramKey string) string {
+	return strings.ToLower(strings.TrimSpace(string(scope))) + "::" + strings.ToLower(strings.TrimSpace(paramKey))
+}
+
+func buildReleaseTemplateParamKey(scope domain.PipelineScope, paramKey string, executorParamName string) string {
+	return buildReleaseTemplateScopeParamKey(scope, paramKey) + "::" + strings.ToLower(strings.TrimSpace(executorParamName))
 }
 
 func resolveReleaseTemplateRule(
 	allowed map[string]releasedTemplateParamRule,
 	allowedByParamKey map[string]releasedTemplateParamRule,
+	scope domain.PipelineScope,
 	paramKey string,
 	executorParamName string,
 ) (releasedTemplateParamRule, string, bool) {
-	key := buildReleaseTemplateParamKey(paramKey, executorParamName)
+	key := buildReleaseTemplateParamKey(scope, paramKey, executorParamName)
 	if rule, ok := allowed[key]; ok {
 		return rule, key, true
 	}
 	if strings.TrimSpace(executorParamName) != "" {
 		return releasedTemplateParamRule{}, "", false
 	}
-	rule, ok := allowedByParamKey[strings.ToLower(strings.TrimSpace(paramKey))]
+	rule, ok := allowedByParamKey[buildReleaseTemplateScopeParamKey(scope, paramKey)]
 	if !ok {
 		return releasedTemplateParamRule{}, "", false
 	}
-	return rule, buildReleaseTemplateParamKey(rule.ParamKey, rule.ExecutorParamName), true
+	return rule, buildReleaseTemplateParamKey(rule.PipelineScope, rule.ParamKey, rule.ExecutorParamName), true
 }
 
 func executorParamNameOrKey(executorParamName string, paramKey string) string {
@@ -301,52 +306,26 @@ func executorParamNameOrKey(executorParamName string, paramKey string) string {
 func (uc *ReleaseOrderManager) resolveTemplateForCreate(
 	ctx context.Context,
 	applicationID string,
-	bindingID string,
 	templateID string,
-) (string, []domain.ReleaseTemplateParam, error) {
+) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, error) {
 	templateID = strings.TrimSpace(templateID)
-	if templateID != "" {
-		template, templateParams, err := uc.repo.GetTemplateByID(ctx, templateID)
-		if err != nil {
-			return "", nil, err
-		}
-		if template.Status != domain.TemplateStatusActive {
-			return "", nil, fmt.Errorf("%w: release template is disabled", ErrInvalidInput)
-		}
-		if strings.TrimSpace(template.ApplicationID) != strings.TrimSpace(applicationID) {
-			return "", nil, fmt.Errorf("%w: release template does not belong to application", ErrInvalidInput)
-		}
-		if strings.TrimSpace(template.BindingID) != strings.TrimSpace(bindingID) {
-			return "", nil, fmt.Errorf("%w: release template does not belong to binding", ErrInvalidInput)
-		}
-		return template.ID, templateParams, nil
+	if templateID == "" {
+		return domain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: template_id is required", ErrInvalidInput)
 	}
-
-	templates, total, err := uc.repo.ListTemplates(ctx, domain.TemplateListFilter{
-		ApplicationID: applicationID,
-		BindingID:     bindingID,
-		Status:        domain.TemplateStatusActive,
-		Page:          1,
-		PageSize:      2,
-	})
+	template, templateBindings, templateParams, err := uc.repo.GetTemplateByID(ctx, templateID)
 	if err != nil {
-		return "", nil, err
-	}
-	if total == 0 || len(templates) == 0 {
-		return "", nil, nil
-	}
-	if total > 1 || len(templates) > 1 {
-		return "", nil, fmt.Errorf("%w: multiple active release templates found for selected binding", ErrInvalidInput)
-	}
-
-	template, templateParams, err := uc.repo.GetTemplateByID(ctx, templates[0].ID)
-	if err != nil {
-		return "", nil, err
+		return domain.ReleaseTemplate{}, nil, nil, err
 	}
 	if template.Status != domain.TemplateStatusActive {
-		return "", nil, fmt.Errorf("%w: release template is disabled", ErrInvalidInput)
+		return domain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: release template is disabled", ErrInvalidInput)
 	}
-	return template.ID, templateParams, nil
+	if strings.TrimSpace(template.ApplicationID) != strings.TrimSpace(applicationID) {
+		return domain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: release template does not belong to application", ErrInvalidInput)
+	}
+	if len(templateBindings) == 0 {
+		return domain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: release template has no enabled pipeline scopes", ErrInvalidInput)
+	}
+	return template, templateBindings, templateParams, nil
 }
 
 type releaseOrderSummaryFields struct {
@@ -489,13 +468,35 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-
-	cancelNote := ""
-	if order.Status == domain.OrderStatusRunning {
-		cancelNote = uc.abortJenkinsExecution(ctx, order, steps)
+	executions, err := uc.repo.ListExecutions(ctx, id)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
 	}
 
-	// Mark jenkins-related in-flight steps as finished to avoid stale "running/pending" states after cancel.
+	cancelNotes := make([]string, 0)
+	if order.Status == domain.OrderStatusRunning {
+		for _, execution := range executions {
+			note := uc.abortExecution(ctx, execution)
+			if note != "" {
+				cancelNotes = append(cancelNotes, note)
+			}
+			if execution.Status.IsTerminal() {
+				continue
+			}
+			_, updateErr := uc.repo.UpdateExecutionByScope(ctx, id, execution.PipelineScope, domain.ExecutionUpdateInput{
+				Status:     domain.ExecutionStatusCancelled,
+				QueueURL:   execution.QueueURL,
+				BuildURL:   execution.BuildURL,
+				StartedAt:  execution.StartedAt,
+				FinishedAt: &now,
+				UpdatedAt:  now,
+			})
+			if updateErr != nil && !errors.Is(updateErr, domain.ErrExecutionNotFound) {
+				return domain.ReleaseOrder{}, updateErr
+			}
+		}
+	}
+
 	for _, step := range steps {
 		if !shouldFinishStepOnCancel(step) {
 			continue
@@ -505,8 +506,8 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 			startedAt = &now
 		}
 		message := "发布已取消"
-		if cancelNote != "" {
-			message = message + "，" + cancelNote
+		if len(cancelNotes) > 0 {
+			message = message + "，" + strings.Join(cancelNotes, "；")
 		}
 		_, updateErr := uc.repo.UpdateStep(ctx, id, step.StepCode, domain.StepUpdateInput{
 			Status:     domain.StepStatusFailed,
@@ -529,52 +530,30 @@ func shouldFinishStepOnCancel(step domain.ReleaseOrderStep) bool {
 	if step.Status != domain.StepStatusPending {
 		return false
 	}
-	switch step.StepCode {
-	case "trigger_pipeline", "pipeline_running", "pipeline_success":
-		return true
-	default:
-		return false
-	}
+	return strings.Contains(step.StepCode, ":trigger_pipeline") ||
+		strings.Contains(step.StepCode, ":pipeline_running") ||
+		strings.Contains(step.StepCode, ":pipeline_success") ||
+		step.StepCode == "global:release_finish"
 }
 
-func (uc *ReleaseOrderManager) abortJenkinsExecution(
-	ctx context.Context,
-	order domain.ReleaseOrder,
-	steps []domain.ReleaseOrderStep,
-) string {
+func (uc *ReleaseOrderManager) abortExecution(ctx context.Context, execution domain.ReleaseOrderExecution) string {
 	if uc.jenkins == nil {
 		return ""
 	}
-
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
-	if err != nil || binding.Provider != pipelinedomain.ProviderJenkins {
+	if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
 		return ""
 	}
-
-	queueURL := strings.TrimSpace(extractQueueURLFromSteps(steps))
-	if queueURL == "" {
+	queueURL := strings.TrimSpace(execution.QueueURL)
+	buildURL := strings.TrimSpace(execution.BuildURL)
+	if queueURL == "" && buildURL == "" {
 		return ""
 	}
-
-	buildURL, cancelled, _, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL)
-	if queueErr != nil {
-		if !isResourceNotFoundError(queueErr) {
-			return "尝试终止 Jenkins 任务失败"
-		}
-		return ""
-	}
-	if cancelled {
-		return "Jenkins 队列已取消"
-	}
-
-	buildURL = strings.TrimSpace(buildURL)
 	if buildURL != "" {
 		if err := uc.jenkins.AbortBuild(ctx, buildURL); err != nil {
 			return "尝试停止 Jenkins 构建失败"
 		}
 		return "已发送 Jenkins 停止构建请求"
 	}
-
 	if err := uc.jenkins.AbortQueueItem(ctx, queueURL); err != nil {
 		return "尝试取消 Jenkins 队列失败"
 	}
@@ -597,48 +576,12 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if !isPendingOrderStatus(order.Status) {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: only pending release order can be executed", ErrInvalidInput)
 	}
-
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
+	executions, err := uc.repo.ListExecutions(ctx, order.ID)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	if binding.Provider != pipelinedomain.ProviderJenkins {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: only jenkins provider is supported", ErrInvalidInput)
-	}
-
-	pipelineID := strings.TrimSpace(order.PipelineID)
-	if pipelineID == "" {
-		pipelineID = strings.TrimSpace(binding.PipelineID)
-	}
-	if pipelineID == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: pipeline_id is required", ErrInvalidInput)
-	}
-
-	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, pipelineID)
-	if err != nil {
-		return domain.ReleaseOrder{}, err
-	}
-	if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
-		return domain.ReleaseOrder{}, err
-	}
-	if pipeline.Provider != pipelinedomain.ProviderJenkins {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: bound pipeline provider is not jenkins", ErrInvalidInput)
-	}
-	if strings.TrimSpace(pipeline.JobFullName) == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: jenkins job full name is empty", ErrInvalidInput)
-	}
-
-	orderParams, err := uc.repo.ListParams(ctx, order.ID)
-	if err != nil {
-		return domain.ReleaseOrder{}, err
-	}
-	buildParams := make(map[string]string)
-	for _, item := range orderParams {
-		name := strings.TrimSpace(item.ExecutorParamName)
-		if name == "" {
-			continue
-		}
-		buildParams[name] = strings.TrimSpace(item.ParamValue)
+	if len(executions) == 0 {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: release order has no executions", ErrInvalidInput)
 	}
 
 	startedAt := uc.now()
@@ -647,42 +590,19 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	_ = uc.markStepRunning(ctx, order.ID, "param_resolve", "开始解析发布参数")
-	_ = uc.markStepFinished(ctx, order.ID, "param_resolve", domain.StepStatusSuccess, fmt.Sprintf("参数解析完成，总计 %d 项", len(buildParams)))
-	_ = uc.markStepRunning(ctx, order.ID, "trigger_pipeline", "开始触发 Jenkins 管线")
+	orderParams, err := uc.repo.ListParams(ctx, order.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
 
-	queueURL, triggerErr := uc.jenkins.TriggerBuild(ctx, pipeline.JobFullName, buildParams)
-	if triggerErr != nil {
-		_ = uc.markStepFinished(ctx, order.ID, "trigger_pipeline", domain.StepStatusFailed, "触发 Jenkins 失败: "+triggerErr.Error())
+	_ = uc.markStepRunning(ctx, order.ID, "global:param_resolve", "开始解析发布参数")
+	_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, fmt.Sprintf("参数解析完成，总计 %d 项", len(orderParams)))
+
+	if err := uc.startNextPendingExecution(ctx, order, executions, orderParams); err != nil {
 		finishedAt := uc.now()
 		_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &finishedAt, finishedAt)
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: trigger jenkins failed: %v", ErrInvalidInput, triggerErr)
+		return domain.ReleaseOrder{}, err
 	}
-
-	triggerMessage := "Jenkins 触发成功"
-	if strings.TrimSpace(queueURL) != "" {
-		triggerMessage = triggerMessage + "，queue: " + strings.TrimSpace(queueURL)
-	}
-	_ = uc.markStepFinished(ctx, order.ID, "trigger_pipeline", domain.StepStatusSuccess, triggerMessage)
-
-	runningMessage := "管线已触发，等待执行结果回传"
-	if strings.TrimSpace(queueURL) != "" {
-		runningMessage += "，queue: " + strings.TrimSpace(queueURL)
-		if buildURL, cancelled, why, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL); queueErr == nil {
-			buildURL = strings.TrimSpace(buildURL)
-			if buildURL != "" {
-				runningMessage += "，build: " + buildURL
-			}
-			if cancelled {
-				cancelReason := strings.TrimSpace(why)
-				if cancelReason == "" {
-					cancelReason = "Jenkins 队列任务已取消"
-				}
-				runningMessage += "，queue_cancelled: " + cancelReason
-			}
-		}
-	}
-	_ = uc.markStepRunning(ctx, order.ID, "pipeline_running", runningMessage)
 
 	return uc.repo.GetByID(ctx, order.ID)
 }
@@ -696,6 +616,123 @@ func (uc *ReleaseOrderManager) ListParams(ctx context.Context, orderID string) (
 		return nil, err
 	}
 	return uc.repo.ListParams(ctx, orderID)
+}
+
+func (uc *ReleaseOrderManager) ListExecutions(ctx context.Context, orderID string) ([]domain.ReleaseOrderExecution, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return nil, ErrInvalidID
+	}
+	if _, err := uc.repo.GetByID(ctx, orderID); err != nil {
+		return nil, err
+	}
+	return uc.repo.ListExecutions(ctx, orderID)
+}
+
+func (uc *ReleaseOrderManager) startNextPendingExecution(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	orderParams []domain.ReleaseOrderParam,
+) error {
+	for _, execution := range orderExecutionsByScope(executions) {
+		if execution.Status != domain.ExecutionStatusPending {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+			now := uc.now()
+			_, err := uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+				Status:     domain.ExecutionStatusSkipped,
+				StartedAt:  &now,
+				FinishedAt: &now,
+				UpdatedAt:  now,
+			})
+			if err != nil {
+				return err
+			}
+			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "trigger_pipeline"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非 Jenkins 执行器暂记为跳过")
+			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非 Jenkins 执行器暂记为跳过")
+			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 已跳过")
+			continue
+		}
+
+		binding, err := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
+		if err != nil {
+			return err
+		}
+		pipelineID := strings.TrimSpace(execution.PipelineID)
+		if pipelineID == "" {
+			pipelineID = strings.TrimSpace(binding.PipelineID)
+		}
+		if pipelineID == "" {
+			return fmt.Errorf("%w: pipeline_id is required", ErrInvalidInput)
+		}
+		pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, pipelineID)
+		if err != nil {
+			return err
+		}
+		if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
+			return err
+		}
+		if pipeline.Provider != pipelinedomain.ProviderJenkins {
+			return fmt.Errorf("%w: bound pipeline provider is not jenkins", ErrInvalidInput)
+		}
+		if strings.TrimSpace(pipeline.JobFullName) == "" {
+			return fmt.Errorf("%w: jenkins job full name is empty", ErrInvalidInput)
+		}
+
+		buildParams := make(map[string]string)
+		for _, item := range orderParams {
+			if item.PipelineScope != execution.PipelineScope {
+				continue
+			}
+			name := strings.TrimSpace(item.ExecutorParamName)
+			if name == "" {
+				continue
+			}
+			buildParams[name] = strings.TrimSpace(item.ParamValue)
+		}
+
+		triggerCode := scopeStepCode(execution.PipelineScope, "trigger_pipeline")
+		runningCode := scopeStepCode(execution.PipelineScope, "pipeline_running")
+		successCode := scopeStepCode(execution.PipelineScope, "pipeline_success")
+
+		_ = uc.markStepRunning(ctx, order.ID, triggerCode, "开始触发 "+strings.ToUpper(string(execution.PipelineScope))+" Jenkins 管线")
+		queueURL, triggerErr := uc.jenkins.TriggerBuild(ctx, pipeline.JobFullName, buildParams)
+		if triggerErr != nil {
+			_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "触发 Jenkins 失败: "+triggerErr.Error())
+			return fmt.Errorf("%w: trigger jenkins failed: %v", ErrInvalidInput, triggerErr)
+		}
+
+		now := uc.now()
+		_, err = uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:    domain.ExecutionStatusRunning,
+			QueueURL:  strings.TrimSpace(queueURL),
+			BuildURL:  "",
+			StartedAt: &now,
+			UpdatedAt: now,
+		})
+		if err != nil {
+			return err
+		}
+
+		triggerMessage := "Jenkins 触发成功"
+		if strings.TrimSpace(queueURL) != "" {
+			triggerMessage += "，queue: " + strings.TrimSpace(queueURL)
+		}
+		_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusSuccess, triggerMessage)
+		_ = uc.markStepRunning(ctx, order.ID, runningCode, "管线已触发，等待执行结果回传，queue: "+strings.TrimSpace(queueURL))
+		_ = uc.markStep(ctx, order.ID, successCode, domain.StepStatusPending, "", nil, nil)
+		return nil
+	}
+
+	_ = uc.markStepRunning(ctx, order.ID, "global:release_finish", "所有执行单元已完成")
+	_ = uc.markStepFinished(ctx, order.ID, "global:release_finish", domain.StepStatusSuccess, "发布完成")
+	return nil
+}
+
+func scopeStepCode(scope domain.PipelineScope, suffix string) string {
+	return strings.ToLower(strings.TrimSpace(string(scope))) + ":" + strings.TrimSpace(suffix)
 }
 
 func (uc *ReleaseOrderManager) markStepRunning(ctx context.Context, orderID string, stepCode string, message string) error {
@@ -916,9 +953,21 @@ func (uc *ReleaseOrderManager) buildCreateParams(
 	orderID string,
 	now time.Time,
 	input []CreateReleaseOrderParamInput,
+	executions []domain.ReleaseOrderExecution,
 ) ([]domain.ReleaseOrderParam, error) {
+	bindingByScope := make(map[domain.PipelineScope]domain.ReleaseOrderExecution, len(executions))
+	for _, item := range executions {
+		bindingByScope[item.PipelineScope] = item
+	}
 	items := make([]domain.ReleaseOrderParam, 0, len(input))
 	for _, item := range input {
+		if !item.PipelineScope.Valid() {
+			return nil, fmt.Errorf("%w: pipeline_scope is required", ErrInvalidInput)
+		}
+		execution, ok := bindingByScope[item.PipelineScope]
+		if !ok {
+			return nil, fmt.Errorf("%w: pipeline_scope %s is not enabled", ErrInvalidInput, strings.ToUpper(string(item.PipelineScope)))
+		}
 		paramKey := strings.TrimSpace(item.ParamKey)
 		if paramKey == "" {
 			return nil, fmt.Errorf("%w: param_key is required", ErrInvalidInput)
@@ -933,6 +982,8 @@ func (uc *ReleaseOrderManager) buildCreateParams(
 		items = append(items, domain.ReleaseOrderParam{
 			ID:                generateID("rop"),
 			ReleaseOrderID:    orderID,
+			PipelineScope:     item.PipelineScope,
+			BindingID:         execution.BindingID,
 			ParamKey:          paramKey,
 			ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
 			ParamValue:        strings.TrimSpace(item.ParamValue),
@@ -943,13 +994,40 @@ func (uc *ReleaseOrderManager) buildCreateParams(
 	return items, nil
 }
 
+func (uc *ReleaseOrderManager) buildCreateExecutions(
+	orderID string,
+	now time.Time,
+	bindings []domain.ReleaseTemplateBinding,
+) []domain.ReleaseOrderExecution {
+	items := make([]domain.ReleaseOrderExecution, 0, len(bindings))
+	for _, binding := range bindings {
+		if !binding.Enabled {
+			continue
+		}
+		items = append(items, domain.ReleaseOrderExecution{
+			ID:             generateID("roe"),
+			ReleaseOrderID: orderID,
+			PipelineScope:  binding.PipelineScope,
+			BindingID:      binding.BindingID,
+			BindingName:    binding.BindingName,
+			Provider:       binding.Provider,
+			PipelineID:     binding.PipelineID,
+			Status:         domain.ExecutionStatusPending,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		})
+	}
+	return items
+}
+
 func (uc *ReleaseOrderManager) buildCreateSteps(
 	orderID string,
 	now time.Time,
+	executions []domain.ReleaseOrderExecution,
 	input []CreateReleaseOrderStepInput,
 ) ([]domain.ReleaseOrderStep, error) {
 	if len(input) == 0 {
-		return defaultReleaseOrderSteps(orderID, now), nil
+		return defaultReleaseOrderSteps(orderID, executions, now), nil
 	}
 
 	items := make([]domain.ReleaseOrderStep, 0, len(input))
@@ -975,6 +1053,7 @@ func (uc *ReleaseOrderManager) buildCreateSteps(
 		items = append(items, domain.ReleaseOrderStep{
 			ID:             generateID("ros"),
 			ReleaseOrderID: orderID,
+			StepScope:      domain.StepScopeGlobal,
 			StepCode:       stepCode,
 			StepName:       stepName,
 			Status:         domain.StepStatusPending,
@@ -986,30 +1065,62 @@ func (uc *ReleaseOrderManager) buildCreateSteps(
 	return items, nil
 }
 
-func defaultReleaseOrderSteps(orderID string, now time.Time) []domain.ReleaseOrderStep {
-	templates := []struct {
-		Code string
-		Name string
-	}{
-		{Code: "param_resolve", Name: "参数解析"},
-		{Code: "trigger_pipeline", Name: "触发管线"},
-		{Code: "pipeline_running", Name: "管线运行"},
-		{Code: "pipeline_success", Name: "发布成功"},
-	}
-
-	items := make([]domain.ReleaseOrderStep, 0, len(templates))
-	for idx, item := range templates {
+func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderExecution, now time.Time) []domain.ReleaseOrderStep {
+	items := make([]domain.ReleaseOrderStep, 0, 8)
+	sortNo := 1
+	appendStep := func(scope domain.StepScope, executionID string, code string, name string) {
 		items = append(items, domain.ReleaseOrderStep{
 			ID:             generateID("ros"),
 			ReleaseOrderID: orderID,
-			StepCode:       item.Code,
-			StepName:       item.Name,
+			StepScope:      scope,
+			ExecutionID:    executionID,
+			StepCode:       code,
+			StepName:       name,
 			Status:         domain.StepStatusPending,
-			SortNo:         idx + 1,
+			SortNo:         sortNo,
 			CreatedAt:      now,
 		})
+		sortNo++
 	}
+
+	appendStep(domain.StepScopeGlobal, "", "global:param_resolve", "参数解析")
+	for _, execution := range orderExecutionsByScope(executions) {
+		scopeLabel := strings.ToUpper(string(execution.PipelineScope))
+		stepScope := domain.StepScope(strings.ToLower(string(execution.PipelineScope)))
+		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":trigger_pipeline", scopeLabel+" 触发管线")
+		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":pipeline_running", scopeLabel+" 管线运行")
+		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":pipeline_success", scopeLabel+" 发布完成")
+	}
+	appendStep(domain.StepScopeGlobal, "", "global:release_finish", "发布完成")
 	return items
+}
+
+func orderExecutionsByScope(items []domain.ReleaseOrderExecution) []domain.ReleaseOrderExecution {
+	result := make([]domain.ReleaseOrderExecution, 0, len(items))
+	var ci, cd *domain.ReleaseOrderExecution
+	for idx := range items {
+		switch items[idx].PipelineScope {
+		case domain.PipelineScopeCI:
+			ci = &items[idx]
+		case domain.PipelineScopeCD:
+			cd = &items[idx]
+		}
+	}
+	if ci != nil {
+		result = append(result, *ci)
+	}
+	if cd != nil {
+		result = append(result, *cd)
+	}
+	return result
+}
+
+func pickPrimaryExecution(items []domain.ReleaseOrderExecution) (domain.ReleaseOrderExecution, bool) {
+	ordered := orderExecutionsByScope(items)
+	if len(ordered) == 0 {
+		return domain.ReleaseOrderExecution{}, false
+	}
+	return ordered[0], true
 }
 
 func deriveOrderStatusFromSteps(steps []domain.ReleaseOrderStep) (domain.OrderStatus, bool) {
@@ -1019,6 +1130,17 @@ func deriveOrderStatusFromSteps(steps []domain.ReleaseOrderStep) (domain.OrderSt
 
 	allSuccess := true
 	for _, step := range steps {
+		if step.StepScope == domain.StepScopeGlobal && step.StepCode == "global:release_finish" {
+			switch step.Status {
+			case domain.StepStatusFailed:
+				return domain.OrderStatusFailed, true
+			case domain.StepStatusSuccess:
+				return domain.OrderStatusSuccess, true
+			case domain.StepStatusPending, domain.StepStatusRunning:
+				allSuccess = false
+				continue
+			}
+		}
 		switch step.Status {
 		case domain.StepStatusFailed:
 			return domain.OrderStatusFailed, true

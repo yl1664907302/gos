@@ -68,6 +68,7 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
 
 	router.GET("/release-orders/:id/params", h.ListParams)
+	router.GET("/release-orders/:id/executions", h.ListExecutions)
 	router.GET("/release-orders/:id/steps", h.ListSteps)
 	router.GET("/release-orders/:id/pipeline-stages", h.ListPipelineStages)
 	router.GET("/release-orders/:id/pipeline-stages/:stage_id/log", h.GetPipelineStageLog)
@@ -77,7 +78,6 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 
 type CreateReleaseOrderRequest struct {
 	ApplicationID string                           `json:"application_id"`
-	BindingID     string                           `json:"binding_id"`
 	TemplateID    string                           `json:"template_id"`
 	EnvCode       string                           `json:"env_code"`
 	ProjectName   string                           `json:"project_name"`
@@ -92,6 +92,7 @@ type CreateReleaseOrderRequest struct {
 }
 
 type CreateReleaseOrderParamRequest struct {
+	PipelineScope     string `json:"pipeline_scope"`
 	ParamKey          string `json:"param_key"`
 	ExecutorParamName string `json:"executor_param_name"`
 	ParamValue        string `json:"param_value"`
@@ -118,6 +119,8 @@ type ReleaseOrderResponse struct {
 	OrderNo         string     `json:"order_no"`
 	ApplicationID   string     `json:"application_id"`
 	ApplicationName string     `json:"application_name"`
+	TemplateID      string     `json:"template_id"`
+	TemplateName    string     `json:"template_name"`
 	BindingID       string     `json:"binding_id"`
 	PipelineID      string     `json:"pipeline_id"`
 	EnvCode         string     `json:"env_code"`
@@ -139,6 +142,8 @@ type ReleaseOrderResponse struct {
 type ReleaseOrderParamResponse struct {
 	ID                string    `json:"id"`
 	ReleaseOrderID    string    `json:"release_order_id"`
+	PipelineScope     string    `json:"pipeline_scope"`
+	BindingID         string    `json:"binding_id"`
 	ParamKey          string    `json:"param_key"`
 	ExecutorParamName string    `json:"executor_param_name"`
 	ParamValue        string    `json:"param_value"`
@@ -149,6 +154,8 @@ type ReleaseOrderParamResponse struct {
 type ReleaseOrderStepResponse struct {
 	ID             string     `json:"id"`
 	ReleaseOrderID string     `json:"release_order_id"`
+	StepScope      string     `json:"step_scope"`
+	ExecutionID    string     `json:"execution_id"`
 	StepCode       string     `json:"step_code"`
 	StepName       string     `json:"step_name"`
 	Status         string     `json:"status"`
@@ -172,6 +179,28 @@ type ReleaseOrderListResponse struct {
 
 type ReleaseOrderParamListResponse struct {
 	Data []ReleaseOrderParamResponse `json:"data"`
+}
+
+type ReleaseOrderExecutionResponse struct {
+	ID             string     `json:"id"`
+	ReleaseOrderID string     `json:"release_order_id"`
+	PipelineScope  string     `json:"pipeline_scope"`
+	BindingID      string     `json:"binding_id"`
+	BindingName    string     `json:"binding_name"`
+	Provider       string     `json:"provider"`
+	PipelineID     string     `json:"pipeline_id"`
+	Status         string     `json:"status"`
+	QueueURL       string     `json:"queue_url"`
+	BuildURL       string     `json:"build_url"`
+	ExternalRunID  string     `json:"external_run_id"`
+	StartedAt      *time.Time `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type ReleaseOrderExecutionListResponse struct {
+	Data []ReleaseOrderExecutionResponse `json:"data"`
 }
 
 type ReleaseOrderStepListResponse struct {
@@ -216,6 +245,7 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 	params := make([]usecase.CreateReleaseOrderParamInput, 0, len(req.Params))
 	for _, item := range req.Params {
 		params = append(params, usecase.CreateReleaseOrderParamInput{
+			PipelineScope:     domain.PipelineScope(strings.ToLower(strings.TrimSpace(item.PipelineScope))),
 			ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
 			ExecutorParamName: item.ExecutorParamName,
 			ParamValue:        item.ParamValue,
@@ -234,7 +264,6 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 
 	order, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseOrderInput{
 		ApplicationID: req.ApplicationID,
-		BindingID:     req.BindingID,
 		TemplateID:    req.TemplateID,
 		EnvCode:       req.EnvCode,
 		SonService:    "",
@@ -486,6 +515,7 @@ func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
 
 	streamErr := h.logStreamer.Stream(c.Request.Context(), usecase.StreamReleaseOrderLogInput{
 		ReleaseOrderID: c.Param("id"),
+		PipelineScope:  domain.PipelineScope(strings.ToLower(strings.TrimSpace(c.Query("scope")))),
 		StartOffset:    startOffset,
 	}, writeEvent)
 	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
@@ -511,6 +541,9 @@ func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
 	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
 		return
 	}
+	if !ensurePermission(c, h.authz, "release.param_snapshot.view", "", "") {
+		return
+	}
 	order, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -528,6 +561,30 @@ func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
 	resp := make([]ReleaseOrderParamResponse, 0, len(items))
 	for _, item := range items {
 		resp = append(resp, toReleaseOrderParamResponse(item))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": resp})
+}
+
+func (h *ReleaseOrderHandler) ListExecutions(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	order, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
+		return
+	}
+	items, err := h.manager.ListExecutions(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := make([]ReleaseOrderExecutionResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, toReleaseOrderExecutionResponse(item))
 	}
 	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
@@ -666,6 +723,8 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		OrderNo:         item.OrderNo,
 		ApplicationID:   item.ApplicationID,
 		ApplicationName: item.ApplicationName,
+		TemplateID:      item.TemplateID,
+		TemplateName:    item.TemplateName,
 		BindingID:       item.BindingID,
 		PipelineID:      item.PipelineID,
 		EnvCode:         item.EnvCode,
@@ -689,6 +748,8 @@ func toReleaseOrderParamResponse(item domain.ReleaseOrderParam) ReleaseOrderPara
 	return ReleaseOrderParamResponse{
 		ID:                item.ID,
 		ReleaseOrderID:    item.ReleaseOrderID,
+		PipelineScope:     string(item.PipelineScope),
+		BindingID:         item.BindingID,
 		ParamKey:          item.ParamKey,
 		ExecutorParamName: item.ExecutorParamName,
 		ParamValue:        item.ParamValue,
@@ -701,6 +762,8 @@ func toReleaseOrderStepResponse(item domain.ReleaseOrderStep) ReleaseOrderStepRe
 	return ReleaseOrderStepResponse{
 		ID:             item.ID,
 		ReleaseOrderID: item.ReleaseOrderID,
+		StepScope:      string(item.StepScope),
+		ExecutionID:    item.ExecutionID,
 		StepCode:       item.StepCode,
 		StepName:       item.StepName,
 		Status:         string(item.Status),
@@ -709,6 +772,26 @@ func toReleaseOrderStepResponse(item domain.ReleaseOrderStep) ReleaseOrderStepRe
 		StartedAt:      item.StartedAt,
 		FinishedAt:     item.FinishedAt,
 		CreatedAt:      item.CreatedAt,
+	}
+}
+
+func toReleaseOrderExecutionResponse(item domain.ReleaseOrderExecution) ReleaseOrderExecutionResponse {
+	return ReleaseOrderExecutionResponse{
+		ID:             item.ID,
+		ReleaseOrderID: item.ReleaseOrderID,
+		PipelineScope:  string(item.PipelineScope),
+		BindingID:      item.BindingID,
+		BindingName:    item.BindingName,
+		Provider:       item.Provider,
+		PipelineID:     item.PipelineID,
+		Status:         string(item.Status),
+		QueueURL:       item.QueueURL,
+		BuildURL:       item.BuildURL,
+		ExternalRunID:  item.ExternalRunID,
+		StartedAt:      item.StartedAt,
+		FinishedAt:     item.FinishedAt,
+		CreatedAt:      item.CreatedAt,
+		UpdatedAt:      item.UpdatedAt,
 	}
 }
 
@@ -723,6 +806,7 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 	case errors.Is(err, appdomain.ErrNotFound),
 		errors.Is(err, pipelinedomain.ErrBindingNotFound),
 		errors.Is(err, domain.ErrOrderNotFound),
+		errors.Is(err, domain.ErrExecutionNotFound),
 		errors.Is(err, domain.ErrStepNotFound),
 		errors.Is(err, domain.ErrPipelineStageNotFound),
 		errors.Is(err, domain.ErrTemplateNotFound):

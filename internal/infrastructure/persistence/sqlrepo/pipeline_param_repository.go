@@ -197,6 +197,10 @@ func (r *PipelineParamRepository) sqliteTableColumns(ctx context.Context, table 
 }
 
 func (r *PipelineParamRepository) Upsert(ctx context.Context, items []domain.PipelineParamDef) (int, int, error) {
+	if r.dbDriver == "mysql" {
+		return r.upsertMySQL(ctx, items)
+	}
+
 	const (
 		updateByKey = `UPDATE pipeline_param_def
 SET param_type = ?, single_select = ?, required = ?, default_value = ?, description = ?, visible = ?, editable = ?, source_from = ?, status = ?, raw_meta = ?, sort_no = ?, updated_at = ?
@@ -208,10 +212,29 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 
 	created := 0
 	updated := 0
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return created, updated, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	updateStmt, err := tx.PrepareContext(ctx, updateByKey)
+	if err != nil {
+		return created, updated, err
+	}
+	defer func() { _ = updateStmt.Close() }()
+
+	insertStmt, err := tx.PrepareContext(ctx, insert)
+	if err != nil {
+		return created, updated, err
+	}
+	defer func() { _ = insertStmt.Close() }()
+
 	for _, item := range items {
-		res, err := r.db.ExecContext(
+		res, err := updateStmt.ExecContext(
 			ctx,
-			updateByKey,
 			string(item.ParamType),
 			boolToInt(item.SingleSelect),
 			boolToInt(item.Required),
@@ -240,9 +263,8 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 			continue
 		}
 
-		_, err = r.db.ExecContext(
+		_, err = insertStmt.ExecContext(
 			ctx,
-			insert,
 			item.ID,
 			item.PipelineID,
 			string(item.ExecutorType),
@@ -271,7 +293,173 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 		}
 		created++
 	}
+
+	if err := tx.Commit(); err != nil {
+		return created, updated, err
+	}
 	return created, updated, nil
+}
+
+func (r *PipelineParamRepository) upsertMySQL(ctx context.Context, items []domain.PipelineParamDef) (int, int, error) {
+	if len(items) == 0 {
+		return 0, 0, nil
+	}
+
+	existingKeys, err := r.mysqlExistingParamKeys(ctx, items)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	created := 0
+	updated := 0
+	for _, item := range items {
+		if _, ok := existingKeys[pipelineParamUniqueKey(item.PipelineID, item.ExecutorType, item.ExecutorParamName)]; ok {
+			updated++
+			continue
+		}
+		created++
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	const batchSize = 200
+	for start := 0; start < len(items); start += batchSize {
+		end := start + batchSize
+		if end > len(items) {
+			end = len(items)
+		}
+		if err := r.mysqlBatchUpsert(ctx, tx, items[start:end]); err != nil {
+			return 0, 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return created, updated, nil
+}
+
+func (r *PipelineParamRepository) mysqlBatchUpsert(ctx context.Context, tx *sql.Tx, items []domain.PipelineParamDef) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	var builder strings.Builder
+	builder.WriteString(`INSERT INTO pipeline_param_def (
+id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
+) VALUES `)
+
+	args := make([]any, 0, len(items)*18)
+	for idx, item := range items {
+		if idx > 0 {
+			builder.WriteString(",")
+		}
+		builder.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args,
+			item.ID,
+			item.PipelineID,
+			string(item.ExecutorType),
+			item.ExecutorParamName,
+			item.ParamKey,
+			string(item.ParamType),
+			boolToInt(item.SingleSelect),
+			boolToInt(item.Required),
+			item.DefaultValue,
+			item.Description,
+			boolToInt(item.Visible),
+			boolToInt(item.Editable),
+			string(item.SourceFrom),
+			string(item.Status),
+			item.RawMeta,
+			item.SortNo,
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		)
+	}
+
+	builder.WriteString(` ON DUPLICATE KEY UPDATE
+param_type = VALUES(param_type),
+single_select = VALUES(single_select),
+required = VALUES(required),
+default_value = VALUES(default_value),
+description = VALUES(description),
+visible = VALUES(visible),
+editable = VALUES(editable),
+source_from = VALUES(source_from),
+status = VALUES(status),
+raw_meta = VALUES(raw_meta),
+sort_no = VALUES(sort_no),
+updated_at = VALUES(updated_at)`)
+
+	_, err := tx.ExecContext(ctx, builder.String(), args...)
+	return err
+}
+
+func (r *PipelineParamRepository) mysqlExistingParamKeys(ctx context.Context, items []domain.PipelineParamDef) (map[string]struct{}, error) {
+	pipelineIDs := make([]string, 0, len(items))
+	seenPipelineIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if _, ok := seenPipelineIDs[item.PipelineID]; ok {
+			continue
+		}
+		seenPipelineIDs[item.PipelineID] = struct{}{}
+		pipelineIDs = append(pipelineIDs, item.PipelineID)
+	}
+
+	result := make(map[string]struct{}, len(items))
+	const chunkSize = 200
+	for start := 0; start < len(pipelineIDs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(pipelineIDs) {
+			end = len(pipelineIDs)
+		}
+
+		placeholders := strings.TrimRight(strings.Repeat("?,", end-start), ",")
+		query := fmt.Sprintf(`SELECT pipeline_id, executor_type, executor_param_name
+FROM pipeline_param_def
+WHERE executor_type = ? AND pipeline_id IN (%s)`, placeholders)
+
+		args := make([]any, 0, end-start+1)
+		args = append(args, string(domain.ExecutorTypeJenkins))
+		for _, pipelineID := range pipelineIDs[start:end] {
+			args = append(args, pipelineID)
+		}
+
+		rows, err := r.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+
+		for rows.Next() {
+			var (
+				pipelineID        string
+				executorType      string
+				executorParamName string
+			)
+			if err := rows.Scan(&pipelineID, &executorType, &executorParamName); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			result[pipelineParamUniqueKey(pipelineID, domain.ExecutorType(executorType), executorParamName)] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_ = rows.Close()
+	}
+
+	return result, nil
+}
+
+func pipelineParamUniqueKey(pipelineID string, executorType domain.ExecutorType, executorParamName string) string {
+	return pipelineID + "\x00" + string(executorType) + "\x00" + executorParamName
 }
 
 func (r *PipelineParamRepository) MarkMissingInactive(

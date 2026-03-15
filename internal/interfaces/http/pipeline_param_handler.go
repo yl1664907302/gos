@@ -377,7 +377,7 @@ func (h *PipelineParamHandler) Update(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /jenkins/pipeline-param-defs/sync [post]
 func (h *PipelineParamHandler) Sync(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
+	if !ensureAnyPermission(c, h.authz, "pipeline_param.manage", "pipeline.manage") {
 		return
 	}
 	result, err := h.syncer.Execute(c.Request.Context())

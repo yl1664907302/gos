@@ -39,17 +39,22 @@ func (h *ReleaseTemplateHandler) RegisterRoutes(router gin.IRouter) {
 type CreateReleaseTemplateRequest struct {
 	Name          string   `json:"name"`
 	ApplicationID string   `json:"application_id"`
-	BindingID     string   `json:"binding_id"`
+	CIBindingID   string   `json:"ci_binding_id"`
+	CDBindingID   string   `json:"cd_binding_id"`
 	Status        string   `json:"status"`
 	Remark        string   `json:"remark"`
-	ParamDefIDs   []string `json:"param_def_ids"`
+	CIParamDefIDs []string `json:"ci_param_def_ids"`
+	CDParamDefIDs []string `json:"cd_param_def_ids"`
 }
 
 type UpdateReleaseTemplateRequest struct {
-	Name        string   `json:"name"`
-	Status      string   `json:"status"`
-	Remark      string   `json:"remark"`
-	ParamDefIDs []string `json:"param_def_ids"`
+	Name          string   `json:"name"`
+	CIBindingID   string   `json:"ci_binding_id"`
+	CDBindingID   string   `json:"cd_binding_id"`
+	Status        string   `json:"status"`
+	Remark        string   `json:"remark"`
+	CIParamDefIDs []string `json:"ci_param_def_ids"`
+	CDParamDefIDs []string `json:"cd_param_def_ids"`
 }
 
 type ReleaseTemplateResponse struct {
@@ -70,6 +75,9 @@ type ReleaseTemplateResponse struct {
 type ReleaseTemplateParamResponse struct {
 	ID                 string    `json:"id"`
 	TemplateID         string    `json:"template_id"`
+	TemplateBindingID  string    `json:"template_binding_id"`
+	PipelineScope      string    `json:"pipeline_scope"`
+	BindingID          string    `json:"binding_id"`
 	PipelineParamDefID string    `json:"pipeline_param_def_id"`
 	ParamKey           string    `json:"param_key"`
 	ParamName          string    `json:"param_name"`
@@ -80,10 +88,25 @@ type ReleaseTemplateParamResponse struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+type ReleaseTemplateBindingResponse struct {
+	ID            string    `json:"id"`
+	TemplateID    string    `json:"template_id"`
+	PipelineScope string    `json:"pipeline_scope"`
+	BindingID     string    `json:"binding_id"`
+	BindingName   string    `json:"binding_name"`
+	Provider      string    `json:"provider"`
+	PipelineID    string    `json:"pipeline_id"`
+	Enabled       bool      `json:"enabled"`
+	SortNo        int       `json:"sort_no"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type ReleaseTemplateDataResponse struct {
 	Data struct {
-		Template ReleaseTemplateResponse        `json:"template"`
-		Params   []ReleaseTemplateParamResponse `json:"params"`
+		Template ReleaseTemplateResponse          `json:"template"`
+		Bindings []ReleaseTemplateBindingResponse `json:"bindings"`
+		Params   []ReleaseTemplateParamResponse   `json:"params"`
 	} `json:"data"`
 }
 
@@ -104,19 +127,21 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		return
 	}
 
-	template, params, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
+	template, bindings, params, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
 		Name:          req.Name,
 		ApplicationID: req.ApplicationID,
-		BindingID:     req.BindingID,
+		CIBindingID:   req.CIBindingID,
+		CDBindingID:   req.CDBindingID,
 		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
 		Remark:        req.Remark,
-		ParamDefIDs:   req.ParamDefIDs,
+		CIParamDefIDs: req.CIParamDefIDs,
+		CDParamDefIDs: req.CDParamDefIDs,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, params))
+	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, bindings, params))
 }
 
 func (h *ReleaseTemplateHandler) List(c *gin.Context) {
@@ -159,7 +184,7 @@ func (h *ReleaseTemplateHandler) List(c *gin.Context) {
 }
 
 func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
-	template, params, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, bindings, params, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -167,11 +192,11 @@ func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
 	if !h.ensureTemplateAccess(c, template) {
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, params))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, bindings, params))
 }
 
 func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
-	template, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, _, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -184,17 +209,20 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	updated, params, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
-		Name:        req.Name,
-		Status:      releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
-		Remark:      req.Remark,
-		ParamDefIDs: req.ParamDefIDs,
+	updated, bindings, params, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
+		Name:          req.Name,
+		CIBindingID:   req.CIBindingID,
+		CDBindingID:   req.CDBindingID,
+		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
+		Remark:        req.Remark,
+		CIParamDefIDs: req.CIParamDefIDs,
+		CDParamDefIDs: req.CDParamDefIDs,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, params))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, bindings, params))
 }
 
 func (h *ReleaseTemplateHandler) Delete(c *gin.Context) {
@@ -344,6 +372,9 @@ func toReleaseTemplateParamResponse(item releasedomain.ReleaseTemplateParam) Rel
 	return ReleaseTemplateParamResponse{
 		ID:                 item.ID,
 		TemplateID:         item.TemplateID,
+		TemplateBindingID:  item.TemplateBindingID,
+		PipelineScope:      string(item.PipelineScope),
+		BindingID:          item.BindingID,
 		PipelineParamDefID: item.PipelineParamDefID,
 		ParamKey:           item.ParamKey,
 		ParamName:          item.ParamName,
@@ -355,12 +386,33 @@ func toReleaseTemplateParamResponse(item releasedomain.ReleaseTemplateParam) Rel
 	}
 }
 
+func toReleaseTemplateBindingResponse(item releasedomain.ReleaseTemplateBinding) ReleaseTemplateBindingResponse {
+	return ReleaseTemplateBindingResponse{
+		ID:            item.ID,
+		TemplateID:    item.TemplateID,
+		PipelineScope: string(item.PipelineScope),
+		BindingID:     item.BindingID,
+		BindingName:   item.BindingName,
+		Provider:      item.Provider,
+		PipelineID:    item.PipelineID,
+		Enabled:       item.Enabled,
+		SortNo:        item.SortNo,
+		CreatedAt:     item.CreatedAt,
+		UpdatedAt:     item.UpdatedAt,
+	}
+}
+
 func toReleaseTemplateDataResponse(
 	template releasedomain.ReleaseTemplate,
+	bindings []releasedomain.ReleaseTemplateBinding,
 	params []releasedomain.ReleaseTemplateParam,
 ) ReleaseTemplateDataResponse {
 	resp := ReleaseTemplateDataResponse{}
 	resp.Data.Template = toReleaseTemplateResponse(template)
+	resp.Data.Bindings = make([]ReleaseTemplateBindingResponse, 0, len(bindings))
+	for _, item := range bindings {
+		resp.Data.Bindings = append(resp.Data.Bindings, toReleaseTemplateBindingResponse(item))
+	}
 	resp.Data.Params = make([]ReleaseTemplateParamResponse, 0, len(params))
 	for _, item := range params {
 		resp.Data.Params = append(resp.Data.Params, toReleaseTemplateParamResponse(item))

@@ -230,6 +230,7 @@ func (r *UserRepository) ensureBuiltinPermissions(ctx context.Context, now time.
 		{ID: "perm-pipeline-param-manage", Code: "pipeline_param.manage", Name: "管理管线参数", Module: "pipeline_param", Action: "manage", Description: "管线参数映射维护"},
 		{ID: "perm-component-view", Code: "component.view", Name: "查看组件管理", Module: "component", Action: "view", Description: "访问组件管理模块"},
 		{ID: "perm-release-view", Code: "release.view", Name: "查看发布单", Module: "release", Action: "view", Description: "查看发布单列表/详情"},
+		{ID: "perm-release-param-snapshot-view", Code: "release.param_snapshot.view", Name: "查看参数快照", Module: "release", Action: "param_snapshot_view", Description: "查看发布详情中的参数快照"},
 		{ID: "perm-release-template-manage", Code: "release.template.manage", Name: "管理发布模板", Module: "release", Action: "template_manage", Description: "发布模板增删改查"},
 		{ID: "perm-release-create", Code: "release.create", Name: "创建发布单", Module: "release", Action: "create", Description: "创建发布单"},
 		{ID: "perm-release-param-config-view", Code: "release.param_config.view", Name: "展示额外参数配置", Module: "release", Action: "param_config_view", Description: "控制新建发布单页面额外参数区域展示"},

@@ -45,6 +45,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	order_no VARCHAR(64) NOT NULL,
 	application_id VARCHAR(64) NOT NULL,
 	application_name VARCHAR(100) NOT NULL DEFAULT '',
+	template_id VARCHAR(64) NOT NULL DEFAULT '',
+	template_name VARCHAR(128) NOT NULL DEFAULT '',
 	binding_id VARCHAR(64) NOT NULL,
 	pipeline_id VARCHAR(64) NOT NULL DEFAULT '',
 	env_code VARCHAR(50) NOT NULL,
@@ -65,9 +67,30 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	KEY idx_release_order_binding (binding_id),
 	KEY idx_release_order_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_order_execution (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	pipeline_scope VARCHAR(20) NOT NULL,
+	binding_id VARCHAR(64) NOT NULL,
+	binding_name VARCHAR(128) NOT NULL DEFAULT '',
+	provider VARCHAR(32) NOT NULL DEFAULT '',
+	pipeline_id VARCHAR(64) NOT NULL DEFAULT '',
+	status VARCHAR(32) NOT NULL DEFAULT 'pending',
+	queue_url VARCHAR(500) NOT NULL DEFAULT '',
+	build_url VARCHAR(500) NOT NULL DEFAULT '',
+	external_run_id VARCHAR(128) NOT NULL DEFAULT '',
+	started_at BIGINT NULL,
+	finished_at BIGINT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_order_execution_scope (release_order_id, pipeline_scope),
+	KEY idx_release_order_execution_order (release_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id VARCHAR(64) PRIMARY KEY,
 	release_order_id VARCHAR(64) NOT NULL,
+	pipeline_scope VARCHAR(20) NOT NULL DEFAULT '',
+	binding_id VARCHAR(64) NOT NULL DEFAULT '',
 	param_key VARCHAR(100) NOT NULL,
 	executor_param_name VARCHAR(100) NOT NULL DEFAULT '',
 	param_value VARCHAR(1000) NOT NULL DEFAULT '',
@@ -78,6 +101,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order_step (
 	id VARCHAR(64) PRIMARY KEY,
 	release_order_id VARCHAR(64) NOT NULL,
+	step_scope VARCHAR(20) NOT NULL DEFAULT 'global',
+	execution_id VARCHAR(64) NOT NULL DEFAULT '',
 	step_code VARCHAR(100) NOT NULL,
 	step_name VARCHAR(200) NOT NULL DEFAULT '',
 	status VARCHAR(50) NOT NULL,
@@ -92,6 +117,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order_pipeline_stage (
 	id VARCHAR(64) PRIMARY KEY,
 	release_order_id VARCHAR(64) NOT NULL,
+	execution_id VARCHAR(64) NOT NULL DEFAULT '',
 	pipeline_scope VARCHAR(32) NOT NULL DEFAULT '',
 	executor_type VARCHAR(32) NOT NULL DEFAULT '',
 	stage_key VARCHAR(128) NOT NULL,
@@ -124,9 +150,28 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	KEY idx_release_template_binding (binding_id),
 	KEY idx_release_template_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_template_binding (
+	id VARCHAR(64) PRIMARY KEY,
+	template_id VARCHAR(64) NOT NULL,
+	pipeline_scope VARCHAR(20) NOT NULL,
+	binding_id VARCHAR(64) NOT NULL,
+	binding_name VARCHAR(128) NOT NULL DEFAULT '',
+	provider VARCHAR(32) NOT NULL DEFAULT '',
+	pipeline_id VARCHAR(64) NOT NULL DEFAULT '',
+	enabled TINYINT(1) NOT NULL DEFAULT 1,
+	sort_no INT NOT NULL DEFAULT 1,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_template_scope (template_id, pipeline_scope),
+	KEY idx_release_template_binding_template (template_id),
+	KEY idx_release_template_binding_binding (binding_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_template_param (
 	id VARCHAR(64) PRIMARY KEY,
 	template_id VARCHAR(64) NOT NULL,
+	template_binding_id VARCHAR(64) NOT NULL DEFAULT '',
+	pipeline_scope VARCHAR(20) NOT NULL DEFAULT '',
+	binding_id VARCHAR(64) NOT NULL DEFAULT '',
 	pipeline_param_def_id VARCHAR(64) NOT NULL,
 	param_key VARCHAR(100) NOT NULL,
 	param_name VARCHAR(100) NOT NULL DEFAULT '',
@@ -147,6 +192,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	order_no TEXT NOT NULL UNIQUE,
 	application_id TEXT NOT NULL,
 	application_name TEXT NOT NULL DEFAULT '',
+	template_id TEXT NOT NULL DEFAULT '',
+	template_name TEXT NOT NULL DEFAULT '',
 	binding_id TEXT NOT NULL,
 	pipeline_id TEXT NOT NULL DEFAULT '',
 	env_code TEXT NOT NULL,
@@ -166,9 +213,30 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE INDEX IF NOT EXISTS idx_release_order_application ON release_order (application_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_binding ON release_order (binding_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_created_at ON release_order (created_at);`,
+			`CREATE TABLE IF NOT EXISTS release_order_execution (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL,
+	pipeline_scope TEXT NOT NULL,
+	binding_id TEXT NOT NULL,
+	binding_name TEXT NOT NULL DEFAULT '',
+	provider TEXT NOT NULL DEFAULT '',
+	pipeline_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'pending',
+	queue_url TEXT NOT NULL DEFAULT '',
+	build_url TEXT NOT NULL DEFAULT '',
+	external_run_id TEXT NOT NULL DEFAULT '',
+	started_at INTEGER NULL,
+	finished_at INTEGER NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(release_order_id, pipeline_scope)
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_order_execution_order ON release_order_execution (release_order_id);`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id TEXT PRIMARY KEY,
 	release_order_id TEXT NOT NULL,
+	pipeline_scope TEXT NOT NULL DEFAULT '',
+	binding_id TEXT NOT NULL DEFAULT '',
 	param_key TEXT NOT NULL,
 	executor_param_name TEXT NOT NULL DEFAULT '',
 	param_value TEXT NOT NULL DEFAULT '',
@@ -179,6 +247,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order_step (
 	id TEXT PRIMARY KEY,
 	release_order_id TEXT NOT NULL,
+	step_scope TEXT NOT NULL DEFAULT 'global',
+	execution_id TEXT NOT NULL DEFAULT '',
 	step_code TEXT NOT NULL,
 	step_name TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL,
@@ -193,6 +263,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order_pipeline_stage (
 	id TEXT PRIMARY KEY,
 	release_order_id TEXT NOT NULL,
+	execution_id TEXT NOT NULL DEFAULT '',
 	pipeline_scope TEXT NOT NULL DEFAULT '',
 	executor_type TEXT NOT NULL DEFAULT '',
 	stage_key TEXT NOT NULL,
@@ -225,9 +296,28 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE INDEX IF NOT EXISTS idx_release_template_application ON release_template (application_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_template_binding ON release_template (binding_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_template_created_at ON release_template (created_at);`,
+			`CREATE TABLE IF NOT EXISTS release_template_binding (
+	id TEXT PRIMARY KEY,
+	template_id TEXT NOT NULL,
+	pipeline_scope TEXT NOT NULL,
+	binding_id TEXT NOT NULL,
+	binding_name TEXT NOT NULL DEFAULT '',
+	provider TEXT NOT NULL DEFAULT '',
+	pipeline_id TEXT NOT NULL DEFAULT '',
+	enabled INTEGER NOT NULL DEFAULT 1,
+	sort_no INTEGER NOT NULL DEFAULT 1,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(template_id, pipeline_scope)
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_binding_template ON release_template_binding (template_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_binding_binding ON release_template_binding (binding_id);`,
 			`CREATE TABLE IF NOT EXISTS release_template_param (
 	id TEXT PRIMARY KEY,
 	template_id TEXT NOT NULL,
+	template_binding_id TEXT NOT NULL DEFAULT '',
+	pipeline_scope TEXT NOT NULL DEFAULT '',
+	binding_id TEXT NOT NULL DEFAULT '',
 	pipeline_param_def_id TEXT NOT NULL,
 	param_key TEXT NOT NULL,
 	param_name TEXT NOT NULL DEFAULT '',
@@ -273,6 +363,48 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		exists, err = r.mysqlColumnExists(ctx, "release_order", "template_id")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(ctx, `ALTER TABLE release_order ADD COLUMN template_id VARCHAR(64) NOT NULL DEFAULT '' AFTER application_name;`); err != nil {
+				return err
+			}
+		}
+		exists, err = r.mysqlColumnExists(ctx, "release_order", "template_name")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(ctx, `ALTER TABLE release_order ADD COLUMN template_name VARCHAR(128) NOT NULL DEFAULT '' AFTER template_id;`); err != nil {
+				return err
+			}
+		}
+		for _, columnStmt := range []struct {
+			table  string
+			column string
+			stmt   string
+		}{
+			{"release_order_param", "pipeline_scope", `ALTER TABLE release_order_param ADD COLUMN pipeline_scope VARCHAR(20) NOT NULL DEFAULT '' AFTER release_order_id;`},
+			{"release_order_param", "binding_id", `ALTER TABLE release_order_param ADD COLUMN binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER pipeline_scope;`},
+			{"release_order_step", "step_scope", `ALTER TABLE release_order_step ADD COLUMN step_scope VARCHAR(20) NOT NULL DEFAULT 'global' AFTER release_order_id;`},
+			{"release_order_step", "execution_id", `ALTER TABLE release_order_step ADD COLUMN execution_id VARCHAR(64) NOT NULL DEFAULT '' AFTER step_scope;`},
+			{"release_order_pipeline_stage", "execution_id", `ALTER TABLE release_order_pipeline_stage ADD COLUMN execution_id VARCHAR(64) NOT NULL DEFAULT '' AFTER release_order_id;`},
+			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER template_id;`},
+			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope VARCHAR(20) NOT NULL DEFAULT '' AFTER template_binding_id;`},
+			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER pipeline_scope;`},
+		} {
+			exists, err = r.mysqlColumnExists(ctx, columnStmt.table, columnStmt.column)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err = r.db.ExecContext(ctx, columnStmt.stmt); err != nil {
+					return err
+				}
+			}
+		}
 		if _, err = r.db.ExecContext(
 			ctx,
 			`ALTER TABLE release_order MODIFY COLUMN status VARCHAR(50) NOT NULL DEFAULT 'pending';`,
@@ -284,6 +416,13 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			`UPDATE release_order
 SET status = 'pending'
 WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`UPDATE release_order_param SET pipeline_scope = '' WHERE pipeline_scope IS NULL;`,
 		)
 		if err != nil {
 			return err
@@ -319,6 +458,41 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 				ctx,
 				`ALTER TABLE release_order ADD COLUMN creator_user_id TEXT NOT NULL DEFAULT '';`,
 			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["template_id"]; !ok {
+			if _, err = r.db.ExecContext(ctx, `ALTER TABLE release_order ADD COLUMN template_id TEXT NOT NULL DEFAULT '';`); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["template_name"]; !ok {
+			if _, err = r.db.ExecContext(ctx, `ALTER TABLE release_order ADD COLUMN template_name TEXT NOT NULL DEFAULT '';`); err != nil {
+				return err
+			}
+		}
+		for _, columnStmt := range []struct {
+			table  string
+			column string
+			stmt   string
+		}{
+			{"release_order_param", "pipeline_scope", `ALTER TABLE release_order_param ADD COLUMN pipeline_scope TEXT NOT NULL DEFAULT '';`},
+			{"release_order_param", "binding_id", `ALTER TABLE release_order_param ADD COLUMN binding_id TEXT NOT NULL DEFAULT '';`},
+			{"release_order_step", "step_scope", `ALTER TABLE release_order_step ADD COLUMN step_scope TEXT NOT NULL DEFAULT 'global';`},
+			{"release_order_step", "execution_id", `ALTER TABLE release_order_step ADD COLUMN execution_id TEXT NOT NULL DEFAULT '';`},
+			{"release_order_pipeline_stage", "execution_id", `ALTER TABLE release_order_pipeline_stage ADD COLUMN execution_id TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id TEXT NOT NULL DEFAULT '';`},
+		} {
+			tableColumns, tableErr := r.sqliteTableColumns(ctx, columnStmt.table)
+			if tableErr != nil {
+				return tableErr
+			}
+			if _, ok := tableColumns[columnStmt.column]; ok {
+				continue
+			}
+			if _, err = r.db.ExecContext(ctx, columnStmt.stmt); err != nil {
 				return err
 			}
 		}
@@ -394,6 +568,7 @@ func (r *ReleaseRepository) sqliteTableColumns(ctx context.Context, table string
 func (r *ReleaseRepository) Create(
 	ctx context.Context,
 	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
 	params []domain.ReleaseOrderParam,
 	steps []domain.ReleaseOrderStep,
 ) error {
@@ -409,9 +584,9 @@ func (r *ReleaseRepository) Create(
 
 	const insertOrder = `
 INSERT INTO release_order (
-	id, order_no, application_id, application_name, binding_id, pipeline_id, env_code,
+	id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
 	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -420,6 +595,8 @@ INSERT INTO release_order (
 		order.OrderNo,
 		order.ApplicationID,
 		order.ApplicationName,
+		order.TemplateID,
+		order.TemplateName,
 		order.BindingID,
 		order.PipelineID,
 		order.EnvCode,
@@ -443,16 +620,46 @@ INSERT INTO release_order (
 		return err
 	}
 
+	const insertExecution = `
+INSERT INTO release_order_execution (
+	id, release_order_id, pipeline_scope, binding_id, binding_name, provider, pipeline_id, status, queue_url, build_url, external_run_id, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	for _, item := range executions {
+		if _, execErr := tx.ExecContext(
+			ctx,
+			insertExecution,
+			item.ID,
+			item.ReleaseOrderID,
+			string(item.PipelineScope),
+			item.BindingID,
+			item.BindingName,
+			item.Provider,
+			item.PipelineID,
+			string(item.Status),
+			item.QueueURL,
+			item.BuildURL,
+			item.ExternalRunID,
+			nullableUnixNano(item.StartedAt),
+			nullableUnixNano(item.FinishedAt),
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); execErr != nil {
+			return execErr
+		}
+	}
+
 	const insertParam = `
 INSERT INTO release_order_param (
-	id, release_order_id, param_key, executor_param_name, param_value, value_source, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?);`
+	id, release_order_id, pipeline_scope, binding_id, param_key, executor_param_name, param_value, value_source, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	for _, item := range params {
 		if _, execErr := tx.ExecContext(
 			ctx,
 			insertParam,
 			item.ID,
 			item.ReleaseOrderID,
+			string(item.PipelineScope),
+			item.BindingID,
 			item.ParamKey,
 			item.ExecutorParamName,
 			item.ParamValue,
@@ -465,14 +672,16 @@ INSERT INTO release_order_param (
 
 	const insertStep = `
 INSERT INTO release_order_step (
-	id, release_order_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, release_order_id, step_scope, execution_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	for _, item := range steps {
 		if _, execErr := tx.ExecContext(
 			ctx,
 			insertStep,
 			item.ID,
 			item.ReleaseOrderID,
+			string(item.StepScope),
+			item.ExecutionID,
 			item.StepCode,
 			item.StepName,
 			string(item.Status),
@@ -495,7 +704,7 @@ INSERT INTO release_order_step (
 
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
-SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
@@ -564,7 +773,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 
 	listQuery := `
-SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
@@ -630,10 +839,10 @@ WHERE id = ?;`
 
 func (r *ReleaseRepository) ListParams(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderParam, error) {
 	const q = `
-SELECT id, release_order_id, param_key, executor_param_name, param_value, value_source, created_at
+SELECT id, release_order_id, pipeline_scope, binding_id, param_key, executor_param_name, param_value, value_source, created_at
 FROM release_order_param
 WHERE release_order_id = ?
-ORDER BY created_at ASC, id ASC;`
+ORDER BY pipeline_scope ASC, created_at ASC, id ASC;`
 
 	rows, err := r.db.QueryContext(ctx, q, releaseOrderID)
 	if err != nil {
@@ -657,7 +866,7 @@ ORDER BY created_at ASC, id ASC;`
 
 func (r *ReleaseRepository) ListSteps(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderStep, error) {
 	const q = `
-SELECT id, release_order_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
+SELECT id, release_order_id, step_scope, execution_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
 FROM release_order_step
 WHERE release_order_id = ?
 ORDER BY sort_no ASC, created_at ASC;`
@@ -682,6 +891,91 @@ ORDER BY sort_no ASC, created_at ASC;`
 	return items, nil
 }
 
+func (r *ReleaseRepository) ListExecutions(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderExecution, error) {
+	const q = `
+SELECT id, release_order_id, pipeline_scope, binding_id, binding_name, provider, pipeline_id, status, queue_url, build_url, external_run_id, started_at, finished_at, created_at, updated_at
+FROM release_order_execution
+WHERE release_order_id = ?
+ORDER BY pipeline_scope ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, strings.TrimSpace(releaseOrderID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrderExecution, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrderExecution(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) GetExecutionByScope(
+	ctx context.Context,
+	releaseOrderID string,
+	scope domain.PipelineScope,
+) (domain.ReleaseOrderExecution, error) {
+	const q = `
+SELECT id, release_order_id, pipeline_scope, binding_id, binding_name, provider, pipeline_id, status, queue_url, build_url, external_run_id, started_at, finished_at, created_at, updated_at
+FROM release_order_execution
+WHERE release_order_id = ? AND pipeline_scope = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, strings.TrimSpace(releaseOrderID), strings.TrimSpace(string(scope)))
+	item, err := scanReleaseOrderExecution(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ReleaseOrderExecution{}, domain.ErrExecutionNotFound
+		}
+		return domain.ReleaseOrderExecution{}, err
+	}
+	return item, nil
+}
+
+func (r *ReleaseRepository) UpdateExecutionByScope(
+	ctx context.Context,
+	releaseOrderID string,
+	scope domain.PipelineScope,
+	input domain.ExecutionUpdateInput,
+) (domain.ReleaseOrderExecution, error) {
+	const q = `
+UPDATE release_order_execution
+SET status = ?, queue_url = ?, build_url = ?, external_run_id = ?, started_at = ?, finished_at = ?, updated_at = ?
+WHERE release_order_id = ? AND pipeline_scope = ?;`
+
+	res, err := r.db.ExecContext(
+		ctx,
+		q,
+		string(input.Status),
+		strings.TrimSpace(input.QueueURL),
+		strings.TrimSpace(input.BuildURL),
+		strings.TrimSpace(input.ExternalRunID),
+		nullableUnixNano(input.StartedAt),
+		nullableUnixNano(input.FinishedAt),
+		input.UpdatedAt.UTC().UnixNano(),
+		strings.TrimSpace(releaseOrderID),
+		strings.TrimSpace(string(scope)),
+	)
+	if err != nil {
+		return domain.ReleaseOrderExecution{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.ReleaseOrderExecution{}, err
+	}
+	if affected == 0 {
+		return domain.ReleaseOrderExecution{}, domain.ErrExecutionNotFound
+	}
+	return r.GetExecutionByScope(ctx, releaseOrderID, scope)
+}
+
 func (r *ReleaseRepository) ReplacePipelineStages(
 	ctx context.Context,
 	releaseOrderID string,
@@ -703,14 +997,15 @@ func (r *ReleaseRepository) ReplacePipelineStages(
 
 	const insertStage = `
 INSERT INTO release_order_pipeline_stage (
-	id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, release_order_id, execution_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	for _, item := range stages {
 		if _, err := tx.ExecContext(
 			ctx,
 			insertStage,
 			item.ID,
 			item.ReleaseOrderID,
+			item.ExecutionID,
 			item.PipelineScope,
 			item.ExecutorType,
 			item.StageKey,
@@ -740,7 +1035,7 @@ func (r *ReleaseRepository) ListPipelineStages(
 	releaseOrderID string,
 ) ([]domain.ReleaseOrderPipelineStage, error) {
 	const q = `
-SELECT id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+SELECT id, release_order_id, execution_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
 FROM release_order_pipeline_stage
 WHERE release_order_id = ?
 ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
@@ -771,7 +1066,7 @@ func (r *ReleaseRepository) GetPipelineStageByID(
 	stageID string,
 ) (domain.ReleaseOrderPipelineStage, error) {
 	const q = `
-SELECT id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+SELECT id, release_order_id, execution_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
 FROM release_order_pipeline_stage
 WHERE release_order_id = ? AND id = ?;`
 
@@ -792,7 +1087,7 @@ func (r *ReleaseRepository) GetStepByCode(
 	stepCode string,
 ) (domain.ReleaseOrderStep, error) {
 	const q = `
-SELECT id, release_order_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
+SELECT id, release_order_id, step_scope, execution_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
 FROM release_order_step
 WHERE release_order_id = ? AND step_code = ?;`
 
@@ -844,6 +1139,7 @@ WHERE release_order_id = ? AND step_code = ?;`
 func (r *ReleaseRepository) CreateTemplate(
 	ctx context.Context,
 	template domain.ReleaseTemplate,
+	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -882,6 +1178,9 @@ INSERT INTO release_template (
 		return err
 	}
 
+	if err := r.insertTemplateBindings(ctx, tx, bindings); err != nil {
+		return err
+	}
 	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
 		return err
 	}
@@ -896,7 +1195,7 @@ INSERT INTO release_template (
 func (r *ReleaseRepository) GetTemplateByID(
 	ctx context.Context,
 	id string,
-) (domain.ReleaseTemplate, []domain.ReleaseTemplateParam, error) {
+) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, error) {
 	const q = `
 SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
 FROM release_template
@@ -906,16 +1205,20 @@ WHERE id = ?;`
 	item, err := scanReleaseTemplate(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.ReleaseTemplate{}, nil, domain.ErrTemplateNotFound
+			return domain.ReleaseTemplate{}, nil, nil, domain.ErrTemplateNotFound
 		}
-		return domain.ReleaseTemplate{}, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, err
+	}
+	bindings, err := r.listTemplateBindings(ctx, item.ID)
+	if err != nil {
+		return domain.ReleaseTemplate{}, nil, nil, err
 	}
 	params, err := r.listTemplateParams(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, err
 	}
 	item.ParamCount = len(params)
-	return item, params, nil
+	return item, bindings, params, nil
 }
 
 func (r *ReleaseRepository) ListTemplates(
@@ -1000,6 +1303,7 @@ LEFT JOIN (
 func (r *ReleaseRepository) UpdateTemplate(
 	ctx context.Context,
 	template domain.ReleaseTemplate,
+	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -1045,6 +1349,12 @@ WHERE id = ?;`
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, template.ID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, template.ID); err != nil {
+		return err
+	}
+	if err := r.insertTemplateBindings(ctx, tx, bindings); err != nil {
+		return err
+	}
 	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
 		return err
 	}
@@ -1070,6 +1380,9 @@ func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM release_template WHERE id = ?;`, strings.TrimSpace(id))
 	if err != nil {
 		return err
@@ -1089,6 +1402,38 @@ func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error
 	return nil
 }
 
+func (r *ReleaseRepository) insertTemplateBindings(
+	ctx context.Context,
+	tx *sql.Tx,
+	bindings []domain.ReleaseTemplateBinding,
+) error {
+	const insertBinding = `
+INSERT INTO release_template_binding (
+	id, template_id, pipeline_scope, binding_id, binding_name, provider, pipeline_id, enabled, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	for _, item := range bindings {
+		if _, err := tx.ExecContext(
+			ctx,
+			insertBinding,
+			item.ID,
+			item.TemplateID,
+			string(item.PipelineScope),
+			item.BindingID,
+			item.BindingName,
+			item.Provider,
+			item.PipelineID,
+			boolToInt(item.Enabled),
+			item.SortNo,
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ReleaseRepository) insertTemplateParams(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -1096,8 +1441,8 @@ func (r *ReleaseRepository) insertTemplateParams(
 ) error {
 	const insertParam = `
 INSERT INTO release_template_param (
-	id, template_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, template_id, template_binding_id, pipeline_scope, binding_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	for _, item := range params {
 		if _, err := tx.ExecContext(
@@ -1105,6 +1450,9 @@ INSERT INTO release_template_param (
 			insertParam,
 			item.ID,
 			item.TemplateID,
+			item.TemplateBindingID,
+			string(item.PipelineScope),
+			item.BindingID,
 			item.PipelineParamDefID,
 			item.ParamKey,
 			item.ParamName,
@@ -1120,15 +1468,45 @@ INSERT INTO release_template_param (
 	return nil
 }
 
+func (r *ReleaseRepository) listTemplateBindings(
+	ctx context.Context,
+	templateID string,
+) ([]domain.ReleaseTemplateBinding, error) {
+	const q = `
+SELECT id, template_id, pipeline_scope, binding_id, binding_name, provider, pipeline_id, enabled, sort_no, created_at, updated_at
+FROM release_template_binding
+WHERE template_id = ?
+ORDER BY sort_no ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseTemplateBinding, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseTemplateBinding(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (r *ReleaseRepository) listTemplateParams(
 	ctx context.Context,
 	templateID string,
 ) ([]domain.ReleaseTemplateParam, error) {
 	const q = `
-SELECT id, template_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+SELECT id, template_id, template_binding_id, pipeline_scope, binding_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
 FROM release_template_param
 WHERE template_id = ?
-ORDER BY sort_no ASC, created_at ASC;`
+ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
 
 	rows, err := r.db.QueryContext(ctx, q, templateID)
 	if err != nil {
@@ -1165,6 +1543,8 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		&item.OrderNo,
 		&item.ApplicationID,
 		&item.ApplicationName,
+		&item.TemplateID,
+		&item.TemplateName,
 		&item.BindingID,
 		&item.PipelineID,
 		&item.EnvCode,
@@ -1201,13 +1581,16 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 
 func scanReleaseOrderParam(s scanner) (domain.ReleaseOrderParam, error) {
 	var (
-		item        domain.ReleaseOrderParam
-		valueSource string
-		createdAt   int64
+		item          domain.ReleaseOrderParam
+		pipelineScope string
+		valueSource   string
+		createdAt     int64
 	)
 	if err := s.Scan(
 		&item.ID,
 		&item.ReleaseOrderID,
+		&pipelineScope,
+		&item.BindingID,
 		&item.ParamKey,
 		&item.ExecutorParamName,
 		&item.ParamValue,
@@ -1216,14 +1599,60 @@ func scanReleaseOrderParam(s scanner) (domain.ReleaseOrderParam, error) {
 	); err != nil {
 		return domain.ReleaseOrderParam{}, err
 	}
+	item.PipelineScope = domain.PipelineScope(pipelineScope)
 	item.ValueSource = domain.ValueSource(valueSource)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	return item, nil
+}
+
+func scanReleaseOrderExecution(s scanner) (domain.ReleaseOrderExecution, error) {
+	var (
+		item          domain.ReleaseOrderExecution
+		pipelineScope string
+		statusRaw     string
+		startedAt     sql.NullInt64
+		finishedAt    sql.NullInt64
+		createdAt     int64
+		updatedAt     int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&pipelineScope,
+		&item.BindingID,
+		&item.BindingName,
+		&item.Provider,
+		&item.PipelineID,
+		&statusRaw,
+		&item.QueueURL,
+		&item.BuildURL,
+		&item.ExternalRunID,
+		&startedAt,
+		&finishedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseOrderExecution{}, err
+	}
+	item.PipelineScope = domain.PipelineScope(pipelineScope)
+	item.Status = domain.ExecutionStatus(statusRaw)
+	if startedAt.Valid {
+		t := time.Unix(0, startedAt.Int64).UTC()
+		item.StartedAt = &t
+	}
+	if finishedAt.Valid {
+		t := time.Unix(0, finishedAt.Int64).UTC()
+		item.FinishedAt = &t
+	}
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
 }
 
 func scanReleaseOrderStep(s scanner) (domain.ReleaseOrderStep, error) {
 	var (
 		item       domain.ReleaseOrderStep
+		stepScope  string
 		statusRaw  string
 		startedAt  sql.NullInt64
 		finishedAt sql.NullInt64
@@ -1232,6 +1661,8 @@ func scanReleaseOrderStep(s scanner) (domain.ReleaseOrderStep, error) {
 	if err := s.Scan(
 		&item.ID,
 		&item.ReleaseOrderID,
+		&stepScope,
+		&item.ExecutionID,
 		&item.StepCode,
 		&item.StepName,
 		&statusRaw,
@@ -1243,6 +1674,7 @@ func scanReleaseOrderStep(s scanner) (domain.ReleaseOrderStep, error) {
 	); err != nil {
 		return domain.ReleaseOrderStep{}, err
 	}
+	item.StepScope = domain.StepScope(stepScope)
 	item.Status = domain.StepStatus(statusRaw)
 	if startedAt.Valid {
 		t := time.Unix(0, startedAt.Int64).UTC()
@@ -1269,6 +1701,7 @@ func scanReleaseOrderPipelineStage(s scanner) (domain.ReleaseOrderPipelineStage,
 	if err := s.Scan(
 		&item.ID,
 		&item.ReleaseOrderID,
+		&item.ExecutionID,
 		&item.PipelineScope,
 		&item.ExecutorType,
 		&item.StageKey,
@@ -1294,6 +1727,36 @@ func scanReleaseOrderPipelineStage(s scanner) (domain.ReleaseOrderPipelineStage,
 		t := time.Unix(0, finishedAt.Int64).UTC()
 		item.FinishedAt = &t
 	}
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplateBinding(s scanner) (domain.ReleaseTemplateBinding, error) {
+	var (
+		item          domain.ReleaseTemplateBinding
+		pipelineScope string
+		enabled       int
+		createdAt     int64
+		updatedAt     int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.TemplateID,
+		&pipelineScope,
+		&item.BindingID,
+		&item.BindingName,
+		&item.Provider,
+		&item.PipelineID,
+		&enabled,
+		&item.SortNo,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseTemplateBinding{}, err
+	}
+	item.PipelineScope = domain.PipelineScope(pipelineScope)
+	item.Enabled = enabled > 0
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
@@ -1358,14 +1821,18 @@ func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 
 func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 	var (
-		item      domain.ReleaseTemplateParam
-		required  int
-		createdAt int64
-		updatedAt int64
+		item          domain.ReleaseTemplateParam
+		pipelineScope string
+		required      int
+		createdAt     int64
+		updatedAt     int64
 	)
 	if err := s.Scan(
 		&item.ID,
 		&item.TemplateID,
+		&item.TemplateBindingID,
+		&pipelineScope,
+		&item.BindingID,
 		&item.PipelineParamDefID,
 		&item.ParamKey,
 		&item.ParamName,
@@ -1377,6 +1844,7 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 	); err != nil {
 		return domain.ReleaseTemplateParam{}, err
 	}
+	item.PipelineScope = domain.PipelineScope(pipelineScope)
 	item.Required = required > 0
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()

@@ -38,6 +38,7 @@ type ReleaseOrderLogEvent struct {
 
 type StreamReleaseOrderLogInput struct {
 	ReleaseOrderID string
+	PipelineScope  releasedomain.PipelineScope
 	StartOffset    int64
 	PollInterval   time.Duration
 }
@@ -95,17 +96,13 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 	if err != nil {
 		return err
 	}
-
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
+	execution, err := uc.resolveLogStreamExecution(ctx, order, input.PipelineScope)
 	if err != nil {
 		return err
 	}
-	if binding.Provider != pipelinedomain.ProviderJenkins {
-		return fmt.Errorf("%w: only jenkins binding supports log stream", ErrInvalidInput)
-	}
 
-	queueURL := ""
-	buildURL := ""
+	queueURL := strings.TrimSpace(execution.QueueURL)
+	buildURL := strings.TrimSpace(execution.BuildURL)
 	lastStatusMessage := ""
 
 	if err := emit(ReleaseOrderLogEvent{
@@ -126,17 +123,15 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 		if err != nil {
 			return err
 		}
-
-		steps, err := uc.releaseRepo.ListSteps(ctx, releaseOrderID)
+		execution, err = uc.resolveLogStreamExecution(ctx, order, input.PipelineScope)
 		if err != nil {
 			return err
 		}
-
 		if queueURL == "" {
-			queueURL = extractQueueURLFromSteps(steps)
+			queueURL = strings.TrimSpace(execution.QueueURL)
 		}
 		if buildURL == "" {
-			buildURL = extractBuildURLFromSteps(steps)
+			buildURL = strings.TrimSpace(execution.BuildURL)
 		}
 
 		if queueURL == "" && buildURL == "" {
@@ -199,6 +194,13 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 				}
 				continue
 			}
+			_, _ = uc.releaseRepo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, releasedomain.ExecutionUpdateInput{
+				Status:    execution.Status,
+				QueueURL:  queueURL,
+				BuildURL:  buildURL,
+				StartedAt: execution.StartedAt,
+				UpdatedAt: uc.now(),
+			})
 
 			if err := uc.emitStatusOnce(emit, &lastStatusMessage, "Jenkins 已分配构建任务，开始拉取日志", queueURL, buildURL, offset); err != nil {
 				return err
@@ -272,6 +274,42 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 			return nil
 		}
 	}
+}
+
+func (uc *ReleaseOrderLogStreamer) resolveLogStreamExecution(
+	ctx context.Context,
+	order releasedomain.ReleaseOrder,
+	scope releasedomain.PipelineScope,
+) (releasedomain.ReleaseOrderExecution, error) {
+	if scope.Valid() {
+		execution, err := uc.releaseRepo.GetExecutionByScope(ctx, order.ID, scope)
+		if err != nil {
+			return releasedomain.ReleaseOrderExecution{}, err
+		}
+		if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+			return releasedomain.ReleaseOrderExecution{}, fmt.Errorf("%w: only jenkins binding supports log stream", ErrInvalidInput)
+		}
+		return execution, nil
+	}
+
+	executions, err := uc.releaseRepo.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return releasedomain.ReleaseOrderExecution{}, err
+	}
+	for _, item := range orderExecutionsByScope(executions) {
+		if strings.ToLower(strings.TrimSpace(item.Provider)) != string(pipelinedomain.ProviderJenkins) {
+			continue
+		}
+		if item.Status == releasedomain.ExecutionStatusRunning {
+			return item, nil
+		}
+	}
+	for _, item := range orderExecutionsByScope(executions) {
+		if strings.ToLower(strings.TrimSpace(item.Provider)) == string(pipelinedomain.ProviderJenkins) {
+			return item, nil
+		}
+	}
+	return releasedomain.ReleaseOrderExecution{}, fmt.Errorf("%w: only jenkins binding supports log stream", ErrInvalidInput)
 }
 
 func (uc *ReleaseOrderLogStreamer) flushTailLogs(

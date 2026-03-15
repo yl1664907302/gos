@@ -1,6 +1,15 @@
 import axios from 'axios'
 
-export const apiBaseURL = import.meta.env.VITE_API_BASE_URL?.trim() || 'http://localhost:8081'
+function resolveDefaultAPIBaseURL() {
+  if (typeof window === 'undefined') {
+    return 'http://localhost:8081'
+  }
+  const protocol = window.location.protocol || 'http:'
+  const hostname = window.location.hostname || 'localhost'
+  return `${protocol}//${hostname}:8081`
+}
+
+export const apiBaseURL = import.meta.env.VITE_API_BASE_URL?.trim() || resolveDefaultAPIBaseURL()
 
 export const http = axios.create({
   baseURL: apiBaseURL,

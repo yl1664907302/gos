@@ -64,6 +64,7 @@ const formRef = ref<FormInstance>()
 
 const jenkinsPipelineOptions = ref<Array<{ label: string; value: string }>>([])
 const loadingJenkinsPipelines = ref(false)
+const jenkinsPipelineKeyword = ref('')
 
 const filters = reactive({
   binding_type: '' as BindingType | '',
@@ -243,27 +244,64 @@ async function loadTemplateAvailability() {
   }
 }
 
-async function ensureJenkinsPipelines(force = false) {
-  if (!force && jenkinsPipelineOptions.value.length > 0) {
+function formatJenkinsPipelineLabel(pipeline: Pipeline) {
+  const jobFullName = String(pipeline.job_full_name || '').trim()
+  const jobName = String(pipeline.job_name || '').trim() || jobFullName
+  if (!jobFullName || jobName === jobFullName) {
+    return jobName
+  }
+  return `${jobName} / ${jobFullName}`
+}
+
+async function ensureJenkinsPipelines(force = false, keyword = '') {
+  const normalizedKeyword = String(keyword || '').trim()
+  if (!force && !normalizedKeyword && jenkinsPipelineOptions.value.length > 0) {
     return
   }
   loadingJenkinsPipelines.value = true
   try {
-    const response = await listPipelines({
-      provider: 'jenkins',
-      status: 'active',
-      page: 1,
-      page_size: 100,
-    })
-    jenkinsPipelineOptions.value = response.data.map((pipeline: Pipeline) => ({
-      value: pipeline.id,
-      label: `${pipeline.job_name || pipeline.job_full_name} (${pipeline.job_full_name})`,
-    }))
+    const pageSize = 100
+    let page = 1
+    let total = 0
+    const allItems: Pipeline[] = []
+
+    do {
+      const response = await listPipelines({
+        provider: 'jenkins',
+        status: 'active',
+        name: normalizedKeyword || undefined,
+        page,
+        page_size: pageSize,
+      })
+      total = Number(response.total || 0)
+      allItems.push(...response.data)
+      page += 1
+    } while (allItems.length < total)
+
+    const optionMap = new Map<string, { label: string; value: string }>()
+    for (const pipeline of allItems) {
+      const value = String(pipeline.id || '').trim()
+      if (!value) {
+        continue
+      }
+      optionMap.set(value, {
+        value,
+        label: formatJenkinsPipelineLabel(pipeline),
+      })
+    }
+
+    jenkinsPipelineOptions.value = Array.from(optionMap.values())
+      .sort((a, b) => a.label.localeCompare(b.label, 'zh-CN'))
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, 'Jenkins管线加载失败'))
   } finally {
     loadingJenkinsPipelines.value = false
   }
+}
+
+function handleJenkinsPipelineSearch(value: string) {
+  jenkinsPipelineKeyword.value = String(value || '').trim()
+  void ensureJenkinsPipelines(true, jenkinsPipelineKeyword.value)
 }
 
 function normalizeFormByRule() {
@@ -288,7 +326,7 @@ watch(
   () => {
     normalizeFormByRule()
     if (isUsingJenkins.value) {
-      void ensureJenkinsPipelines()
+      void ensureJenkinsPipelines(false, jenkinsPipelineKeyword.value)
     }
   },
 )
@@ -298,7 +336,7 @@ watch(
   () => {
     normalizeFormByRule()
     if (isUsingJenkins.value) {
-      void ensureJenkinsPipelines()
+      void ensureJenkinsPipelines(false, jenkinsPipelineKeyword.value)
     }
   },
 )
@@ -312,6 +350,7 @@ function resetFormState() {
   formState.external_ref = ''
   formState.trigger_mode = 'manual'
   formState.status = 'active'
+  jenkinsPipelineKeyword.value = ''
 }
 
 function openCreateModal() {
@@ -329,7 +368,7 @@ function openCreateModal() {
     formState.provider = 'argocd'
   }
   formVisible.value = true
-  void ensureJenkinsPipelines()
+  void ensureJenkinsPipelines(true, jenkinsPipelineKeyword.value)
 }
 
 async function openEditModal(record: PipelineBinding) {
@@ -349,7 +388,7 @@ async function openEditModal(record: PipelineBinding) {
     normalizeFormByRule()
     formVisible.value = true
     if (isUsingJenkins.value) {
-      await ensureJenkinsPipelines()
+      await ensureJenkinsPipelines(true, jenkinsPipelineKeyword.value)
     }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '绑定详情加载失败'))
@@ -655,10 +694,11 @@ onMounted(async () => {
             :disabled="!isUsingJenkins"
             allow-clear
             show-search
-            option-filter-prop="label"
+            :filter-option="false"
             :loading="loadingJenkinsPipelines"
             :options="jenkinsPipelineOptions"
             placeholder="请选择 Jenkins 管线"
+            @search="handleJenkinsPipelineSearch"
           />
         </a-form-item>
 

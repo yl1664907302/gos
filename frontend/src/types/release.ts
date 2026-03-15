@@ -4,16 +4,19 @@ export type ReleaseStepStatus = 'pending' | 'running' | 'success' | 'failed'
 export type ReleasePipelineStageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
 export type ReleaseValueSource = 'application' | 'environment' | 'release_input' | 'fixed'
 export type ReleaseTemplateStatus = 'active' | 'inactive'
+export type ReleasePipelineScope = 'ci' | 'cd'
+export type ReleaseExecutionStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
 
 export interface ReleaseOrder {
   id: string
   order_no: string
   application_id: string
   application_name: string
+  template_id: string
+  template_name: string
   binding_id: string
   pipeline_id: string
   env_code: string
-  template_id?: string
   project_name: string
   son_service: string
   git_ref: string
@@ -32,6 +35,8 @@ export interface ReleaseOrder {
 export interface ReleaseOrderParam {
   id: string
   release_order_id: string
+  pipeline_scope: ReleasePipelineScope
+  binding_id: string
   param_key: string
   executor_param_name: string
   param_value: string
@@ -42,6 +47,8 @@ export interface ReleaseOrderParam {
 export interface ReleaseOrderStep {
   id: string
   release_order_id: string
+  step_scope: 'global' | ReleasePipelineScope
+  execution_id: string
   step_code: string
   step_name: string
   status: ReleaseStepStatus
@@ -50,6 +57,24 @@ export interface ReleaseOrderStep {
   started_at: string | null
   finished_at: string | null
   created_at: string
+}
+
+export interface ReleaseOrderExecution {
+  id: string
+  release_order_id: string
+  pipeline_scope: ReleasePipelineScope
+  binding_id: string
+  binding_name: string
+  provider: string
+  pipeline_id: string
+  status: ReleaseExecutionStatus
+  queue_url: string
+  build_url: string
+  external_run_id: string
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface ReleaseOrderPipelineStage {
@@ -93,6 +118,10 @@ export interface ReleaseOrderParamListResponse {
   data: ReleaseOrderParam[]
 }
 
+export interface ReleaseOrderExecutionListResponse {
+  data: ReleaseOrderExecution[]
+}
+
 export interface ReleaseOrderStepListResponse {
   data: ReleaseOrderStep[]
 }
@@ -128,6 +157,7 @@ export interface ReleaseOrderLogStreamEvent {
 }
 
 export interface CreateReleaseOrderParamPayload {
+  pipeline_scope: ReleasePipelineScope
   param_key: string
   executor_param_name: string
   param_value: string
@@ -142,8 +172,7 @@ export interface CreateReleaseOrderStepPayload {
 
 export interface CreateReleaseOrderPayload {
   application_id: string
-  binding_id: string
-  template_id?: string
+  template_id: string
   env_code?: string
   project_name?: string
   son_service?: string
@@ -171,9 +200,26 @@ export interface ReleaseTemplate {
   updated_at: string
 }
 
+export interface ReleaseTemplateBinding {
+  id: string
+  template_id: string
+  pipeline_scope: ReleasePipelineScope
+  binding_id: string
+  binding_name: string
+  provider: string
+  pipeline_id: string
+  enabled: boolean
+  sort_no: number
+  created_at: string
+  updated_at: string
+}
+
 export interface ReleaseTemplateParam {
   id: string
   template_id: string
+  template_binding_id: string
+  pipeline_scope: ReleasePipelineScope
+  binding_id: string
   pipeline_param_def_id: string
   param_key: string
   param_name: string
@@ -202,6 +248,7 @@ export interface ReleaseTemplateListResponse {
 export interface ReleaseTemplateDataResponse {
   data: {
     template: ReleaseTemplate
+    bindings: ReleaseTemplateBinding[]
     params: ReleaseTemplateParam[]
   }
 }
@@ -209,15 +256,20 @@ export interface ReleaseTemplateDataResponse {
 export interface ReleaseTemplatePayload {
   name: string
   application_id: string
-  binding_id: string
+  ci_binding_id?: string
+  cd_binding_id?: string
   status: ReleaseTemplateStatus
   remark?: string
-  param_def_ids: string[]
+  ci_param_def_ids: string[]
+  cd_param_def_ids: string[]
 }
 
 export interface UpdateReleaseTemplatePayload {
   name: string
+  ci_binding_id?: string
+  cd_binding_id?: string
   status: ReleaseTemplateStatus
   remark?: string
-  param_def_ids: string[]
+  ci_param_def_ids: string[]
+  cd_param_def_ids: string[]
 }

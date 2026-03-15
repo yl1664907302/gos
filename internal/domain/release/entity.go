@@ -2,6 +2,39 @@ package release
 
 import "time"
 
+type PipelineScope string
+
+const (
+	PipelineScopeCI PipelineScope = "ci"
+	PipelineScopeCD PipelineScope = "cd"
+)
+
+func (s PipelineScope) Valid() bool {
+	switch s {
+	case PipelineScopeCI, PipelineScopeCD:
+		return true
+	default:
+		return false
+	}
+}
+
+type StepScope string
+
+const (
+	StepScopeGlobal StepScope = "global"
+	StepScopeCI     StepScope = "ci"
+	StepScopeCD     StepScope = "cd"
+)
+
+func (s StepScope) Valid() bool {
+	switch s {
+	case StepScopeGlobal, StepScopeCI, StepScopeCD:
+		return true
+	default:
+		return false
+	}
+}
+
 type TriggerType string
 
 const (
@@ -41,6 +74,40 @@ func (s OrderStatus) Valid() bool {
 func (s OrderStatus) IsTerminal() bool {
 	switch s {
 	case OrderStatusSuccess, OrderStatusFailed, OrderStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+type ExecutionStatus string
+
+const (
+	ExecutionStatusPending   ExecutionStatus = "pending"
+	ExecutionStatusRunning   ExecutionStatus = "running"
+	ExecutionStatusSuccess   ExecutionStatus = "success"
+	ExecutionStatusFailed    ExecutionStatus = "failed"
+	ExecutionStatusCancelled ExecutionStatus = "cancelled"
+	ExecutionStatusSkipped   ExecutionStatus = "skipped"
+)
+
+func (s ExecutionStatus) Valid() bool {
+	switch s {
+	case ExecutionStatusPending,
+		ExecutionStatusRunning,
+		ExecutionStatusSuccess,
+		ExecutionStatusFailed,
+		ExecutionStatusCancelled,
+		ExecutionStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s ExecutionStatus) IsTerminal() bool {
+	switch s {
+	case ExecutionStatusSuccess, ExecutionStatusFailed, ExecutionStatusCancelled, ExecutionStatusSkipped:
 		return true
 	default:
 		return false
@@ -88,6 +155,8 @@ type ReleaseOrder struct {
 	OrderNo         string
 	ApplicationID   string
 	ApplicationName string
+	TemplateID      string
+	TemplateName    string
 	BindingID       string
 	PipelineID      string
 	EnvCode         string
@@ -108,6 +177,8 @@ type ReleaseOrder struct {
 type ReleaseOrderParam struct {
 	ID                string
 	ReleaseOrderID    string
+	PipelineScope     PipelineScope
+	BindingID         string
 	ParamKey          string
 	ExecutorParamName string
 	ParamValue        string
@@ -115,9 +186,29 @@ type ReleaseOrderParam struct {
 	CreatedAt         time.Time
 }
 
+type ReleaseOrderExecution struct {
+	ID             string
+	ReleaseOrderID string
+	PipelineScope  PipelineScope
+	BindingID      string
+	BindingName    string
+	Provider       string
+	PipelineID     string
+	Status         ExecutionStatus
+	QueueURL       string
+	BuildURL       string
+	ExternalRunID  string
+	StartedAt      *time.Time
+	FinishedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 type ReleaseOrderStep struct {
 	ID             string
 	ReleaseOrderID string
+	StepScope      StepScope
+	ExecutionID    string
 	StepCode       string
 	StepName       string
 	Status         StepStatus
@@ -156,6 +247,7 @@ func (s PipelineStageStatus) Valid() bool {
 type ReleaseOrderPipelineStage struct {
 	ID             string
 	ReleaseOrderID string
+	ExecutionID    string
 	PipelineScope  string
 	ExecutorType   string
 	StageKey       string
@@ -213,9 +305,26 @@ type ReleaseTemplate struct {
 	UpdatedAt       time.Time
 }
 
+type ReleaseTemplateBinding struct {
+	ID            string
+	TemplateID    string
+	PipelineScope PipelineScope
+	BindingID     string
+	BindingName   string
+	Provider      string
+	PipelineID    string
+	Enabled       bool
+	SortNo        int
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
 type ReleaseTemplateParam struct {
 	ID                 string
 	TemplateID         string
+	TemplateBindingID  string
+	PipelineScope      PipelineScope
+	BindingID          string
 	PipelineParamDefID string
 	ParamKey           string
 	ParamName          string

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
 )
 
@@ -104,13 +105,36 @@ func (uc *TrackReleaseExecution) listRunningOrders(ctx context.Context) ([]domai
 }
 
 func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.ReleaseOrder) (bool, bool, error) {
-	steps, err := uc.manager.ListSteps(ctx, order.ID)
+	executions, err := uc.manager.ListExecutions(ctx, order.ID)
 	if err != nil {
 		return false, false, err
 	}
+	if len(executions) == 0 {
+		return false, true, nil
+	}
 
-	queueURL := extractQueueURLFromSteps(steps)
-	buildURL := extractBuildURLFromSteps(steps)
+	runningExecution := findExecutionByStatus(executions, domain.ExecutionStatusRunning)
+	if runningExecution == nil {
+		pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
+		if pendingExecution != nil {
+			orderParams, paramErr := uc.manager.ListParams(ctx, order.ID)
+			if paramErr != nil {
+				return false, false, paramErr
+			}
+			if err := uc.manager.startNextPendingExecution(ctx, order, executions, orderParams); err != nil {
+				return false, false, err
+			}
+			return true, false, nil
+		}
+		return uc.finalizeOrder(ctx, order, executions)
+	}
+
+	if strings.ToLower(strings.TrimSpace(runningExecution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+		return uc.finalizeOrder(ctx, order, executions)
+	}
+
+	queueURL := strings.TrimSpace(runningExecution.QueueURL)
+	buildURL := strings.TrimSpace(runningExecution.BuildURL)
 	if queueURL == "" && buildURL == "" {
 		if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
 			return false, true, nil
@@ -118,14 +142,14 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		updated, finishErr := uc.finishStep(
 			ctx,
 			order.ID,
-			"pipeline_running",
+			scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
 			domain.StepStatusFailed,
 			"未记录 Jenkins 队列/构建地址，无法追踪执行结果",
 		)
 		return updated, false, finishErr
 	}
 
-	if buildURL == "" {
+	if buildURL == "" && queueURL != "" {
 		resolvedBuildURL, cancelled, why, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL)
 		if queueErr != nil {
 			if isResourceNotFoundError(queueErr) {
@@ -135,7 +159,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 				updated, finishErr := uc.finishStep(
 					ctx,
 					order.ID,
-					"pipeline_running",
+					scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
 					domain.StepStatusFailed,
 					"Jenkins 队列记录已过期，无法追踪结果",
 				)
@@ -143,23 +167,42 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			}
 			return false, false, queueErr
 		}
-
 		if cancelled {
-			updated, finishErr := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, "Jenkins 队列已取消: "+strings.TrimSpace(why))
+			now := uc.now()
+			_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+				Status:     domain.ExecutionStatusCancelled,
+				QueueURL:   queueURL,
+				StartedAt:  runningExecution.StartedAt,
+				FinishedAt: &now,
+				UpdatedAt:  now,
+			})
+			updated, finishErr := uc.finishStep(
+				ctx,
+				order.ID,
+				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+				domain.StepStatusFailed,
+				"Jenkins 队列已取消: "+strings.TrimSpace(why),
+			)
 			return updated, false, finishErr
 		}
-
 		buildURL = strings.TrimSpace(resolvedBuildURL)
 		if buildURL == "" {
 			return false, false, nil
 		}
-		if rememberErr := uc.rememberBuildURL(ctx, order.ID, steps, buildURL); rememberErr != nil {
-			return false, false, rememberErr
+		now := uc.now()
+		if _, err := uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:    domain.ExecutionStatusRunning,
+			QueueURL:  queueURL,
+			BuildURL:  buildURL,
+			StartedAt: runningExecution.StartedAt,
+			UpdatedAt: now,
+		}); err != nil {
+			return false, false, err
 		}
 	}
 
-	if binding, bindingErr := uc.manager.pipelineRepo.GetBindingByID(ctx, order.BindingID); bindingErr == nil {
-		_, _ = uc.manager.refreshPipelineStages(ctx, order, binding)
+	if binding, bindingErr := uc.manager.pipelineRepo.GetBindingByID(ctx, runningExecution.BindingID); bindingErr == nil {
+		_, _ = uc.manager.refreshPipelineStages(ctx, order, *runningExecution, binding)
 	}
 
 	building, result, statusErr := uc.jenkins.GetBuildStatus(ctx, buildURL)
@@ -171,7 +214,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			updated, finishErr := uc.finishStep(
 				ctx,
 				order.ID,
-				"pipeline_running",
+				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
 				domain.StepStatusFailed,
 				"Jenkins 构建记录不存在，无法追踪结果",
 			)
@@ -190,58 +233,173 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 
 	switch result {
 	case "SUCCESS":
-		updated1, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusSuccess, messageWithBuildURL("Jenkins 构建成功", buildURL))
+		now := uc.now()
+		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     domain.ExecutionStatusSuccess,
+			QueueURL:   queueURL,
+			BuildURL:   buildURL,
+			StartedAt:  runningExecution.StartedAt,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		})
+		updated1, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, messageWithBuildURL("Jenkins 构建成功", buildURL))
 		if err != nil {
 			return false, false, err
 		}
-		updated2, err := uc.finishStep(ctx, order.ID, "pipeline_success", domain.StepStatusSuccess, "Jenkins 结果: "+result)
+		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, "Jenkins 结果: "+result)
 		if err != nil {
 			return false, false, err
 		}
-		return updated1 || updated2, false, nil
+		updated3, err := uc.syncNextStepAfterExecution(ctx, order)
+		if err != nil {
+			return false, false, err
+		}
+		return updated1 || updated2 || updated3, false, nil
 	case "FAILURE", "ABORTED", "UNSTABLE", "NOT_BUILT":
-		updated, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, messageWithBuildURL("Jenkins 结果: "+result, buildURL))
-		return updated, false, err
+		now := uc.now()
+		nextStatus := domain.ExecutionStatusFailed
+		if result == "ABORTED" {
+			nextStatus = domain.ExecutionStatusCancelled
+		}
+		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     nextStatus,
+			QueueURL:   queueURL,
+			BuildURL:   buildURL,
+			StartedAt:  runningExecution.StartedAt,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		})
+		updated, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusFailed, messageWithBuildURL("Jenkins 结果: "+result, buildURL))
+		if err != nil {
+			return false, false, err
+		}
+		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusFailed, "Jenkins 结果: "+result)
+		if err != nil {
+			return false, false, err
+		}
+		updated3, err := uc.failRemainingExecutions(ctx, order, executions, runningExecution.PipelineScope, "前置阶段失败，未继续执行")
+		if err != nil {
+			return false, false, err
+		}
+		return updated || updated2 || updated3, false, nil
 	default:
 		return false, false, nil
 	}
 }
 
-func (uc *TrackReleaseExecution) rememberBuildURL(
-	ctx context.Context,
-	orderID string,
-	steps []domain.ReleaseOrderStep,
-	buildURL string,
-) error {
-	buildURL = strings.TrimSpace(buildURL)
-	if buildURL == "" {
-		return nil
-	}
-	runningStep := findStepByCode(steps, "pipeline_running")
-	if runningStep == nil {
-		return nil
-	}
-	if strings.TrimSpace(extractBuildURL(runningStep.Message)) != "" {
-		return nil
-	}
-
-	message := strings.TrimSpace(runningStep.Message)
-	message = strings.TrimRight(message, "，,;； ")
-	if message == "" {
-		message = "管线运行中"
-	}
-	message += "，build: " + buildURL
-
-	_, err := uc.manager.repo.UpdateStep(ctx, orderID, "pipeline_running", domain.StepUpdateInput{
-		Status:     runningStep.Status,
-		Message:    message,
-		StartedAt:  runningStep.StartedAt,
-		FinishedAt: runningStep.FinishedAt,
-	})
-	if err != nil && !errors.Is(err, domain.ErrStepNotFound) {
-		return err
+func findExecutionByStatus(items []domain.ReleaseOrderExecution, status domain.ExecutionStatus) *domain.ReleaseOrderExecution {
+	for idx := range items {
+		if items[idx].Status == status {
+			return &items[idx]
+		}
 	}
 	return nil
+}
+
+func (uc *TrackReleaseExecution) syncNextStepAfterExecution(ctx context.Context, order domain.ReleaseOrder) (bool, error) {
+	executions, err := uc.manager.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return false, err
+	}
+	if findExecutionByStatus(executions, domain.ExecutionStatusPending) != nil {
+		orderParams, err := uc.manager.ListParams(ctx, order.ID)
+		if err != nil {
+			return false, err
+		}
+		if err := uc.manager.startNextPendingExecution(ctx, order, executions, orderParams); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	updated, _, err := uc.finalizeOrder(ctx, order, executions)
+	return updated, err
+}
+
+func (uc *TrackReleaseExecution) finalizeOrder(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+) (bool, bool, error) {
+	now := uc.now()
+	if len(executions) == 0 {
+		return false, true, nil
+	}
+
+	orderStatus := domain.OrderStatusSuccess
+	message := "发布完成"
+	for _, item := range executions {
+		switch item.Status {
+		case domain.ExecutionStatusFailed:
+			orderStatus = domain.OrderStatusFailed
+			message = "存在失败执行单元"
+		case domain.ExecutionStatusCancelled:
+			if orderStatus != domain.OrderStatusFailed {
+				orderStatus = domain.OrderStatusCancelled
+				message = "存在已取消执行单元"
+			}
+		case domain.ExecutionStatusPending, domain.ExecutionStatusRunning:
+			return false, false, nil
+		}
+	}
+
+	stepStatus := domain.StepStatusSuccess
+	if orderStatus != domain.OrderStatusSuccess {
+		stepStatus = domain.StepStatusFailed
+	}
+	updated, err := uc.finishStep(ctx, order.ID, "global:release_finish", stepStatus, message)
+	if err != nil {
+		return false, false, err
+	}
+	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, orderStatus, order.StartedAt, &now, now); err != nil {
+		return false, false, err
+	}
+	return updated, false, nil
+}
+
+func (uc *TrackReleaseExecution) failRemainingExecutions(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	failedScope domain.PipelineScope,
+	message string,
+) (bool, error) {
+	now := uc.now()
+	updated := false
+	for _, item := range executions {
+		if item.PipelineScope == failedScope || item.Status != domain.ExecutionStatusPending {
+			continue
+		}
+		if _, err := uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, item.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     domain.ExecutionStatusSkipped,
+			StartedAt:  &now,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		}); err != nil {
+			return false, err
+		}
+		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "trigger_pipeline"), domain.StepStatusFailed, message); err != nil {
+			return false, err
+		} else if ok {
+			updated = true
+		}
+		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "pipeline_running"), domain.StepStatusFailed, message); err != nil {
+			return false, err
+		} else if ok {
+			updated = true
+		}
+		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "pipeline_success"), domain.StepStatusFailed, message); err != nil {
+			return false, err
+		} else if ok {
+			updated = true
+		}
+	}
+	if _, err := uc.finishStep(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message); err != nil {
+		return false, err
+	}
+	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
+		return false, err
+	}
+	return updated || true, nil
 }
 
 func (uc *TrackReleaseExecution) finishStep(

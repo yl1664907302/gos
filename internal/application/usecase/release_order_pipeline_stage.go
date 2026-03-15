@@ -32,33 +32,40 @@ func (uc *ReleaseOrderManager) ListPipelineStagesView(
 		return ReleaseOrderPipelineStageView{}, err
 	}
 
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
+	executions, err := uc.repo.ListExecutions(ctx, order.ID)
 	if err != nil {
 		return ReleaseOrderPipelineStageView{}, err
 	}
 
-	view := ReleaseOrderPipelineStageView{
-		ShowModule:   binding.Provider == pipelinedomain.ProviderJenkins,
-		ExecutorType: strings.TrimSpace(string(binding.Provider)),
+	view := ReleaseOrderPipelineStageView{}
+	syncMessages := make([]string, 0)
+	for _, execution := range executions {
+		if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+			continue
+		}
+		view.ShowModule = true
+		view.ExecutorType = strings.TrimSpace(execution.Provider)
+		binding, bindingErr := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
+		if bindingErr != nil {
+			continue
+		}
+		syncMessage, _ := uc.refreshPipelineStages(ctx, order, execution, binding)
+		if strings.TrimSpace(syncMessage) != "" {
+			syncMessages = append(syncMessages, syncMessage)
+		}
 	}
 	if !view.ShowModule {
 		return view, nil
 	}
 
-	syncMessage, syncErr := uc.refreshPipelineStages(ctx, order, binding)
 	stages, err := uc.repo.ListPipelineStages(ctx, order.ID)
 	if err != nil {
 		return ReleaseOrderPipelineStageView{}, err
 	}
 	view.Stages = stages
 
-	if syncErr != nil {
-		view.Message = syncMessage
-		return view, nil
-	}
-
-	if strings.TrimSpace(syncMessage) != "" {
-		view.Message = syncMessage
+	if len(syncMessages) > 0 {
+		view.Message = strings.Join(syncMessages, "；")
 		return view, nil
 	}
 
@@ -82,28 +89,22 @@ func (uc *ReleaseOrderManager) GetPipelineStageLog(
 		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, fmt.Errorf("%w: jenkins executor is not configured", ErrInvalidInput)
 	}
 
-	order, err := uc.repo.GetByID(ctx, orderID)
-	if err != nil {
-		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
-	}
-	binding, err := uc.pipelineRepo.GetBindingByID(ctx, order.BindingID)
-	if err != nil {
-		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
-	}
-	if binding.Provider != pipelinedomain.ProviderJenkins {
-		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, fmt.Errorf("%w: only jenkins binding supports pipeline stages", ErrInvalidInput)
-	}
-
 	stage, err := uc.repo.GetPipelineStageByID(ctx, orderID, stageID)
 	if err != nil {
 		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
 	}
-
-	steps, err := uc.repo.ListSteps(ctx, orderID)
+	order, err := uc.repo.GetByID(ctx, orderID)
 	if err != nil {
 		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
 	}
-	buildURL, message, err := uc.resolveBuildURLForPipelineStages(ctx, order, steps)
+	execution, err := uc.repo.GetExecutionByScope(ctx, order.ID, domain.PipelineScope(strings.ToLower(strings.TrimSpace(stage.PipelineScope))))
+	if err != nil {
+		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
+	}
+	if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, fmt.Errorf("%w: only jenkins binding supports pipeline stages", ErrInvalidInput)
+	}
+	buildURL, message, err := uc.resolveBuildURLForPipelineStages(ctx, order, execution)
 	if err != nil {
 		return domain.ReleaseOrderPipelineStage{}, domain.ReleaseOrderPipelineStageLog{}, err
 	}
@@ -135,6 +136,7 @@ func (uc *ReleaseOrderManager) GetPipelineStageLog(
 func (uc *ReleaseOrderManager) refreshPipelineStages(
 	ctx context.Context,
 	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
 	binding pipelinedomain.PipelineBinding,
 ) (string, error) {
 	if binding.Provider != pipelinedomain.ProviderJenkins {
@@ -144,12 +146,7 @@ func (uc *ReleaseOrderManager) refreshPipelineStages(
 		return "Jenkins 阶段同步未配置", fmt.Errorf("jenkins executor is not configured")
 	}
 
-	steps, err := uc.repo.ListSteps(ctx, order.ID)
-	if err != nil {
-		return "", err
-	}
-
-	buildURL, message, err := uc.resolveBuildURLForPipelineStages(ctx, order, steps)
+	buildURL, message, err := uc.resolveBuildURLForPipelineStages(ctx, order, execution)
 	if err != nil {
 		return "Jenkins 阶段同步失败：" + trimPipelineStageError(err), err
 	}
@@ -180,10 +177,11 @@ func (uc *ReleaseOrderManager) refreshPipelineStages(
 			status = domain.PipelineStageStatusPending
 		}
 		persisted = append(persisted, domain.ReleaseOrderPipelineStage{
-			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(binding.BindingType), stageKey),
+			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), stageKey),
 			ReleaseOrderID: order.ID,
-			PipelineScope:  strings.TrimSpace(string(binding.BindingType)),
-			ExecutorType:   strings.TrimSpace(string(binding.Provider)),
+			ExecutionID:    execution.ID,
+			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
+			ExecutorType:   strings.TrimSpace(execution.Provider),
 			StageKey:       stageKey,
 			StageName:      firstNonEmpty(strings.TrimSpace(item.StageName), stageKey),
 			Status:         status,
@@ -196,8 +194,20 @@ func (uc *ReleaseOrderManager) refreshPipelineStages(
 			UpdatedAt:      now,
 		})
 	}
+	existing, err := uc.repo.ListPipelineStages(ctx, order.ID)
+	if err != nil {
+		return "", err
+	}
+	merged := make([]domain.ReleaseOrderPipelineStage, 0, len(existing)+len(persisted))
+	for _, item := range existing {
+		if strings.EqualFold(strings.TrimSpace(item.PipelineScope), string(execution.PipelineScope)) {
+			continue
+		}
+		merged = append(merged, item)
+	}
+	merged = append(merged, persisted...)
 
-	if err := uc.repo.ReplacePipelineStages(ctx, order.ID, persisted); err != nil {
+	if err := uc.repo.ReplacePipelineStages(ctx, order.ID, merged); err != nil {
 		return "", err
 	}
 	if len(persisted) == 0 {
@@ -209,14 +219,14 @@ func (uc *ReleaseOrderManager) refreshPipelineStages(
 func (uc *ReleaseOrderManager) resolveBuildURLForPipelineStages(
 	ctx context.Context,
 	order domain.ReleaseOrder,
-	steps []domain.ReleaseOrderStep,
+	execution domain.ReleaseOrderExecution,
 ) (buildURL string, message string, err error) {
-	buildURL = strings.TrimSpace(extractBuildURLFromSteps(steps))
+	buildURL = strings.TrimSpace(execution.BuildURL)
 	if buildURL != "" {
 		return buildURL, "", nil
 	}
 
-	queueURL := strings.TrimSpace(extractQueueURLFromSteps(steps))
+	queueURL := strings.TrimSpace(execution.QueueURL)
 	if queueURL == "" {
 		return "", defaultPipelineStageMessage(order.Status), nil
 	}
@@ -244,43 +254,14 @@ func (uc *ReleaseOrderManager) resolveBuildURLForPipelineStages(
 		return "", "Jenkins 排队中，等待分配构建任务", nil
 	}
 
-	_ = uc.rememberBuildURLForPipelineStages(ctx, order.ID, steps, buildURL)
-	return buildURL, "", nil
-}
-
-func (uc *ReleaseOrderManager) rememberBuildURLForPipelineStages(
-	ctx context.Context,
-	orderID string,
-	steps []domain.ReleaseOrderStep,
-	buildURL string,
-) error {
-	buildURL = strings.TrimSpace(buildURL)
-	if buildURL == "" {
-		return nil
-	}
-
-	runningStep := findStepByCode(steps, "pipeline_running")
-	if runningStep == nil {
-		return nil
-	}
-	if strings.TrimSpace(extractBuildURL(runningStep.Message)) != "" {
-		return nil
-	}
-
-	message := strings.TrimSpace(runningStep.Message)
-	message = strings.TrimRight(message, "，,;； ")
-	if message == "" {
-		message = "管线运行中"
-	}
-	message += "，build: " + buildURL
-
-	_, err := uc.repo.UpdateStep(ctx, orderID, "pipeline_running", domain.StepUpdateInput{
-		Status:     runningStep.Status,
-		Message:    message,
-		StartedAt:  runningStep.StartedAt,
-		FinishedAt: runningStep.FinishedAt,
+	_, _ = uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+		Status:    execution.Status,
+		QueueURL:  queueURL,
+		BuildURL:  buildURL,
+		StartedAt: execution.StartedAt,
+		UpdatedAt: uc.now(),
 	})
-	return err
+	return buildURL, "", nil
 }
 
 func stablePipelineStageID(orderID string, executorType string, pipelineScope string, stageKey string) string {

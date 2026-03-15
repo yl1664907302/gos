@@ -2,6 +2,7 @@ import { apiBaseURL, http } from './http'
 import type {
   CreateReleaseOrderPayload,
   ReleaseOrderDataResponse,
+  ReleaseOrderExecutionListResponse,
   ReleaseOrderListParams,
   ReleaseOrderPipelineStageListResponse,
   ReleaseOrderPipelineStageLogResponse,
@@ -46,13 +47,23 @@ export async function listReleaseOrderParams(id: string): Promise<ReleaseOrderPa
   return response.data
 }
 
+export async function listReleaseOrderExecutions(id: string): Promise<ReleaseOrderExecutionListResponse> {
+  const response = await http.get<ReleaseOrderExecutionListResponse>(`/release-orders/${id}/executions`)
+  return response.data
+}
+
 export async function listReleaseOrderSteps(id: string): Promise<ReleaseOrderStepListResponse> {
   const response = await http.get<ReleaseOrderStepListResponse>(`/release-orders/${id}/steps`)
   return response.data
 }
 
-export async function listReleaseOrderPipelineStages(id: string): Promise<ReleaseOrderPipelineStageListResponse> {
-  const response = await http.get<ReleaseOrderPipelineStageListResponse>(`/release-orders/${id}/pipeline-stages`)
+export async function listReleaseOrderPipelineStages(
+  id: string,
+  scope?: string,
+): Promise<ReleaseOrderPipelineStageListResponse> {
+  const response = await http.get<ReleaseOrderPipelineStageListResponse>(`/release-orders/${id}/pipeline-stages`, {
+    params: scope ? { scope } : undefined,
+  })
   return response.data
 }
 
@@ -118,13 +129,19 @@ export async function deleteReleaseTemplate(id: string): Promise<void> {
   await http.delete(`/release-templates/${id}`)
 }
 
-export function buildReleaseOrderLogStreamURL(id: string, start = 0, accessToken = ''): string {
+export function buildReleaseOrderLogStreamURL(id: string, start = 0, accessToken = '', scope = ''): string {
   const base = apiBaseURL.replace(/\/+$/, '')
   const orderID = encodeURIComponent(String(id || '').trim())
   const offset = Number.isFinite(start) && start > 0 ? Math.floor(start) : 0
   const token = String(accessToken || '').trim()
-  if (!token) {
-    return `${base}/release-orders/${orderID}/logs/stream?start=${offset}`
+  const scopeParam = String(scope || '').trim()
+  const params = [`start=${offset}`]
+  if (scopeParam) {
+    params.push(`scope=${encodeURIComponent(scopeParam)}`)
   }
-  return `${base}/release-orders/${orderID}/logs/stream?start=${offset}&access_token=${encodeURIComponent(token)}`
+  if (!token) {
+    return `${base}/release-orders/${orderID}/logs/stream?${params.join('&')}`
+  }
+  params.push(`access_token=${encodeURIComponent(token)}`)
+  return `${base}/release-orders/${orderID}/logs/stream?${params.join('&')}`
 }

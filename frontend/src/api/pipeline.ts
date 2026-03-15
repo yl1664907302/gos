@@ -14,6 +14,7 @@ import type {
   PipelineRawScriptDataResponse,
   PipelineListParams,
   PipelineListResponse,
+  PipelineSyncResponse,
   UpdateJenkinsRawPipelinePayload,
   UpdatePipelineParamDefPayload,
   UpdatePipelineBindingPayload,
@@ -63,6 +64,16 @@ export async function previewJenkinsRawPipelineConfigXML(
   payload: CreateJenkinsRawPipelinePayload,
 ): Promise<PipelineConfigXMLDataResponse> {
   const response = await http.post<PipelineConfigXMLDataResponse>('/jenkins/pipelines/raw/preview-config-xml', payload)
+  return response.data
+}
+
+export async function syncJenkinsPipelines(): Promise<PipelineSyncResponse> {
+  const response = await http.post<PipelineSyncResponse>('/jenkins/pipelines/sync')
+  return response.data
+}
+
+export async function syncJenkinsPipelineParamDefs(): Promise<PipelineSyncResponse> {
+  const response = await http.post<PipelineSyncResponse>('/jenkins/pipeline-param-defs/sync')
   return response.data
 }
 

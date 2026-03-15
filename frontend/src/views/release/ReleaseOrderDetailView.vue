@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { ArrowLeftOutlined, ExclamationCircleOutlined, EyeOutlined, LoadingOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import {
+  ArrowLeftOutlined,
+  ExclamationCircleOutlined,
+  EyeOutlined,
+  LoadingOutlined,
+  ReloadOutlined,
+} from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   buildReleaseOrderLogStreamURL,
@@ -11,6 +17,7 @@ import {
   executeReleaseOrder,
   getReleaseOrderByID,
   getReleaseOrderPipelineStageLog,
+  listReleaseOrderExecutions,
   listReleaseOrderParams,
   listReleaseOrderPipelineStages,
   listReleaseOrderSteps,
@@ -19,12 +26,14 @@ import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useAuthStore } from '../../stores/auth'
 import type {
   ReleaseOrder,
+  ReleaseOrderExecution,
   ReleaseOrderLogStreamEvent,
   ReleaseOrderParam,
   ReleaseOrderPipelineStage,
-  ReleasePipelineStageStatus,
   ReleaseOrderStatus,
   ReleaseOrderStep,
+  ReleasePipelineScope,
+  ReleasePipelineStageStatus,
   ReleaseTriggerType,
 } from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -35,49 +44,72 @@ const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 5000
 const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 15000
 
+type ScopeLogState = {
+  text: string
+  offset: number
+  connected: boolean
+  connecting: boolean
+  ended: boolean
+  error: string
+  statusText: string
+  panelRef: HTMLElement | null
+  stream: EventSource | null
+  reconnectTimer: number | null
+  closeIntentional: boolean
+  autoFollow: boolean
+}
+
+function createScopeLogState(): ScopeLogState {
+  return {
+    text: '',
+    offset: 0,
+    connected: false,
+    connecting: false,
+    ended: false,
+    error: '',
+    statusText: '未连接',
+    panelRef: null,
+    stream: null,
+    reconnectTimer: null,
+    closeIntentional: false,
+    autoFollow: true,
+  }
+}
+
 const loading = ref(false)
 const querying = ref(false)
 const cancelling = ref(false)
 const executing = ref(false)
 const autoRefreshTimer = ref<number | null>(null)
+const executeLocked = ref(false)
 
 const order = ref<ReleaseOrder | null>(null)
 const params = ref<ReleaseOrderParam[]>([])
 const steps = ref<ReleaseOrderStep[]>([])
+const executions = ref<ReleaseOrderExecution[]>([])
 const pipelineStages = ref<ReleaseOrderPipelineStage[]>([])
 const pipelineStageModuleVisible = ref(false)
 const pipelineStageExecutorType = ref('')
 const pipelineStageMessage = ref('')
 const pipelineStageLoading = ref(false)
+const lastPipelineStageRefreshAt = ref(0)
+
 const stageLogDrawerVisible = ref(false)
 const stageLogLoading = ref(false)
 const stageLogContent = ref('')
 const stageLogHasMore = ref(false)
 const stageLogFetchedAt = ref('')
 const selectedPipelineStage = ref<ReleaseOrderPipelineStage | null>(null)
-const lastPipelineStageRefreshAt = ref(0)
 
-const logText = ref('')
-const logOffset = ref(0)
-const logStreamConnected = ref(false)
-const logStreamConnecting = ref(false)
-const logStreamEnded = ref(false)
-const logStreamError = ref('')
-const logStreamStatusText = ref('未连接')
-const logPanelRef = ref<HTMLElement | null>(null)
-const logStreamRef = ref<EventSource | null>(null)
-const reconnectTimer = ref<number | null>(null)
-const closeLogStreamIntentional = ref(false)
-const logAutoFollow = ref(true)
+const scopeLogStates = reactive<Record<ReleasePipelineScope, ScopeLogState>>({
+  ci: createScopeLogState(),
+  cd: createScopeLogState(),
+})
 
 const orderID = computed(() => String(route.params.id || '').trim())
-const executeLocked = ref(false)
-const canCancel = computed(() => {
-  return order.value?.status === 'pending' || order.value?.status === 'running'
-})
-const canExecute = computed(() => {
-  return order.value?.status === 'pending' && !executeLocked.value
-})
+const canViewParamSnapshot = computed(() => authStore.hasPermission('release.param_snapshot.view'))
+const canCancel = computed(() => order.value?.status === 'pending' || order.value?.status === 'running')
+const canExecute = computed(() => order.value?.status === 'pending' && !executeLocked.value)
 const shouldAutoRefresh = computed(() => {
   if (!order.value) {
     return true
@@ -90,23 +122,14 @@ const shouldKeepLogStreaming = computed(() => {
   }
   return order.value.status === 'pending' || order.value.status === 'running'
 })
-const logStreamTagColor = computed(() => {
-  if (logStreamEnded.value) {
-    return 'default'
-  }
-  if (logStreamError.value) {
-    return 'warning'
-  }
-  return 'processing'
-})
-const logStreamHintText = computed(() => {
-  if (logStreamError.value) {
-    return '日志异常'
-  }
-  if (logStreamEnded.value) {
-    return '已结束'
-  }
-  return ''
+
+const executionMapByScope = computed<Record<ReleasePipelineScope, ReleaseOrderExecution | null>>(() => ({
+  ci: executions.value.find((item) => item.pipeline_scope === 'ci') || null,
+  cd: executions.value.find((item) => item.pipeline_scope === 'cd') || null,
+}))
+
+const visibleScopes = computed(() => {
+  return (['ci', 'cd'] as ReleasePipelineScope[]).filter((scope) => Boolean(executionMapByScope.value[scope]))
 })
 
 const detailItems = computed(() => {
@@ -116,11 +139,8 @@ const detailItems = computed(() => {
   return [
     { label: '发布单号', value: order.value.order_no },
     { label: '应用名称', value: order.value.application_name || '-' },
-    { label: '应用 ID', value: order.value.application_id || '-' },
-    { label: '绑定 ID', value: order.value.binding_id || '-' },
-    { label: '管线 ID', value: order.value.pipeline_id || '-' },
-    { label: '环境', value: order.value.env_code || '-' },
-    { label: '项目名称', value: order.value.project_name || order.value.son_service || '-' },
+    { label: '模板名称', value: order.value.template_name || '-' },
+    { label: '模板 ID', value: order.value.template_id || '-' },
     { label: '触发方式', value: triggerTypeText(order.value.trigger_type) },
     { label: '创建者', value: order.value.triggered_by || '-' },
     { label: 'Git 版本', value: order.value.git_ref || '-' },
@@ -133,9 +153,87 @@ const detailItems = computed(() => {
   ]
 })
 
-const sortedSteps = computed(() => {
-  return [...steps.value].sort((a, b) => a.sort_no - b.sort_no)
+const executionSections = computed(() =>
+  visibleScopes.value.map((scope) => ({
+    scope,
+    title: `${scopeLabel(scope)} 执行单元`,
+    execution: executionMapByScope.value[scope] as ReleaseOrderExecution,
+  })),
+)
+
+const paramGroups = computed(() => {
+  const map: Record<ReleasePipelineScope, ReleaseOrderParam[]> = { ci: [], cd: [] }
+  params.value.forEach((item) => {
+    const scope = normalizeScope(item.pipeline_scope)
+    if (!scope) {
+      return
+    }
+    map[scope].push(item)
+  })
+  return visibleScopes.value
+    .map((scope) => ({
+      scope,
+      title: `${scopeLabel(scope)} 参数快照`,
+      items: map[scope],
+    }))
 })
+
+const stepGroups = computed(() => {
+  const groups: Array<{ key: string; title: string; items: ReleaseOrderStep[] }> = []
+  const globalSteps = steps.value.filter((item) => String(item.step_scope || '').trim().toLowerCase() === 'global').sort(sortSteps)
+  if (globalSteps.length > 0) {
+    groups.push({ key: 'global', title: '全局步骤', items: globalSteps })
+  }
+  visibleScopes.value.forEach((scope) => {
+    const items = steps.value
+      .filter((item) => String(item.step_scope || '').trim().toLowerCase() === scope)
+      .sort(sortSteps)
+    if (items.length > 0) {
+      groups.push({ key: scope, title: `${scopeLabel(scope)} 步骤`, items })
+    }
+  })
+  return groups
+})
+
+const stageGroupsByScope = computed<Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]>>(() => {
+  const map: Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]> = { ci: [], cd: [] }
+  pipelineStages.value.forEach((item) => {
+    const scope = normalizeScope(item.pipeline_scope)
+    if (!scope) {
+      return
+    }
+    map[scope].push(item)
+  })
+  map.ci.sort((a, b) => a.sort_no - b.sort_no)
+  map.cd.sort((a, b) => a.sort_no - b.sort_no)
+  return map
+})
+
+const stageSections = computed(() =>
+  visibleScopes.value.map((scope) => {
+    const execution = executionMapByScope.value[scope]
+    return {
+      scope,
+      title: `${scopeLabel(scope)} 管线进度`,
+      execution,
+      stages: stageGroupsByScope.value[scope],
+      isJenkins: execution?.provider === 'jenkins',
+    }
+  }),
+)
+
+const logSections = computed(() =>
+  visibleScopes.value.map((scope) => {
+    const execution = executionMapByScope.value[scope]
+    return {
+      scope,
+      title: `${scopeLabel(scope)} 日志`,
+      execution,
+      isJenkins: execution?.provider === 'jenkins',
+      state: scopeLogStates[scope],
+    }
+  }),
+)
 
 const paramInitialColumns: TableColumnsType<ReleaseOrderParam> = [
   { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
@@ -147,21 +245,6 @@ const paramInitialColumns: TableColumnsType<ReleaseOrderParam> = [
 const { columns: paramColumns } = useResizableColumns(paramInitialColumns, {
   minWidth: 100,
   maxWidth: 620,
-  hitArea: 10,
-})
-
-const stepInitialColumns: TableColumnsType<ReleaseOrderStep> = [
-  { title: '顺序', dataIndex: 'sort_no', key: 'sort_no', width: 90 },
-  { title: '步骤编码', dataIndex: 'step_code', key: 'step_code', width: 180 },
-  { title: '步骤名称', dataIndex: 'step_name', key: 'step_name', width: 220 },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
-  { title: '执行信息', dataIndex: 'message', key: 'message', width: 360, ellipsis: true },
-  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 190 },
-  { title: '结束时间', dataIndex: 'finished_at', key: 'finished_at', width: 190 },
-]
-const { columns: stepColumns } = useResizableColumns(stepInitialColumns, {
-  minWidth: 100,
-  maxWidth: 640,
   hitArea: 10,
 })
 
@@ -180,21 +263,17 @@ const { columns: pipelineStageColumns } = useResizableColumns(pipelineStageIniti
   hitArea: 10,
 })
 
-const pipelineStageGroups = computed(() => {
-  const groupMap = new Map<string, ReleaseOrderPipelineStage[]>()
-  for (const item of pipelineStages.value) {
-    const key = String(item.pipeline_scope || '').trim() || 'default'
-    if (!groupMap.has(key)) {
-      groupMap.set(key, [])
-    }
-    groupMap.get(key)?.push(item)
+function normalizeScope(scope: string): ReleasePipelineScope | null {
+  const value = String(scope || '').trim().toLowerCase()
+  if (value === 'ci' || value === 'cd') {
+    return value as ReleasePipelineScope
   }
-  return Array.from(groupMap.entries()).map(([key, items]) => ({
-    key,
-    label: pipelineScopeText(key),
-    items: [...items].sort((a, b) => a.sort_no - b.sort_no),
-  }))
-})
+  return null
+}
+
+function scopeLabel(scope: ReleasePipelineScope) {
+  return scope === 'ci' ? 'CI' : 'CD'
+}
 
 function formatTime(value: string | null) {
   if (!value) {
@@ -203,7 +282,14 @@ function formatTime(value: string | null) {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
 
-function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
+function formatTimeCompact(value: string | null) {
+  if (!value) {
+    return ''
+  }
+  return dayjs(value).format('MM-DD HH:mm:ss')
+}
+
+function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
   switch (status) {
     case 'success':
       return 'green'
@@ -220,7 +306,7 @@ function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | R
   }
 }
 
-function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
+function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
   switch (status) {
     case 'pending':
       return '待执行'
@@ -252,19 +338,8 @@ function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined
   }
 }
 
-function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
+function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
   return status === 'running'
-}
-
-function pipelineScopeText(scope: string) {
-  switch (String(scope || '').trim().toLowerCase()) {
-    case 'ci':
-      return 'CI 管线'
-    case 'cd':
-      return 'CD 管线'
-    default:
-      return '管线阶段'
-  }
 }
 
 function formatDuration(durationMillis: number) {
@@ -284,6 +359,40 @@ function formatDuration(durationMillis: number) {
   return `${minutes}m ${seconds}s`
 }
 
+function sortSteps(a: ReleaseOrderStep, b: ReleaseOrderStep) {
+  if (a.sort_no !== b.sort_no) {
+    return a.sort_no - b.sort_no
+  }
+  return a.step_code.localeCompare(b.step_code)
+}
+
+function stepComponentStatus(status: ReleaseOrderStep['status']) {
+  switch (status) {
+    case 'success':
+      return 'finish'
+    case 'running':
+      return 'process'
+    case 'failed':
+      return 'error'
+    default:
+      return 'wait'
+  }
+}
+
+function describeStep(step: ReleaseOrderStep) {
+  const parts: string[] = []
+  if (String(step.message || '').trim()) {
+    parts.push(step.message)
+  } else if (step.status === 'pending') {
+    parts.push('等待执行')
+  }
+  const timeParts = [formatTimeCompact(step.started_at), formatTimeCompact(step.finished_at)].filter(Boolean)
+  if (timeParts.length > 0) {
+    parts.push(timeParts.join(' -> '))
+  }
+  return parts.join(' ｜ ')
+}
+
 function parseStreamEvent(data: string): ReleaseOrderLogStreamEvent | null {
   const text = String(data || '').trim()
   if (!text) {
@@ -296,130 +405,151 @@ function parseStreamEvent(data: string): ReleaseOrderLogStreamEvent | null {
   }
 }
 
-function appendLogContent(content: string) {
-  const chunk = String(content || '')
-  if (!chunk) {
-    return
-  }
-  if (!logText.value) {
-    logText.value = chunk
-  } else {
-    logText.value += chunk
-  }
-  void nextTick(() => {
-    scrollLogToBottom()
-  })
+function getLogState(scope: ReleasePipelineScope) {
+  return scopeLogStates[scope]
 }
 
-function appendStatusLine(messageText: string) {
-  const text = String(messageText || '').trim()
-  if (!text) {
-    return
-  }
-  const line = `[${dayjs().format('HH:mm:ss')}] ${text}\n`
-  appendLogContent(line)
+function setLogPanelRef(scope: ReleasePipelineScope, element: Element | null) {
+  getLogState(scope).panelRef = element instanceof HTMLElement ? element : null
 }
 
-function clearReconnectTimer() {
-  if (reconnectTimer.value !== null) {
-    window.clearTimeout(reconnectTimer.value)
-    reconnectTimer.value = null
-  }
-}
-
-function isLogNearBottom() {
-  if (!logPanelRef.value) {
+function isLogNearBottom(scope: ReleasePipelineScope) {
+  const panel = getLogState(scope).panelRef
+  if (!panel) {
     return true
   }
-  const remain = logPanelRef.value.scrollHeight - logPanelRef.value.scrollTop - logPanelRef.value.clientHeight
+  const remain = panel.scrollHeight - panel.scrollTop - panel.clientHeight
   return remain <= 48
 }
 
-function scrollLogToBottom(force = false) {
-  if (!logPanelRef.value) {
+function scrollLogToBottom(scope: ReleasePipelineScope, force = false) {
+  const state = getLogState(scope)
+  if (!state.panelRef) {
     return
   }
-  if (!force && !logAutoFollow.value) {
+  if (!force && !state.autoFollow) {
     return
   }
-  logPanelRef.value.scrollTop = logPanelRef.value.scrollHeight
+  state.panelRef.scrollTop = state.panelRef.scrollHeight
 }
 
-function syncLogFollowState() {
-  logAutoFollow.value = isLogNearBottom()
+function syncLogFollowState(scope: ReleasePipelineScope) {
+  getLogState(scope).autoFollow = isLogNearBottom(scope)
 }
 
-function handleLogFollowChange(checked: boolean) {
-  logAutoFollow.value = checked
+function handleLogFollowChange(scope: ReleasePipelineScope, checked: boolean) {
+  const state = getLogState(scope)
+  state.autoFollow = checked
   if (checked) {
     void nextTick(() => {
-      scrollLogToBottom(true)
+      scrollLogToBottom(scope, true)
     })
   }
 }
 
-function jumpLogToBottom() {
-  logAutoFollow.value = true
+function jumpLogToBottom(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  state.autoFollow = true
   void nextTick(() => {
-    scrollLogToBottom(true)
+    scrollLogToBottom(scope, true)
   })
 }
 
-function closeLogStream() {
-  clearReconnectTimer()
-  if (logStreamRef.value) {
-    closeLogStreamIntentional.value = true
-    logStreamRef.value.close()
-    logStreamRef.value = null
+function appendLogContent(scope: ReleasePipelineScope, content: string) {
+  const state = getLogState(scope)
+  const chunk = String(content || '')
+  if (!chunk) {
+    return
   }
-  logStreamConnected.value = false
-  logStreamConnecting.value = false
+  state.text = state.text ? state.text + chunk : chunk
+  void nextTick(() => {
+    scrollLogToBottom(scope)
+  })
 }
 
-function scheduleReconnect() {
-  if (closeLogStreamIntentional.value || logStreamEnded.value) {
+function appendStatusLine(scope: ReleasePipelineScope, messageText: string) {
+  const text = String(messageText || '').trim()
+  if (!text) {
     return
   }
-  if (!shouldKeepLogStreaming.value) {
+  appendLogContent(scope, `[${dayjs().format('HH:mm:ss')}] ${text}\n`)
+}
+
+function clearReconnectTimer(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  if (state.reconnectTimer !== null) {
+    window.clearTimeout(state.reconnectTimer)
+    state.reconnectTimer = null
+  }
+}
+
+function closeLogStream(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  clearReconnectTimer(scope)
+  if (state.stream) {
+    state.closeIntentional = true
+    state.stream.close()
+    state.stream = null
+  }
+  state.connected = false
+  state.connecting = false
+}
+
+function resetLogState(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  closeLogStream(scope)
+  state.text = ''
+  state.offset = 0
+  state.connected = false
+  state.connecting = false
+  state.ended = false
+  state.error = ''
+  state.statusText = '未连接'
+  state.closeIntentional = false
+  state.autoFollow = true
+}
+
+function scheduleReconnect(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  if (state.closeIntentional || state.ended || !shouldKeepLogStreaming.value) {
     return
   }
-  clearReconnectTimer()
-  reconnectTimer.value = window.setTimeout(() => {
-    void startLogStream(false)
+  clearReconnectTimer(scope)
+  state.reconnectTimer = window.setTimeout(() => {
+    void startLogStream(scope, false)
   }, 2000)
 }
 
-async function startLogStream(reset: boolean) {
-  if (!orderID.value) {
+async function startLogStream(scope: ReleasePipelineScope, reset: boolean) {
+  const execution = executionMapByScope.value[scope]
+  if (!orderID.value || !execution || execution.provider !== 'jenkins') {
     return
   }
-  closeLogStream()
-  closeLogStreamIntentional.value = false
+
+  const state = getLogState(scope)
+  closeLogStream(scope)
+  state.closeIntentional = false
   if (reset) {
-    logText.value = ''
-    logOffset.value = 0
-    logStreamError.value = ''
-    logStreamEnded.value = false
-    logStreamStatusText.value = '准备连接'
-    logAutoFollow.value = true
+    state.text = ''
+    state.offset = 0
+    state.error = ''
+    state.ended = false
+    state.statusText = '准备连接'
+    state.autoFollow = true
   }
 
-  const streamURL = buildReleaseOrderLogStreamURL(
-    orderID.value,
-    logOffset.value,
-    authStore.accessToken,
-  )
+  const streamURL = buildReleaseOrderLogStreamURL(orderID.value, state.offset, authStore.accessToken, scope)
   const source = new EventSource(streamURL)
-  logStreamRef.value = source
-  logStreamConnecting.value = true
-  logStreamStatusText.value = '连接中...'
+  state.stream = source
+  state.connecting = true
+  state.statusText = '连接中...'
 
   source.onopen = () => {
-    logStreamConnecting.value = false
-    logStreamConnected.value = true
-    logStreamError.value = ''
-    if (!logStreamEnded.value) {
-      logStreamStatusText.value = '流式同步中'
+    state.connecting = false
+    state.connected = true
+    state.error = ''
+    if (!state.ended) {
+      state.statusText = '流式同步中'
     }
   }
 
@@ -428,44 +558,43 @@ async function startLogStream(reset: boolean) {
     if (!parsed) {
       return
     }
-    const eventOffset = Number(parsed.offset ?? NaN)
+    const eventOffset = Number(parsed.offset ?? Number.NaN)
     if (Number.isFinite(eventOffset) && eventOffset >= 0) {
-      logOffset.value = Math.max(logOffset.value, Math.floor(eventOffset))
+      state.offset = Math.max(state.offset, Math.floor(eventOffset))
     }
 
     switch (eventType) {
       case 'log':
-        appendLogContent(String(parsed.content || ''))
+        appendLogContent(scope, String(parsed.content || ''))
         if (parsed.message) {
-          appendStatusLine(parsed.message)
+          appendStatusLine(scope, parsed.message)
         }
         return
       case 'done':
         if (parsed.message) {
-          appendStatusLine(parsed.message)
+          appendStatusLine(scope, parsed.message)
         }
-        logStreamEnded.value = true
-        logStreamStatusText.value = '已结束'
-        closeLogStreamIntentional.value = true
+        state.ended = true
+        state.statusText = '已结束'
+        state.closeIntentional = true
         source.close()
-        logStreamRef.value = null
-        logStreamConnected.value = false
-        logStreamConnecting.value = false
+        state.stream = null
+        state.connected = false
+        state.connecting = false
         return
       case 'error':
         if (parsed.message) {
-          appendStatusLine(parsed.message)
-          logStreamError.value = parsed.message
+          appendStatusLine(scope, parsed.message)
+          state.error = parsed.message
         } else {
-          logStreamError.value = '日志流发生异常'
+          state.error = '日志流发生异常'
         }
         return
       default:
         if (parsed.message) {
-          appendStatusLine(parsed.message)
-          logStreamStatusText.value = parsed.message
+          appendStatusLine(scope, parsed.message)
+          state.statusText = parsed.message
         }
-        return
     }
   }
 
@@ -483,34 +612,78 @@ async function startLogStream(reset: boolean) {
   })
 
   source.onerror = () => {
-    logStreamConnecting.value = false
-    logStreamConnected.value = false
-    if (closeLogStreamIntentional.value || logStreamEnded.value) {
+    state.connecting = false
+    state.connected = false
+    if (state.closeIntentional || state.ended) {
       return
     }
-    logStreamError.value = ''
+    state.error = ''
     source.close()
-    logStreamRef.value = null
-    scheduleReconnect()
+    state.stream = null
+    scheduleReconnect(scope)
   }
 }
 
-function reconnectLogStream() {
-  logStreamError.value = ''
-  logStreamStatusText.value = '准备重连'
-  const shouldReset = logStreamEnded.value || !shouldKeepLogStreaming.value
+function reconnectLogStream(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  state.error = ''
+  state.statusText = '准备重连'
+  const shouldReset = state.ended || !shouldKeepLogStreaming.value
   if (shouldReset) {
-    logStreamEnded.value = false
+    state.ended = false
   }
-  void startLogStream(shouldReset)
+  void startLogStream(scope, shouldReset)
 }
 
-function clearLogOutput() {
-  logText.value = ''
-  logOffset.value = 0
-  logStreamError.value = ''
-  logStreamEnded.value = false
-  logAutoFollow.value = true
+function clearLogOutput(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  state.text = ''
+  state.offset = 0
+  state.error = ''
+  state.ended = false
+  state.autoFollow = true
+}
+
+function logStreamTagColor(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  if (state.ended) {
+    return 'default'
+  }
+  if (state.error) {
+    return 'warning'
+  }
+  return 'processing'
+}
+
+function logStreamHintText(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  if (state.error) {
+    return '日志异常'
+  }
+  if (state.ended) {
+    return '已结束'
+  }
+  return ''
+}
+
+function syncVisibleLogStreams() {
+  ;(['ci', 'cd'] as ReleasePipelineScope[]).forEach((scope) => {
+    const execution = executionMapByScope.value[scope]
+    const state = getLogState(scope)
+    if (!execution || execution.provider !== 'jenkins') {
+      resetLogState(scope)
+      return
+    }
+
+    if (!state.stream && !state.connecting && state.text === '') {
+      void startLogStream(scope, true)
+      return
+    }
+
+    if (shouldKeepLogStreaming.value && !state.stream && !state.connecting && !state.ended) {
+      void startLogStream(scope, false)
+    }
+  })
 }
 
 async function loadDetail(options?: { silent?: boolean }) {
@@ -532,41 +705,29 @@ async function loadDetail(options?: { silent?: boolean }) {
   }
   try {
     const previousStatus = order.value?.status || ''
-    const [orderResp, paramsResp, stepsResp] = await Promise.all([
+    const [orderResp, executionsResp, paramsResp, stepsResp] = await Promise.all([
       getReleaseOrderByID(orderID.value),
-      listReleaseOrderParams(orderID.value),
+      listReleaseOrderExecutions(orderID.value),
+      canViewParamSnapshot.value ? listReleaseOrderParams(orderID.value) : Promise.resolve({ data: [] }),
       listReleaseOrderSteps(orderID.value),
     ])
     order.value = orderResp.data
+    executions.value = [...executionsResp.data].sort((a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope))
     params.value = paramsResp.data
     steps.value = stepsResp.data
+
     const now = Date.now()
     const shouldRefreshPipelineStages =
       !stageLogDrawerVisible.value &&
-      (
-        !silent ||
-        !pipelineStageModuleVisible.value ||
+      (!silent ||
         pipelineStages.value.length === 0 ||
         previousStatus !== orderResp.data.status ||
-        now - lastPipelineStageRefreshAt.value >= PIPELINE_STAGE_REFRESH_INTERVAL_MS
-      )
+        now - lastPipelineStageRefreshAt.value >= PIPELINE_STAGE_REFRESH_INTERVAL_MS)
     if (shouldRefreshPipelineStages) {
       await loadPipelineStageView({ silent })
     }
 
-    if (shouldKeepLogStreaming.value) {
-      if (!logStreamRef.value && !logStreamConnecting.value) {
-        void startLogStream(false)
-      }
-    } else {
-      if (logStreamRef.value) {
-        closeLogStream()
-      }
-      if (!logStreamEnded.value && logOffset.value > 0) {
-        logStreamEnded.value = true
-        logStreamStatusText.value = '已结束'
-      }
-    }
+    syncVisibleLogStreams()
   } catch (error) {
     if (!silent) {
       message.error(extractHTTPErrorMessage(error, '发布单详情加载失败'))
@@ -578,6 +739,17 @@ async function loadDetail(options?: { silent?: boolean }) {
       loading.value = false
     }
   }
+}
+
+function scopeSort(scope: string) {
+  const normalized = String(scope || '').trim().toLowerCase()
+  if (normalized === 'ci') {
+    return 1
+  }
+  if (normalized === 'cd') {
+    return 2
+  }
+  return 99
 }
 
 async function loadPipelineStageView(options?: { silent?: boolean }) {
@@ -700,15 +872,20 @@ function startAutoRefresh() {
   }, AUTO_REFRESH_INTERVAL_MS)
 }
 
-onMounted(() => {
-  void startLogStream(true)
-  void loadDetail()
+function closeAllLogStreams() {
+  ;(['ci', 'cd'] as ReleasePipelineScope[]).forEach((scope) => {
+    closeLogStream(scope)
+  })
+}
+
+onMounted(async () => {
+  await loadDetail()
   startAutoRefresh()
 })
 
 onBeforeUnmount(() => {
   stopAutoRefresh()
-  closeLogStream()
+  closeAllLogStreams()
 })
 </script>
 
@@ -724,7 +901,7 @@ onBeforeUnmount(() => {
         </a-button>
         <div>
           <h2 class="page-title">发布单详情</h2>
-          <p class="page-subtitle">查看发布基础信息、参数快照与步骤执行轨迹。</p>
+          <p class="page-subtitle">按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度。</p>
         </div>
       </div>
       <a-space>
@@ -774,85 +951,106 @@ onBeforeUnmount(() => {
           {{ item.value }}
         </a-descriptions-item>
       </a-descriptions>
+
+      <a-divider class="execution-divider">执行单元</a-divider>
+      <a-row :gutter="16">
+        <a-col v-for="item in executionSections" :key="item.scope" :xs="24" :md="12">
+          <div class="execution-summary-card">
+            <div class="execution-summary-head">
+              <div>
+                <div class="execution-summary-title">{{ item.title }}</div>
+                <div class="execution-summary-subtitle">{{ item.execution.binding_name || '-' }}</div>
+              </div>
+              <a-tag :color="statusColor(item.execution.status)" class="status-tag">
+                <LoadingOutlined v-if="isRunningStatus(item.execution.status)" spin />
+                <span>{{ statusText(item.execution.status) }}</span>
+              </a-tag>
+            </div>
+            <div class="execution-summary-meta">
+              <span>执行器：{{ item.execution.provider || '-' }}</span>
+              <span>开始：{{ formatTime(item.execution.started_at) }}</span>
+              <span>结束：{{ formatTime(item.execution.finished_at) }}</span>
+            </div>
+          </div>
+        </a-col>
+      </a-row>
     </a-card>
 
-    <a-card class="detail-card" title="参数快照" :loading="loading" :bordered="true">
-      <a-empty v-if="params.length === 0" description="暂无参数快照" />
-      <a-table
-        v-else
-        row-key="id"
-        :columns="paramColumns"
-        :data-source="params"
-        :pagination="false"
-        :scroll="{ x: 1200 }"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'created_at'">
-            {{ formatTime(record.created_at) }}
+    <template v-if="canViewParamSnapshot">
+      <a-card v-for="group in paramGroups" :key="group.scope" class="detail-card" :title="group.title" :loading="loading" :bordered="true">
+        <a-empty v-if="group.items.length === 0" description="暂无参数快照" />
+        <a-table
+          v-else
+          row-key="id"
+          :columns="paramColumns"
+          :data-source="group.items"
+          :pagination="false"
+          :scroll="{ x: 1200 }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'created_at'">
+              {{ formatTime(record.created_at) }}
+            </template>
+            <template v-else-if="column.key === 'param_value'">
+              {{ record.param_value || '-' }}
+            </template>
           </template>
-          <template v-else-if="column.key === 'param_value'">
-            {{ record.param_value || '-' }}
-          </template>
-        </template>
-      </a-table>
-    </a-card>
+        </a-table>
+      </a-card>
+    </template>
 
     <a-card class="detail-card" title="执行步骤" :loading="loading" :bordered="true">
-      <a-empty v-if="sortedSteps.length === 0" description="暂无步骤数据" />
-      <a-table
-        v-else
-        row-key="id"
-        :columns="stepColumns"
-        :data-source="sortedSteps"
-        :pagination="false"
-        :scroll="{ x: 1500 }"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'status'">
-            <a-tag :color="statusColor(record.status)" class="status-tag">
-              <LoadingOutlined v-if="isRunningStatus(record.status)" spin />
-              <span>{{ statusText(record.status) }}</span>
-            </a-tag>
-          </template>
-          <template v-else-if="column.key === 'message'">
-            {{ record.message || '-' }}
-          </template>
-          <template v-else-if="column.key === 'started_at'">
-            {{ formatTime(record.started_at) }}
-          </template>
-          <template v-else-if="column.key === 'finished_at'">
-            {{ formatTime(record.finished_at) }}
-          </template>
-        </template>
-      </a-table>
+      <a-empty v-if="stepGroups.length === 0" description="暂无步骤数据" />
+      <div v-else class="step-groups">
+        <div v-for="group in stepGroups" :key="group.key" class="scope-section">
+          <div class="scope-section-header">
+            <a-tag>{{ group.title }}</a-tag>
+          </div>
+          <a-steps direction="vertical" size="small" class="step-progress">
+            <a-step
+              v-for="step in group.items"
+              :key="step.id"
+              :title="step.step_name"
+              :status="stepComponentStatus(step.status)"
+            >
+              <template #description>
+                <div class="step-description">{{ describeStep(step) }}</div>
+              </template>
+            </a-step>
+          </a-steps>
+        </div>
+      </div>
     </a-card>
 
-    <a-card v-if="pipelineStageModuleVisible" class="detail-card" title="管线进度" :loading="pipelineStageLoading" :bordered="true">
+    <a-card class="detail-card" title="管线进度" :loading="pipelineStageLoading" :bordered="true">
       <template #extra>
         <a-space>
-          <a-tag color="processing">{{ pipelineStageExecutorType || 'jenkins' }}</a-tag>
+          <a-tag v-if="pipelineStageExecutorType" color="processing">{{ pipelineStageExecutorType }}</a-tag>
           <a-button size="small" @click="loadPipelineStageView">刷新阶段</a-button>
         </a-space>
       </template>
 
-      <a-alert
-        v-if="pipelineStageMessage"
-        class="pipeline-stage-alert"
-        type="info"
-        show-icon
-        :message="pipelineStageMessage"
-      />
+      <a-alert v-if="pipelineStageMessage" class="pipeline-stage-alert" type="info" show-icon :message="pipelineStageMessage" />
 
-      <a-empty v-if="pipelineStageGroups.length === 0" description="暂无管线阶段数据" />
-      <div v-else>
-        <div v-for="group in pipelineStageGroups" :key="group.key" class="pipeline-stage-group">
-          <div class="pipeline-stage-group-header">
-            <a-tag>{{ group.label }}</a-tag>
+      <div v-if="stageSections.length > 0" class="stage-sections">
+        <div v-for="section in stageSections" :key="section.scope" class="scope-section">
+          <div class="scope-section-header">
+            <a-tag>{{ section.title }}</a-tag>
           </div>
+
+          <a-alert
+            v-if="!section.isJenkins"
+            class="pipeline-stage-alert"
+            type="info"
+            show-icon
+            :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，部署进度视图待接入。`"
+          />
+          <a-empty v-else-if="section.stages.length === 0" description="暂无阶段数据" />
           <a-table
+            v-else
             row-key="id"
             :columns="pipelineStageColumns"
-            :data-source="group.items"
+            :data-source="section.stages"
             :pagination="false"
             :scroll="{ x: 1200 }"
           >
@@ -884,33 +1082,43 @@ onBeforeUnmount(() => {
           </a-table>
         </div>
       </div>
+      <a-empty v-else description="暂无管线进度数据" />
     </a-card>
 
-    <a-card class="detail-card" title="构建日志" :bordered="true">
+    <a-card v-for="section in logSections" :key="section.scope" class="detail-card" :title="section.title" :bordered="true">
       <template #extra>
-        <a-space>
-          <a-tag v-if="logStreamHintText" :color="logStreamTagColor">{{ logStreamHintText }}</a-tag>
+        <a-space v-if="section.isJenkins">
+          <a-tag v-if="logStreamHintText(section.scope)" :color="logStreamTagColor(section.scope)">{{ logStreamHintText(section.scope) }}</a-tag>
           <a-switch
             size="small"
-            :checked="logAutoFollow"
+            :checked="section.state.autoFollow"
             checked-children="跟随日志"
             un-checked-children="暂停跟随"
-            @change="handleLogFollowChange"
+            @change="handleLogFollowChange(section.scope, $event)"
           />
-          <a-button size="small" @click="jumpLogToBottom">回到底部</a-button>
-          <a-button size="small" @click="reconnectLogStream" :loading="logStreamConnecting">重连日志</a-button>
-          <a-button size="small" @click="clearLogOutput">清空</a-button>
+          <a-button size="small" @click="jumpLogToBottom(section.scope)">回到底部</a-button>
+          <a-button size="small" @click="reconnectLogStream(section.scope)" :loading="section.state.connecting">重连日志</a-button>
+          <a-button size="small" @click="clearLogOutput(section.scope)">清空</a-button>
         </a-space>
       </template>
 
-      <a-alert v-if="logStreamError" class="log-alert" type="warning" show-icon :message="logStreamError" />
-      <pre ref="logPanelRef" class="log-panel" @scroll="syncLogFollowState">{{ logText || '暂无日志输出' }}</pre>
+      <a-alert
+        v-if="!section.isJenkins"
+        class="log-alert"
+        type="info"
+        show-icon
+        :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`"
+      />
+      <template v-else>
+        <a-alert v-if="section.state.error" class="log-alert" type="warning" show-icon :message="section.state.error" />
+        <pre :ref="(el) => setLogPanelRef(section.scope, el as Element | null)" class="log-panel" @scroll="syncLogFollowState(section.scope)">{{ section.state.text || '暂无日志输出' }}</pre>
+      </template>
     </a-card>
 
     <a-drawer
       :open="stageLogDrawerVisible"
       :width="760"
-      :title="selectedPipelineStage ? `阶段日志 · ${selectedPipelineStage.stage_name}` : '阶段日志'"
+      :title="selectedPipelineStage ? `${selectedPipelineStage.pipeline_scope?.toUpperCase() || ''} 阶段日志 · ${selectedPipelineStage.stage_name}` : '阶段日志'"
       @close="closeStageLogDrawer"
     >
       <template #extra>
@@ -952,6 +1160,58 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-xl);
 }
 
+.execution-divider {
+  margin-top: 20px;
+}
+
+.execution-summary-card {
+  padding: 16px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.04) 0%, rgba(248, 250, 252, 1) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.execution-summary-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.execution-summary-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.execution-summary-subtitle {
+  margin-top: 4px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.execution-summary-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.scope-section + .scope-section {
+  margin-top: 20px;
+}
+
+.scope-section-header {
+  margin-bottom: 12px;
+}
+
+.step-description {
+  color: #475569;
+  line-height: 1.7;
+}
+
 .danger-icon {
   color: #ff4d4f;
 }
@@ -962,20 +1222,9 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
-.log-alert {
-  margin-bottom: 12px;
-}
-
+.log-alert,
 .pipeline-stage-alert {
   margin-bottom: 12px;
-}
-
-.pipeline-stage-group + .pipeline-stage-group {
-  margin-top: 16px;
-}
-
-.pipeline-stage-group-header {
-  margin-bottom: 10px;
 }
 
 .log-panel {

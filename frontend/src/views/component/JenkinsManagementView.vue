@@ -11,6 +11,8 @@ import {
   getPipelineRawScript,
   listPipelines,
   previewJenkinsRawPipelineConfigXML,
+  syncJenkinsPipelines,
+  syncJenkinsPipelineParamDefs,
   updateJenkinsRawPipeline,
 } from '../../api/pipeline'
 import { useResizableColumns } from '../../composables/useResizableColumns'
@@ -37,6 +39,7 @@ const configTitle = ref('')
 const configXML = ref('')
 const previewingConfig = ref(false)
 const openingOriginalID = ref('')
+const syncing = ref(false)
 const editorMode = ref<'create' | 'edit'>('create')
 const formRef = ref<FormInstance>()
 
@@ -56,6 +59,9 @@ const editorForm = reactive({
 })
 
 const canManagePipeline = computed(() => authStore.hasPermission('pipeline.manage'))
+const canSyncJenkins = computed(
+  () => authStore.hasPermission('pipeline.manage') || authStore.hasPermission('pipeline_param.manage'),
+)
 
 const formRules: Record<string, Array<{ required: boolean; message: string; trigger: string }>> = {
   full_name: [{ required: true, message: '请输入 Jenkins 路径', trigger: 'blur' }],
@@ -219,6 +225,35 @@ async function loadPipelines() {
   }
 }
 
+async function handleManualSync() {
+  syncing.value = true
+  const summaries: string[] = []
+  try {
+    if (authStore.hasPermission('pipeline.manage')) {
+      const pipelineResult = await syncJenkinsPipelines()
+      await loadPipelines()
+      summaries.push(
+        `管线 ${pipelineResult.data.total} 条（新增 ${pipelineResult.data.created} / 更新 ${pipelineResult.data.updated} / 失效 ${pipelineResult.data.inactivated} / 跳过 ${pipelineResult.data.skipped}）`,
+      )
+    }
+    if (authStore.hasPermission('pipeline.manage') || authStore.hasPermission('pipeline_param.manage')) {
+      const paramResult = await syncJenkinsPipelineParamDefs()
+      summaries.push(
+        `参数 ${paramResult.data.total} 条（新增 ${paramResult.data.created} / 更新 ${paramResult.data.updated} / 失效 ${paramResult.data.inactivated} / 跳过 ${paramResult.data.skipped}）`,
+      )
+    }
+    if (summaries.length === 0) {
+      message.warning('当前账号没有 Jenkins 手动同步权限')
+      return
+    }
+    message.success(`手动同步完成：${summaries.join('；')}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, 'Jenkins 手动同步失败'))
+  } finally {
+    syncing.value = false
+  }
+}
+
 function handleSearch() {
   filters.page = 1
   void loadPipelines()
@@ -329,6 +364,12 @@ onMounted(() => {
             <PlusOutlined />
           </template>
           新增管线
+        </a-button>
+        <a-button v-if="canSyncJenkins" :loading="syncing" @click="handleManualSync">
+          <template #icon>
+            <ReloadOutlined />
+          </template>
+          手动同步
         </a-button>
         <a-button @click="loadPipelines">
           <template #icon>

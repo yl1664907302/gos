@@ -36,6 +36,18 @@ export interface PipelineListResponse {
   total: number
 }
 
+export interface PipelineSyncResult {
+  total: number
+  created: number
+  updated: number
+  inactivated: number
+  skipped: number
+}
+
+export interface PipelineSyncResponse {
+  data: PipelineSyncResult
+}
+
 export interface PipelineDataResponse {
   data: Pipeline
 }

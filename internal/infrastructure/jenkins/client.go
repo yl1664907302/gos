@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	domain "gos/internal/domain/pipeline"
@@ -493,16 +494,80 @@ func (c *Client) ListJobParamSets(ctx context.Context) ([]pipelineparamdomain.Je
 	if err != nil {
 		return nil, err
 	}
-
-	result := make([]pipelineparamdomain.JenkinsJobParamSet, 0, len(jobs))
-	for _, job := range jobs {
-		item, itemErr := c.getJobParamSet(ctx, job.FullName)
-		if itemErr != nil {
-			return nil, itemErr
-		}
-		result = append(result, item)
+	if len(jobs) == 0 {
+		return nil, nil
 	}
-	return result, nil
+
+	type paramJob struct {
+		index    int
+		fullName string
+	}
+	type paramResult struct {
+		index    int
+		fullName string
+		item     pipelineparamdomain.JenkinsJobParamSet
+		err      error
+	}
+
+	workerCount := 32
+	if len(jobs) < workerCount {
+		workerCount = len(jobs)
+	}
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+
+	jobsCh := make(chan paramJob, len(jobs))
+	resultsCh := make(chan paramResult, len(jobs))
+	var wg sync.WaitGroup
+
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobsCh {
+				item, itemErr := c.getJobParamSet(ctx, job.fullName)
+				resultsCh <- paramResult{
+					index:    job.index,
+					fullName: job.fullName,
+					item:     item,
+					err:      itemErr,
+				}
+			}
+		}()
+	}
+
+	for index, job := range jobs {
+		jobsCh <- paramJob{index: index, fullName: job.FullName}
+	}
+	close(jobsCh)
+
+	go func() {
+		wg.Wait()
+		close(resultsCh)
+	}()
+
+	collected := make([]pipelineparamdomain.JenkinsJobParamSet, len(jobs))
+	var firstErr error
+	for result := range resultsCh {
+		if result.err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("load job params failed for %s: %w", strings.TrimSpace(result.fullName), result.err)
+			continue
+		}
+		collected[result.index] = result.item
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	items := make([]pipelineparamdomain.JenkinsJobParamSet, 0, len(collected))
+	for _, item := range collected {
+		if strings.TrimSpace(item.JobFullName) == "" {
+			continue
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func (c *Client) getJobParamSet(ctx context.Context, fullName string) (pipelineparamdomain.JenkinsJobParamSet, error) {
