@@ -253,6 +253,9 @@ func (uc *PipelineBindingManager) ensurePipelineProvider(ctx context.Context, pi
 	if err != nil {
 		return err
 	}
+	if err := ensureActivePipelineRecord(pipeline, "所选管线"); err != nil {
+		return err
+	}
 	if pipeline.Provider != expectProvider {
 		return fmt.Errorf("%w: pipeline provider mismatch", ErrInvalidInput)
 	}

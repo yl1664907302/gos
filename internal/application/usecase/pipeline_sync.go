@@ -14,6 +14,8 @@ type JenkinsPipelineClient interface {
 	ListJobs(ctx context.Context) ([]domain.JenkinsJob, error)
 	GetJob(ctx context.Context, fullName string) (domain.JenkinsJob, error)
 	GetPipelineScript(ctx context.Context, fullName string) (domain.JenkinsPipelineScript, error)
+	GetPipelineConfigXML(ctx context.Context, fullName string) (string, error)
+	BuildJobURL(fullName string) string
 }
 
 type SyncPipelines struct {
@@ -23,10 +25,11 @@ type SyncPipelines struct {
 }
 
 type SyncPipelinesOutput struct {
-	Total   int `json:"total"`
-	Created int `json:"created"`
-	Updated int `json:"updated"`
-	Skipped int `json:"skipped"`
+	Total       int `json:"total"`
+	Created     int `json:"created"`
+	Updated     int `json:"updated"`
+	Inactivated int `json:"inactivated"`
+	Skipped     int `json:"skipped"`
 }
 
 func NewSyncPipelines(repo domain.Repository, jenkins JenkinsPipelineClient) *SyncPipelines {
@@ -82,12 +85,21 @@ func (uc *SyncPipelines) Execute(ctx context.Context) (SyncPipelinesOutput, erro
 	if err != nil {
 		return SyncPipelinesOutput{}, err
 	}
+	keepIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		keepIDs = append(keepIDs, item.ID)
+	}
+	inactivated, err := uc.repo.MarkMissingPipelinesInactive(ctx, domain.ProviderJenkins, keepIDs, now)
+	if err != nil {
+		return SyncPipelinesOutput{}, err
+	}
 
 	return SyncPipelinesOutput{
-		Total:   len(items),
-		Created: created,
-		Updated: updated,
-		Skipped: skipped,
+		Total:       len(items),
+		Created:     created,
+		Updated:     updated,
+		Inactivated: inactivated,
+		Skipped:     skipped,
 	}, nil
 }
 

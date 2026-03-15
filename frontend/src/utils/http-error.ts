@@ -28,3 +28,10 @@ export function extractHTTPErrorMessage(error: unknown, fallback: string): strin
       return fallback
   }
 }
+
+export function isHTTPStatus(error: unknown, status: number): boolean {
+  if (!axios.isAxiosError(error)) {
+    return false
+  }
+  return Number(error.response?.status || 0) === Number(status)
+}

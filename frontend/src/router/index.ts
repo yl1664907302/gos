@@ -134,7 +134,7 @@ export const router = createRouter({
           path: 'components/jenkins',
           name: 'jenkins-management',
           component: JenkinsManagementView,
-          meta: { title: 'Jenkins管理', permission: 'component.view' },
+          meta: { title: '管线列表', permission: 'component.view' },
         },
         {
           path: 'components/pipeline-params',
@@ -158,7 +158,7 @@ export const router = createRouter({
           path: 'releases/:id',
           name: 'release-order-detail',
           component: ReleaseOrderDetailView,
-          meta: { title: '发布单详情', permission: ['release.view', 'release.execute', 'release.cancel'] },
+          meta: { title: '发布单详情', permission: ['release.view', 'release.create', 'release.execute', 'release.cancel'] },
         },
         {
           path: 'release-templates',

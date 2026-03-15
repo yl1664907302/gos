@@ -31,7 +31,7 @@ interface ParamPermissionFormState {
   can_edit: boolean
 }
 
-interface ApplicationReleasePermissionRow {
+interface ApplicationPermissionRow {
   application_id: string
   application_name: string
 }
@@ -62,9 +62,11 @@ const paramPermissionForm = reactive<ParamPermissionFormState>({
 
 const paramKeyOptions = ref<SelectOption[]>([])
 const applicationOptions = ref<SelectOption[]>([])
-const applicationReleasePermissionMap = ref<Record<string, boolean>>({})
-const applicationReleaseScopedCodes = new Set(['release.create', 'release.execute', 'release.cancel'])
-const hiddenPermissionCodes = new Set(['release.param_config.view'])
+const applicationPermissionMap = ref<Record<string, boolean>>({})
+const applicationViewScopedCodes = new Set(['application.view'])
+const applicationReleaseScopedCodes = new Set(['release.view', 'release.create', 'release.execute', 'release.cancel'])
+const applicationScopedCodes = Array.from(new Set([...applicationViewScopedCodes, ...applicationReleaseScopedCodes]))
+const hiddenPermissionCodes = new Set(['release.param_config.view', 'application.view', 'release.view'])
 
 const permissionGroupOrder = ['application', 'pipeline', 'platform_param', 'pipeline_param', 'component', 'release', 'system']
 
@@ -110,16 +112,16 @@ const paramPermissionColumns: TableColumnsType<UserParamPermission> = [
   { title: '操作', key: 'actions', width: 180, fixed: 'right' },
 ]
 
-const applicationReleasePermissionColumns: TableColumnsType<ApplicationReleasePermissionRow> = [
+const applicationPermissionColumns: TableColumnsType<ApplicationPermissionRow> = [
   { title: '应用', dataIndex: 'application_name', key: 'application_name', width: 360 },
-  { title: '允许发布', key: 'enabled', width: 140 },
+  { title: '允许展示与发布', key: 'enabled', width: 180 },
 ]
 
 const paramPermissionRules = {
   param_key: [{ required: true, message: '请选择平台标准 Key', trigger: 'change' }],
 }
 
-const applicationReleasePermissionRows = computed<ApplicationReleasePermissionRow[]>(() =>
+const applicationPermissionRows = computed<ApplicationPermissionRow[]>(() =>
   applicationOptions.value.map((item) => ({
     application_id: item.value,
     application_name: item.label,
@@ -157,14 +159,14 @@ function moduleLabel(module: string) {
   return mapping[module] || module
 }
 
-function syncApplicationReleasePermissionMap() {
+function syncApplicationPermissionMap() {
   const nextMap: Record<string, boolean> = {}
   const grantedScopeValues = new Set(
     userPermissions.value
       .filter(
         (item) =>
           item.enabled &&
-          applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
+          applicationScopedCodes.includes(String(item.permission_code || '').trim().toLowerCase()) &&
           normalizeScopeType(item.scope_type) === 'application' &&
           String(item.scope_value || '').trim() !== '',
       )
@@ -174,11 +176,11 @@ function syncApplicationReleasePermissionMap() {
   for (const item of applicationOptions.value) {
     nextMap[item.value] = grantedScopeValues.has(item.value)
   }
-  applicationReleasePermissionMap.value = nextMap
+  applicationPermissionMap.value = nextMap
 }
 
 function isApplicationReleaseEnabled(applicationID: string) {
-  return Boolean(applicationReleasePermissionMap.value[String(applicationID || '').trim()])
+  return Boolean(applicationPermissionMap.value[String(applicationID || '').trim()])
 }
 
 function handleApplicationReleaseToggle(applicationID: string, enabled: boolean) {
@@ -186,8 +188,8 @@ function handleApplicationReleaseToggle(applicationID: string, enabled: boolean)
   if (!id) {
     return
   }
-  applicationReleasePermissionMap.value = {
-    ...applicationReleasePermissionMap.value,
+  applicationPermissionMap.value = {
+    ...applicationPermissionMap.value,
     [id]: Boolean(enabled),
   }
 }
@@ -255,7 +257,7 @@ async function loadApplicationOptions() {
       label: `${item.name} (${item.key})`,
       value: item.id,
     }))
-    syncApplicationReleasePermissionMap()
+    syncApplicationPermissionMap()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
   }
@@ -265,7 +267,7 @@ async function loadUserPermissions() {
   if (!selectedUserID.value) {
     userPermissions.value = []
     checkedPermissionCodes.value = []
-    applicationReleasePermissionMap.value = {}
+    applicationPermissionMap.value = {}
     return
   }
   permissionsLoading.value = true
@@ -275,7 +277,7 @@ async function loadUserPermissions() {
     checkedPermissionCodes.value = response.data
       .filter((item) => item.enabled && normalizeScopeType(item.scope_type) === 'global')
       .map((item) => item.permission_code)
-    syncApplicationReleasePermissionMap()
+    syncApplicationPermissionMap()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '用户权限加载失败'))
   } finally {
@@ -338,7 +340,9 @@ async function handleSavePermissions() {
         (item) =>
           item.enabled &&
           normalizeScopeType(item.scope_type) === 'global' &&
-          applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()),
+          (
+            applicationScopedCodes.includes(String(item.permission_code || '').trim().toLowerCase())
+          ),
       )
       .map((item) => ({
         permission_code: item.permission_code,
@@ -364,48 +368,56 @@ async function handleSavePermissions() {
         })),
       })
     }
-    const appBefore = new Set(
-      userPermissions.value
-        .filter(
-          (item) =>
-            item.enabled &&
-            applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
-            normalizeScopeType(item.scope_type) === 'application' &&
-            String(item.scope_value || '').trim() !== '',
-        )
-        .map((item) => String(item.scope_value || '').trim()),
-    )
-
     const appCurrent = new Set(
-      Object.entries(applicationReleasePermissionMap.value)
+      Object.entries(applicationPermissionMap.value)
         .filter(([, enabled]) => Boolean(enabled))
         .map(([applicationID]) => String(applicationID || '').trim())
         .filter(Boolean),
     )
 
-    const appToGrant = Array.from(appCurrent).filter((applicationID) => !appBefore.has(applicationID))
-    const appToRevoke = Array.from(appBefore).filter((applicationID) => !appCurrent.has(applicationID))
+    const beforeItems = userPermissions.value
+      .filter(
+        (item) =>
+          item.enabled &&
+          applicationScopedCodes.includes(String(item.permission_code || '').trim().toLowerCase()) &&
+          normalizeScopeType(item.scope_type) === 'application' &&
+          String(item.scope_value || '').trim() !== '',
+      )
+      .map((item) => ({
+        permission_code: String(item.permission_code || '').trim().toLowerCase(),
+        scope_type: 'application',
+        scope_value: String(item.scope_value || '').trim(),
+      }))
+
+    const beforeKeySet = new Set(
+      beforeItems.map((item) => `${item.permission_code}::${item.scope_type}::${item.scope_value}`),
+    )
+    const currentItems = Array.from(appCurrent).flatMap((applicationID) =>
+      applicationScopedCodes.map((code) => ({
+        permission_code: code,
+        scope_type: 'application',
+        scope_value: applicationID,
+      })),
+    )
+    const currentKeySet = new Set(
+      currentItems.map((item) => `${item.permission_code}::${item.scope_type}::${item.scope_value}`),
+    )
+
+    const appToGrant = currentItems.filter(
+      (item) => !beforeKeySet.has(`${item.permission_code}::${item.scope_type}::${item.scope_value}`),
+    )
+    const appToRevoke = beforeItems.filter(
+      (item) => !currentKeySet.has(`${item.permission_code}::${item.scope_type}::${item.scope_value}`),
+    )
 
     if (appToGrant.length > 0) {
       await grantUserPermissions(selectedUserID.value, {
-        items: appToGrant.flatMap((applicationID) =>
-          Array.from(applicationReleaseScopedCodes).map((code) => ({
-            permission_code: code,
-            scope_type: 'application',
-            scope_value: applicationID,
-          })),
-        ),
+        items: appToGrant,
       })
     }
     if (appToRevoke.length > 0) {
       await revokeUserPermissions(selectedUserID.value, {
-        items: appToRevoke.flatMap((applicationID) =>
-          Array.from(applicationReleaseScopedCodes).map((code) => ({
-            permission_code: code,
-            scope_type: 'application',
-            scope_value: applicationID,
-          })),
-        ),
+        items: appToRevoke,
       })
     }
     if (legacyGlobalReleasePermissions.length > 0) {
@@ -513,7 +525,7 @@ onMounted(async () => {
     <div class="page-header-card page-header">
       <div>
         <h2 class="page-title">权限授权</h2>
-        <p class="page-subtitle">按用户授权模块权限、应用发布权限，并维护发布参数字段级权限。</p>
+        <p class="page-subtitle">按用户授权模块权限、应用权限，并维护发布参数字段级权限。</p>
       </div>
       <a-space>
         <a-select
@@ -557,16 +569,16 @@ onMounted(async () => {
     </a-card>
 
     <a-card class="app-release-permission-card" :bordered="true">
-      <template #title>应用发布权限</template>
+      <template #title>应用权限</template>
 
       <a-empty v-if="!selectedUserID" description="请先选择用户" />
       <a-table
         v-else
         row-key="application_id"
-        :columns="applicationReleasePermissionColumns"
-        :data-source="applicationReleasePermissionRows"
+        :columns="applicationPermissionColumns"
+        :data-source="applicationPermissionRows"
         :pagination="false"
-        :scroll="{ x: 560 }"
+        :scroll="{ x: 620 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'enabled'">

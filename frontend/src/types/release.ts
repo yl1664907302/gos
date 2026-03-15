@@ -1,6 +1,7 @@
 export type ReleaseTriggerType = 'manual' | 'webhook' | 'schedule'
 export type ReleaseOrderStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 export type ReleaseStepStatus = 'pending' | 'running' | 'success' | 'failed'
+export type ReleasePipelineStageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
 export type ReleaseValueSource = 'application' | 'environment' | 'release_input' | 'fixed'
 export type ReleaseTemplateStatus = 'active' | 'inactive'
 
@@ -20,6 +21,7 @@ export interface ReleaseOrder {
   trigger_type: ReleaseTriggerType
   status: ReleaseOrderStatus
   remark: string
+  creator_user_id?: string
   triggered_by: string
   started_at: string | null
   finished_at: string | null
@@ -50,6 +52,22 @@ export interface ReleaseOrderStep {
   created_at: string
 }
 
+export interface ReleaseOrderPipelineStage {
+  id: string
+  release_order_id: string
+  pipeline_scope: string
+  executor_type: string
+  stage_name: string
+  status: ReleasePipelineStageStatus
+  raw_status: string
+  sort_no: number
+  duration_millis: number
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 export interface ReleaseOrderListParams {
   application_id?: string
   binding_id?: string
@@ -77,6 +95,23 @@ export interface ReleaseOrderParamListResponse {
 
 export interface ReleaseOrderStepListResponse {
   data: ReleaseOrderStep[]
+}
+
+export interface ReleaseOrderPipelineStageListResponse {
+  show_module: boolean
+  executor_type: string
+  message?: string
+  data: ReleaseOrderPipelineStage[]
+}
+
+export interface ReleaseOrderPipelineStageLogResponse {
+  data: {
+    stage: ReleaseOrderPipelineStage
+    content: string
+    has_more: boolean
+    raw_status: string
+    fetched_at: string
+  }
 }
 
 export interface ReleaseOrderLogStreamEvent {

@@ -54,6 +54,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	trigger_type VARCHAR(50) NOT NULL,
 	status VARCHAR(50) NOT NULL DEFAULT 'pending',
 	remark VARCHAR(500) NOT NULL DEFAULT '',
+	creator_user_id VARCHAR(64) NOT NULL DEFAULT '',
 	triggered_by VARCHAR(64) NOT NULL DEFAULT '',
 	started_at BIGINT NULL,
 	finished_at BIGINT NULL,
@@ -87,6 +88,24 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	created_at BIGINT NOT NULL,
 	UNIQUE KEY uk_release_order_step_code (release_order_id, step_code),
 	KEY idx_release_order_step_order_sort (release_order_id, sort_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_order_pipeline_stage (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	pipeline_scope VARCHAR(32) NOT NULL DEFAULT '',
+	executor_type VARCHAR(32) NOT NULL DEFAULT '',
+	stage_key VARCHAR(128) NOT NULL,
+	stage_name VARCHAR(255) NOT NULL DEFAULT '',
+	status VARCHAR(32) NOT NULL DEFAULT 'pending',
+	raw_status VARCHAR(64) NOT NULL DEFAULT '',
+	sort_no INT NOT NULL DEFAULT 0,
+	duration_millis BIGINT NOT NULL DEFAULT 0,
+	started_at BIGINT NULL,
+	finished_at BIGINT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_order_pipeline_stage_key (release_order_id, executor_type, pipeline_scope, stage_key),
+	KEY idx_release_order_pipeline_stage_order_sort (release_order_id, pipeline_scope, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_template (
 	id VARCHAR(64) PRIMARY KEY,
@@ -137,6 +156,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	trigger_type TEXT NOT NULL,
 	status TEXT NOT NULL DEFAULT 'pending',
 	remark TEXT NOT NULL DEFAULT '',
+	creator_user_id TEXT NOT NULL DEFAULT '',
 	triggered_by TEXT NOT NULL DEFAULT '',
 	started_at INTEGER NULL,
 	finished_at INTEGER NULL,
@@ -170,6 +190,24 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE(release_order_id, step_code)
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_step_order_sort ON release_order_step (release_order_id, sort_no);`,
+			`CREATE TABLE IF NOT EXISTS release_order_pipeline_stage (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL,
+	pipeline_scope TEXT NOT NULL DEFAULT '',
+	executor_type TEXT NOT NULL DEFAULT '',
+	stage_key TEXT NOT NULL,
+	stage_name TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'pending',
+	raw_status TEXT NOT NULL DEFAULT '',
+	sort_no INTEGER NOT NULL DEFAULT 0,
+	duration_millis INTEGER NOT NULL DEFAULT 0,
+	started_at INTEGER NULL,
+	finished_at INTEGER NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	UNIQUE(release_order_id, executor_type, pipeline_scope, stage_key)
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_order_pipeline_stage_order_sort ON release_order_pipeline_stage (release_order_id, pipeline_scope, sort_no);`,
 			`CREATE TABLE IF NOT EXISTS release_template (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -223,6 +261,18 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		exists, err = r.mysqlColumnExists(ctx, "release_order", "creator_user_id")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN creator_user_id VARCHAR(64) NOT NULL DEFAULT '' AFTER remark;`,
+			); err != nil {
+				return err
+			}
+		}
 		if _, err = r.db.ExecContext(
 			ctx,
 			`ALTER TABLE release_order MODIFY COLUMN status VARCHAR(50) NOT NULL DEFAULT 'pending';`,
@@ -234,6 +284,21 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			`UPDATE release_order
 SET status = 'pending'
 WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`UPDATE release_order ro
+SET creator_user_id = COALESCE(
+	(SELECT su.id FROM sys_user su WHERE su.display_name = ro.triggered_by ORDER BY su.updated_at DESC LIMIT 1),
+	(SELECT su.id FROM sys_user su WHERE su.username = ro.triggered_by ORDER BY su.updated_at DESC LIMIT 1),
+	creator_user_id
+)
+WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
+  AND ro.triggered_by IS NOT NULL
+  AND TRIM(ro.triggered_by) <> '';`,
 		)
 		return err
 	case "sqlite":
@@ -249,11 +314,34 @@ WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
 				return err
 			}
 		}
+		if _, ok := columns["creator_user_id"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN creator_user_id TEXT NOT NULL DEFAULT '';`,
+			); err != nil {
+				return err
+			}
+		}
 		_, err = r.db.ExecContext(
 			ctx,
 			`UPDATE release_order
 SET status = 'pending'
 WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`UPDATE release_order
+SET creator_user_id = COALESCE(
+	(SELECT su.id FROM sys_user su WHERE su.display_name = release_order.triggered_by ORDER BY su.updated_at DESC LIMIT 1),
+	(SELECT su.id FROM sys_user su WHERE su.username = release_order.triggered_by ORDER BY su.updated_at DESC LIMIT 1),
+	creator_user_id
+)
+WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
+  AND triggered_by IS NOT NULL
+  AND TRIM(triggered_by) <> '';`,
 		)
 		return err
 	default:
@@ -322,8 +410,8 @@ func (r *ReleaseRepository) Create(
 	const insertOrder = `
 INSERT INTO release_order (
 	id, order_no, application_id, application_name, binding_id, pipeline_id, env_code,
-	son_service, git_ref, image_tag, trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -341,6 +429,7 @@ INSERT INTO release_order (
 		string(order.TriggerType),
 		string(order.Status),
 		order.Remark,
+		order.CreatorUserID,
 		order.TriggeredBy,
 		nullableUnixNano(order.StartedAt),
 		nullableUnixNano(order.FinishedAt),
@@ -407,7 +496,7 @@ INSERT INTO release_order_step (
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
 SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
 
@@ -429,10 +518,28 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	if filter.ApplicationID != "" {
 		where = append(where, "application_id = ?")
 		args = append(args, filter.ApplicationID)
+	} else if len(filter.ApplicationIDs) > 0 {
+		placeholders := make([]string, 0, len(filter.ApplicationIDs))
+		for _, item := range filter.ApplicationIDs {
+			value := strings.TrimSpace(item)
+			if value == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, value)
+		}
+		if len(placeholders) == 0 {
+			return []domain.ReleaseOrder{}, 0, nil
+		}
+		where = append(where, "application_id IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if filter.BindingID != "" {
 		where = append(where, "binding_id = ?")
 		args = append(args, filter.BindingID)
+	}
+	if filter.CreatorUserID != "" {
+		where = append(where, "creator_user_id = ?")
+		args = append(args, filter.CreatorUserID)
 	}
 	if filter.EnvCode != "" {
 		where = append(where, "env_code = ?")
@@ -458,7 +565,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 
 	listQuery := `
 SELECT id, order_no, application_id, application_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
 		listQuery += " WHERE " + strings.Join(where, " AND ")
@@ -573,6 +680,110 @@ ORDER BY sort_no ASC, created_at ASC;`
 		return nil, err
 	}
 	return items, nil
+}
+
+func (r *ReleaseRepository) ReplacePipelineStages(
+	ctx context.Context,
+	releaseOrderID string,
+	stages []domain.ReleaseOrderPipelineStage,
+) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_order_pipeline_stage WHERE release_order_id = ?;`, strings.TrimSpace(releaseOrderID)); err != nil {
+		return err
+	}
+
+	const insertStage = `
+INSERT INTO release_order_pipeline_stage (
+	id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	for _, item := range stages {
+		if _, err := tx.ExecContext(
+			ctx,
+			insertStage,
+			item.ID,
+			item.ReleaseOrderID,
+			item.PipelineScope,
+			item.ExecutorType,
+			item.StageKey,
+			item.StageName,
+			string(item.Status),
+			item.RawStatus,
+			item.SortNo,
+			item.DurationMillis,
+			nullableUnixNano(item.StartedAt),
+			nullableUnixNano(item.FinishedAt),
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
+func (r *ReleaseRepository) ListPipelineStages(
+	ctx context.Context,
+	releaseOrderID string,
+) ([]domain.ReleaseOrderPipelineStage, error) {
+	const q = `
+SELECT id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+FROM release_order_pipeline_stage
+WHERE release_order_id = ?
+ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, strings.TrimSpace(releaseOrderID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrderPipelineStage, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrderPipelineStage(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) GetPipelineStageByID(
+	ctx context.Context,
+	releaseOrderID string,
+	stageID string,
+) (domain.ReleaseOrderPipelineStage, error) {
+	const q = `
+SELECT id, release_order_id, pipeline_scope, executor_type, stage_key, stage_name, status, raw_status, sort_no, duration_millis, started_at, finished_at, created_at, updated_at
+FROM release_order_pipeline_stage
+WHERE release_order_id = ? AND id = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, strings.TrimSpace(releaseOrderID), strings.TrimSpace(stageID))
+	item, err := scanReleaseOrderPipelineStage(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ReleaseOrderPipelineStage{}, domain.ErrPipelineStageNotFound
+		}
+		return domain.ReleaseOrderPipelineStage{}, err
+	}
+	return item, nil
 }
 
 func (r *ReleaseRepository) GetStepByCode(
@@ -717,6 +928,20 @@ func (r *ReleaseRepository) ListTemplates(
 	if filter.ApplicationID != "" {
 		where = append(where, "application_id = ?")
 		args = append(args, filter.ApplicationID)
+	} else if len(filter.ApplicationIDs) > 0 {
+		placeholders := make([]string, 0, len(filter.ApplicationIDs))
+		for _, item := range filter.ApplicationIDs {
+			value := strings.TrimSpace(item)
+			if value == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, value)
+		}
+		if len(placeholders) == 0 {
+			return []domain.ReleaseTemplate{}, 0, nil
+		}
+		where = append(where, "application_id IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if filter.BindingID != "" {
 		where = append(where, "binding_id = ?")
@@ -949,6 +1174,7 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		&triggerType,
 		&status,
 		&item.Remark,
+		&item.CreatorUserID,
 		&item.TriggeredBy,
 		&startedAt,
 		&finishedAt,
@@ -1027,6 +1253,49 @@ func scanReleaseOrderStep(s scanner) (domain.ReleaseOrderStep, error) {
 		item.FinishedAt = &t
 	}
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	return item, nil
+}
+
+func scanReleaseOrderPipelineStage(s scanner) (domain.ReleaseOrderPipelineStage, error) {
+	var (
+		item          domain.ReleaseOrderPipelineStage
+		statusRaw     string
+		startedAt     sql.NullInt64
+		finishedAt    sql.NullInt64
+		durationMilli int64
+		createdAt     int64
+		updatedAt     int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&item.PipelineScope,
+		&item.ExecutorType,
+		&item.StageKey,
+		&item.StageName,
+		&statusRaw,
+		&item.RawStatus,
+		&item.SortNo,
+		&durationMilli,
+		&startedAt,
+		&finishedAt,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseOrderPipelineStage{}, err
+	}
+	item.Status = domain.PipelineStageStatus(statusRaw)
+	item.DurationMillis = durationMilli
+	if startedAt.Valid {
+		t := time.Unix(0, startedAt.Int64).UTC()
+		item.StartedAt = &t
+	}
+	if finishedAt.Valid {
+		t := time.Unix(0, finishedAt.Int64).UTC()
+		item.FinishedAt = &t
+	}
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
 }
 

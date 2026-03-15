@@ -150,12 +150,20 @@ WHERE id = ?;`
 }
 
 func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilter) ([]domain.Application, int64, error) {
-	args := make([]any, 0, 3)
+	args := make([]any, 0, 4)
 	builder := strings.Builder{}
 	countBuilder := strings.Builder{}
 	countBuilder.WriteString(`SELECT COUNT(1) FROM applications`)
 
-	where := make([]string, 0, 3)
+	where := make([]string, 0, 4)
+	if len(filter.ApplicationIDs) > 0 {
+		placeholders := make([]string, 0, len(filter.ApplicationIDs))
+		for _, item := range filter.ApplicationIDs {
+			placeholders = append(placeholders, "?")
+			args = append(args, item)
+		}
+		where = append(where, "id IN ("+strings.Join(placeholders, ", ")+")")
+	}
 	if filter.Key != "" {
 		where = append(where, "app_key = ?")
 		args = append(args, filter.Key)

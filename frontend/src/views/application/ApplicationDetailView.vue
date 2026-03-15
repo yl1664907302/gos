@@ -8,7 +8,7 @@ import { getApplicationByID } from '../../api/application'
 import { listReleaseTemplates } from '../../api/release'
 import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
-import { extractHTTPErrorMessage } from '../../utils/http-error'
+import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
 const route = useRoute()
 const router = useRouter()
@@ -90,7 +90,9 @@ async function loadTemplateAvailability() {
     hasActiveTemplate.value = response.total > 0
   } catch (error) {
     hasActiveTemplate.value = false
-    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    if (!isHTTPStatus(error, 403)) {
+      message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    }
   } finally {
     loadingTemplateAvailability.value = false
   }

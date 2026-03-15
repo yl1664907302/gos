@@ -54,13 +54,15 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 	visible TINYINT(1) NOT NULL,
 	editable TINYINT(1) NOT NULL,
 	source_from VARCHAR(50) NOT NULL,
+	status VARCHAR(32) NOT NULL DEFAULT 'active',
 	raw_meta JSON NULL,
 	sort_no INT NOT NULL,
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
 	UNIQUE KEY uq_pipeline_param_unique (pipeline_id, executor_type, executor_param_name),
 	KEY idx_pipeline_param_pipeline_sort (pipeline_id, sort_no),
-	KEY idx_pipeline_param_param_key (param_key)
+	KEY idx_pipeline_param_param_key (param_key),
+	KEY idx_pipeline_param_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		}, nil
 	case "sqlite":
@@ -79,6 +81,7 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 	visible INTEGER NOT NULL,
 	editable INTEGER NOT NULL,
 	source_from TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'active',
 	raw_meta TEXT NOT NULL,
 	sort_no INTEGER NOT NULL,
 	created_at INTEGER NOT NULL,
@@ -87,6 +90,7 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_pipeline_sort ON pipeline_param_def (pipeline_id, sort_no);`,
 			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_param_key ON pipeline_param_def (param_key);`,
+			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_status ON pipeline_param_def (status);`,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported db driver: %s", r.dbDriver)
@@ -96,31 +100,55 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
 	switch r.dbDriver {
 	case "mysql":
-		exists, err := r.mysqlColumnExists(ctx, "pipeline_param_def", "single_select")
-		if err != nil {
-			return err
+		type columnDef struct {
+			name string
+			ddl  string
 		}
-		if exists {
-			return nil
+		additions := []columnDef{
+			{
+				name: "single_select",
+				ddl:  `ALTER TABLE pipeline_param_def ADD COLUMN single_select TINYINT(1) NOT NULL DEFAULT 0 AFTER param_type;`,
+			},
+			{
+				name: "status",
+				ddl:  `ALTER TABLE pipeline_param_def ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' AFTER source_from;`,
+			},
 		}
-		_, err = r.db.ExecContext(
-			ctx,
-			`ALTER TABLE pipeline_param_def ADD COLUMN single_select TINYINT(1) NOT NULL DEFAULT 0 AFTER param_type;`,
-		)
-		return err
+		for _, item := range additions {
+			exists, err := r.mysqlColumnExists(ctx, "pipeline_param_def", item.name)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err := r.db.ExecContext(ctx, item.ddl); err != nil {
+				return err
+			}
+		}
+		return nil
 	case "sqlite":
 		columns, err := r.sqliteTableColumns(ctx, "pipeline_param_def")
 		if err != nil {
 			return err
 		}
-		if _, ok := columns["single_select"]; ok {
-			return nil
+		if _, ok := columns["single_select"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE pipeline_param_def ADD COLUMN single_select INTEGER NOT NULL DEFAULT 0;`,
+			); err != nil {
+				return err
+			}
 		}
-		_, err = r.db.ExecContext(
-			ctx,
-			`ALTER TABLE pipeline_param_def ADD COLUMN single_select INTEGER NOT NULL DEFAULT 0;`,
-		)
-		return err
+		if _, ok := columns["status"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE pipeline_param_def ADD COLUMN status TEXT NOT NULL DEFAULT 'active';`,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
 	}
@@ -171,11 +199,11 @@ func (r *PipelineParamRepository) sqliteTableColumns(ctx context.Context, table 
 func (r *PipelineParamRepository) Upsert(ctx context.Context, items []domain.PipelineParamDef) (int, int, error) {
 	const (
 		updateByKey = `UPDATE pipeline_param_def
-SET param_type = ?, single_select = ?, required = ?, default_value = ?, description = ?, visible = ?, editable = ?, source_from = ?, raw_meta = ?, sort_no = ?, updated_at = ?
+SET param_type = ?, single_select = ?, required = ?, default_value = ?, description = ?, visible = ?, editable = ?, source_from = ?, status = ?, raw_meta = ?, sort_no = ?, updated_at = ?
 WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 		insert = `INSERT INTO pipeline_param_def (
-	id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, raw_meta, sort_no, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	)
 
 	created := 0
@@ -192,6 +220,7 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 			boolToInt(item.Visible),
 			boolToInt(item.Editable),
 			string(item.SourceFrom),
+			string(item.Status),
 			item.RawMeta,
 			item.SortNo,
 			item.UpdatedAt.UTC().UnixNano(),
@@ -227,6 +256,7 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 			boolToInt(item.Visible),
 			boolToInt(item.Editable),
 			string(item.SourceFrom),
+			string(item.Status),
 			item.RawMeta,
 			item.SortNo,
 			item.CreatedAt.UTC().UnixNano(),
@@ -242,6 +272,53 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 		created++
 	}
 	return created, updated, nil
+}
+
+func (r *PipelineParamRepository) MarkMissingInactive(
+	ctx context.Context,
+	executorType domain.ExecutorType,
+	keepIDs []string,
+	updatedAt time.Time,
+) (int, error) {
+	if !executorType.Valid() {
+		return 0, fmt.Errorf("invalid executor type: %s", executorType)
+	}
+
+	query := `UPDATE pipeline_param_def
+SET status = ?, updated_at = ?
+WHERE executor_type = ? AND source_from = ? AND status <> ?`
+	args := []any{
+		string(domain.StatusInactive),
+		updatedAt.UTC().UnixNano(),
+		string(executorType),
+		string(domain.SourceFromSyncJenkins),
+		string(domain.StatusInactive),
+	}
+
+	keep := make([]string, 0, len(keepIDs))
+	for _, id := range keepIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		keep = append(keep, id)
+	}
+	if len(keep) > 0 {
+		query += " AND id NOT IN (" + strings.TrimRight(strings.Repeat("?,", len(keep)), ",") + ")"
+		for _, id := range keep {
+			args = append(args, id)
+		}
+	}
+
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
 }
 
 func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter domain.ListFilter) ([]domain.PipelineParamDef, int64, error) {
@@ -264,6 +341,10 @@ func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter dom
 		where = append(where, "param_key = ?")
 		args = append(args, filter.ParamKey)
 	}
+	if filter.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, string(filter.Status))
+	}
 
 	countQuery := "SELECT COUNT(1) FROM pipeline_param_def WHERE " + strings.Join(where, " AND ")
 	var total int64
@@ -272,8 +353,8 @@ func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter dom
 	}
 
 	listQuery := `
-SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, raw_meta, sort_no, created_at, updated_at
-FROM pipeline_param_def
+SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
+	FROM pipeline_param_def
 WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 
@@ -300,7 +381,7 @@ ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 
 func (r *PipelineParamRepository) GetByID(ctx context.Context, id string) (domain.PipelineParamDef, error) {
 	const q = `
-SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, raw_meta, sort_no, created_at, updated_at
+SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
 FROM pipeline_param_def
 WHERE id = ?;`
 
@@ -354,6 +435,7 @@ func scanPipelineParam(s scanner) (domain.PipelineParamDef, error) {
 		visible      int
 		editable     int
 		sourceFrom   string
+		status       string
 		rawMeta      sql.NullString
 		createdAt    int64
 		updatedAt    int64
@@ -373,6 +455,7 @@ func scanPipelineParam(s scanner) (domain.PipelineParamDef, error) {
 		&visible,
 		&editable,
 		&sourceFrom,
+		&status,
 		&rawMeta,
 		&item.SortNo,
 		&createdAt,
@@ -388,6 +471,10 @@ func scanPipelineParam(s scanner) (domain.PipelineParamDef, error) {
 	item.Visible = visible > 0
 	item.Editable = editable > 0
 	item.SourceFrom = domain.SourceFrom(sourceFrom)
+	item.Status = domain.Status(status)
+	if item.Status == "" {
+		item.Status = domain.StatusActive
+	}
 	item.RawMeta = rawMeta.String
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()

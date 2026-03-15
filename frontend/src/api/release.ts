@@ -3,6 +3,8 @@ import type {
   CreateReleaseOrderPayload,
   ReleaseOrderDataResponse,
   ReleaseOrderListParams,
+  ReleaseOrderPipelineStageListResponse,
+  ReleaseOrderPipelineStageLogResponse,
   ReleaseOrderListResponse,
   ReleaseOrderParamListResponse,
   ReleaseOrderStepListResponse,
@@ -46,6 +48,21 @@ export async function listReleaseOrderParams(id: string): Promise<ReleaseOrderPa
 
 export async function listReleaseOrderSteps(id: string): Promise<ReleaseOrderStepListResponse> {
   const response = await http.get<ReleaseOrderStepListResponse>(`/release-orders/${id}/steps`)
+  return response.data
+}
+
+export async function listReleaseOrderPipelineStages(id: string): Promise<ReleaseOrderPipelineStageListResponse> {
+  const response = await http.get<ReleaseOrderPipelineStageListResponse>(`/release-orders/${id}/pipeline-stages`)
+  return response.data
+}
+
+export async function getReleaseOrderPipelineStageLog(
+  releaseOrderID: string,
+  stageID: string,
+): Promise<ReleaseOrderPipelineStageLogResponse> {
+  const response = await http.get<ReleaseOrderPipelineStageLogResponse>(
+    `/release-orders/${releaseOrderID}/pipeline-stages/${stageID}/log`,
+  )
   return response.data
 }
 

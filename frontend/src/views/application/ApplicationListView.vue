@@ -11,7 +11,7 @@ import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useApplicationListStore } from '../../stores/application-list'
 import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
-import { extractHTTPErrorMessage } from '../../utils/http-error'
+import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
 const router = useRouter()
 const listStore = useApplicationListStore()
@@ -76,7 +76,9 @@ async function loadTemplateAvailability() {
     )
   } catch (error) {
     templateApplicationIDs.value = new Set()
-    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    if (!isHTTPStatus(error, 403)) {
+      message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    }
   } finally {
     loadingTemplateAvailability.value = false
   }

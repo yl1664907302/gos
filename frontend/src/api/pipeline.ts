@@ -1,15 +1,20 @@
 import { http } from './http'
 import type {
   ApplicationPipelineParamListParams,
+  CreateJenkinsRawPipelinePayload,
   CreatePipelineBindingPayload,
   PipelineBindingDataResponse,
   PipelineBindingListParams,
   PipelineBindingListResponse,
+  PipelineConfigXMLDataResponse,
+  PipelineDataResponse,
   PipelineParamDefDataResponse,
   PipelineParamDefListResponse,
+  PipelineOriginalLinkDataResponse,
   PipelineRawScriptDataResponse,
   PipelineListParams,
   PipelineListResponse,
+  UpdateJenkinsRawPipelinePayload,
   UpdatePipelineParamDefPayload,
   UpdatePipelineBindingPayload,
 } from '../types/pipeline'
@@ -21,6 +26,43 @@ export async function listPipelines(params: PipelineListParams): Promise<Pipelin
 
 export async function getPipelineRawScript(id: string): Promise<PipelineRawScriptDataResponse> {
   const response = await http.get<PipelineRawScriptDataResponse>(`/pipelines/${id}/raw-script`)
+  return response.data
+}
+
+export async function getPipelineConfigXML(id: string): Promise<PipelineConfigXMLDataResponse> {
+  const response = await http.get<PipelineConfigXMLDataResponse>(`/pipelines/${id}/config-xml`)
+  return response.data
+}
+
+export async function getPipelineOriginalLink(id: string): Promise<PipelineOriginalLinkDataResponse> {
+  const response = await http.get<PipelineOriginalLinkDataResponse>(`/pipelines/${id}/original-link`)
+  return response.data
+}
+
+export async function createJenkinsRawPipeline(
+  payload: CreateJenkinsRawPipelinePayload,
+): Promise<PipelineDataResponse> {
+  const response = await http.post<PipelineDataResponse>('/jenkins/pipelines/raw', payload)
+  return response.data
+}
+
+export async function updateJenkinsRawPipeline(
+  id: string,
+  payload: UpdateJenkinsRawPipelinePayload,
+): Promise<PipelineDataResponse> {
+  const response = await http.put<PipelineDataResponse>(`/pipelines/${id}/raw`, payload)
+  return response.data
+}
+
+export async function deleteJenkinsRawPipeline(id: string): Promise<PipelineDataResponse> {
+  const response = await http.delete<PipelineDataResponse>(`/pipelines/${id}/raw`)
+  return response.data
+}
+
+export async function previewJenkinsRawPipelineConfigXML(
+  payload: CreateJenkinsRawPipelinePayload,
+): Promise<PipelineConfigXMLDataResponse> {
+  const response = await http.post<PipelineConfigXMLDataResponse>('/jenkins/pipelines/raw/preview-config-xml', payload)
   return response.data
 }
 

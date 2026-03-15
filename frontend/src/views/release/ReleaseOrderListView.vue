@@ -73,7 +73,7 @@ const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '环境', dataIndex: 'env_code', key: 'env_code', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
   { title: '触发方式', dataIndex: 'trigger_type', key: 'trigger_type', width: 130 },
-  { title: '触发人', dataIndex: 'triggered_by', key: 'triggered_by', width: 140 },
+  { title: '创建者', dataIndex: 'triggered_by', key: 'triggered_by', width: 140 },
   { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 190 },
   { title: '结束时间', dataIndex: 'finished_at', key: 'finished_at', width: 190 },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 190 },
@@ -94,6 +94,25 @@ const hasFilter = computed(() => {
 const canCreateRelease = computed(() => authStore.hasPermission('release.create'))
 const canExecuteRelease = computed(() => authStore.hasPermission('release.execute'))
 const canCancelRelease = computed(() => authStore.hasPermission('release.cancel'))
+const canLoadApplications = computed(
+  () => authStore.hasPermission('application.view') || authStore.hasPermission('application.manage'),
+)
+
+function canViewReleaseOrderForApplication(applicationID: string) {
+  const appID = String(applicationID || '').trim()
+  if (!appID) {
+    return false
+  }
+  if (authStore.isAdmin) {
+    return true
+  }
+  return (
+    authStore.hasApplicationPermission('release.view', appID) ||
+    authStore.hasApplicationPermission('release.create', appID) ||
+    authStore.hasApplicationPermission('release.execute', appID) ||
+    authStore.hasApplicationPermission('release.cancel', appID)
+  )
+}
 
 function applyActiveQueryFromFilters() {
   activeQuery.application_id = filters.application_id
@@ -146,6 +165,19 @@ function isRunningStatus(status: ReleaseOrderStatus) {
   return status === 'running'
 }
 
+function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined) {
+  switch (String(triggerType || '').trim().toLowerCase()) {
+    case 'manual':
+      return '手动'
+    case 'webhook':
+      return 'Webhook'
+    case 'schedule':
+      return '定时'
+    default:
+      return triggerType || '-'
+  }
+}
+
 function canCancel(record: ReleaseOrder) {
   return canCancelRelease.value && (record.status === 'pending' || record.status === 'running')
 }
@@ -155,15 +187,21 @@ function canExecute(record: ReleaseOrder) {
 }
 
 async function loadApplicationOptions() {
+  if (!canLoadApplications.value) {
+    applicationOptions.value = []
+    return
+  }
   applicationsLoading.value = true
   try {
     const response = await listApplications({ page: 1, page_size: 100 })
-    applicationOptions.value = response.data.map((item) => ({
-      label: `${item.name} (${item.key})`,
-      value: item.id,
-    }))
+    applicationOptions.value = response.data
+      .filter((item) => canViewReleaseOrderForApplication(item.id))
+      .map((item) => ({
+        label: `${item.name} (${item.key})`,
+        value: item.id,
+      }))
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
+    message.error(extractHTTPErrorMessage(error, '发布应用下拉加载失败'))
   } finally {
     applicationsLoading.value = false
   }
@@ -447,9 +485,9 @@ onBeforeUnmount(() => {
             allow-clear
             placeholder="全部"
             :options="[
-              { label: 'manual', value: 'manual' },
-              { label: 'webhook', value: 'webhook' },
-              { label: 'schedule', value: 'schedule' },
+              { label: '手动', value: 'manual' },
+              { label: 'Webhook', value: 'webhook' },
+              { label: '定时', value: 'schedule' },
             ]"
           />
         </a-form-item>
@@ -487,6 +525,9 @@ onBeforeUnmount(() => {
           </template>
           <template v-else-if="column.key === 'created_at'">
             {{ formatTime(record.created_at) }}
+          </template>
+          <template v-else-if="column.key === 'trigger_type'">
+            {{ triggerTypeText(record.trigger_type) }}
           </template>
           <template v-else-if="column.key === 'actions'">
             <a-space>
@@ -548,10 +589,10 @@ onBeforeUnmount(() => {
           <a-descriptions-item label="发布单号">{{ executePreviewOrder.order_no }}</a-descriptions-item>
           <a-descriptions-item label="应用名称">{{ executePreviewOrder.application_name || '-' }}</a-descriptions-item>
           <a-descriptions-item label="环境">{{ executePreviewOrder.env_code || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="触发方式">{{ executePreviewOrder.trigger_type || '-' }}</a-descriptions-item>
+          <a-descriptions-item label="触发方式">{{ triggerTypeText(executePreviewOrder.trigger_type) }}</a-descriptions-item>
           <a-descriptions-item label="Git 版本">{{ executePreviewOrder.git_ref || '-' }}</a-descriptions-item>
           <a-descriptions-item label="镜像版本">{{ executePreviewOrder.image_tag || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="触发人">{{ executePreviewOrder.triggered_by || '-' }}</a-descriptions-item>
+          <a-descriptions-item label="创建者">{{ executePreviewOrder.triggered_by || '-' }}</a-descriptions-item>
           <a-descriptions-item label="备注">{{ executePreviewOrder.remark || '-' }}</a-descriptions-item>
         </a-descriptions>
 

@@ -8,6 +8,7 @@ import (
 type Repository interface {
 	InitSchema(ctx context.Context) error
 	UpsertPipelines(ctx context.Context, items []Pipeline) (created int, updated int, err error)
+	MarkMissingPipelinesInactive(ctx context.Context, provider Provider, keepIDs []string, updatedAt time.Time) (int, error)
 	ListPipelines(ctx context.Context, filter PipelineListFilter) ([]Pipeline, int64, error)
 	GetPipelineByID(ctx context.Context, id string) (Pipeline, error)
 	MarkPipelineVerified(ctx context.Context, id string, verifiedAt time.Time, updatedAt time.Time) (Pipeline, error)

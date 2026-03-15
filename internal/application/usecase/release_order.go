@@ -11,6 +11,7 @@ import (
 
 	appdomain "gos/internal/domain/application"
 	pipelinedomain "gos/internal/domain/pipeline"
+	pipelineparamdomain "gos/internal/domain/pipelineparam"
 	domain "gos/internal/domain/release"
 )
 
@@ -18,6 +19,7 @@ type ReleaseOrderManager struct {
 	repo         domain.Repository
 	appRepo      appdomain.Repository
 	pipelineRepo pipelinedomain.Repository
+	paramRepo    pipelineparamdomain.Repository
 	jenkins      JenkinsReleaseExecutor
 	now          func() time.Time
 }
@@ -32,6 +34,7 @@ type CreateReleaseOrderInput struct {
 	ImageTag      string
 	TriggerType   domain.TriggerType
 	Remark        string
+	CreatorUserID string
 	TriggeredBy   string
 	Params        []CreateReleaseOrderParamInput
 	Steps         []CreateReleaseOrderStepInput
@@ -51,13 +54,15 @@ type CreateReleaseOrderStepInput struct {
 }
 
 type ListReleaseOrderInput struct {
-	ApplicationID string
-	BindingID     string
-	EnvCode       string
-	Status        domain.OrderStatus
-	TriggerType   domain.TriggerType
-	Page          int
-	PageSize      int
+	ApplicationID  string
+	ApplicationIDs []string
+	CreatorUserID  string
+	BindingID      string
+	EnvCode        string
+	Status         domain.OrderStatus
+	TriggerType    domain.TriggerType
+	Page           int
+	PageSize       int
 }
 
 type FinishReleaseOrderStepInput struct {
@@ -70,18 +75,22 @@ type JenkinsReleaseExecutor interface {
 	GetQueueItem(ctx context.Context, queueURL string) (executableURL string, cancelled bool, why string, err error)
 	AbortQueueItem(ctx context.Context, queueURL string) error
 	AbortBuild(ctx context.Context, buildURL string) error
+	GetBuildStages(ctx context.Context, buildURL string) ([]domain.ReleaseOrderPipelineStage, error)
+	GetBuildStageLog(ctx context.Context, buildURL string, stageKey string) (domain.ReleaseOrderPipelineStageLog, error)
 }
 
 func NewReleaseOrderManager(
 	repo domain.Repository,
 	appRepo appdomain.Repository,
 	pipelineRepo pipelinedomain.Repository,
+	paramRepo pipelineparamdomain.Repository,
 	jenkins JenkinsReleaseExecutor,
 ) *ReleaseOrderManager {
 	return &ReleaseOrderManager{
 		repo:         repo,
 		appRepo:      appRepo,
 		pipelineRepo: pipelineRepo,
+		paramRepo:    paramRepo,
 		jenkins:      jenkins,
 		now: func() time.Time {
 			return time.Now().UTC()
@@ -111,6 +120,15 @@ func (uc *ReleaseOrderManager) Create(
 	if binding.ApplicationID != applicationID {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: binding does not belong to application", ErrInvalidInput)
 	}
+	if strings.TrimSpace(binding.PipelineID) != "" {
+		pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, binding.PipelineID)
+		if err != nil {
+			return domain.ReleaseOrder{}, err
+		}
+		if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
+			return domain.ReleaseOrder{}, err
+		}
+	}
 
 	triggerType := input.TriggerType
 	if triggerType == "" {
@@ -129,7 +147,7 @@ func (uc *ReleaseOrderManager) Create(
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	if err := uc.validateCreateTemplateParams(resolvedTemplateID, templateParams, input.Params); err != nil {
+	if err := uc.validateCreateTemplateParams(ctx, resolvedTemplateID, templateParams, input.Params); err != nil {
 		return domain.ReleaseOrder{}, err
 	}
 	summary := resolveReleaseOrderSummaryFields(input.Params)
@@ -149,6 +167,7 @@ func (uc *ReleaseOrderManager) Create(
 		TriggerType:     triggerType,
 		Status:          domain.OrderStatusPending,
 		Remark:          strings.TrimSpace(input.Remark),
+		CreatorUserID:   strings.TrimSpace(input.CreatorUserID),
 		TriggeredBy:     strings.TrimSpace(input.TriggeredBy),
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -170,6 +189,7 @@ func (uc *ReleaseOrderManager) Create(
 }
 
 func (uc *ReleaseOrderManager) validateCreateTemplateParams(
+	ctx context.Context,
 	templateID string,
 	templateParams []domain.ReleaseTemplateParam,
 	params []CreateReleaseOrderParamInput,
@@ -181,6 +201,15 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 
 	if templateID != "" {
 		for _, item := range templateParams {
+			if uc.paramRepo != nil {
+				paramDef, err := uc.paramRepo.GetByID(ctx, item.PipelineParamDefID)
+				if err != nil {
+					return err
+				}
+				if err := ensureActivePipelineParamDef(paramDef, item.ParamName); err != nil {
+					return err
+				}
+			}
 			key := buildReleaseTemplateParamKey(item.ParamKey, item.ExecutorParamName)
 			rule := releasedTemplateParamRule{
 				ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
@@ -394,14 +423,39 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 	}
 
 	return uc.repo.List(ctx, domain.ListFilter{
-		ApplicationID: input.ApplicationID,
-		BindingID:     input.BindingID,
-		EnvCode:       input.EnvCode,
-		Status:        input.Status,
-		TriggerType:   input.TriggerType,
-		Page:          input.Page,
-		PageSize:      input.PageSize,
+		ApplicationID:  input.ApplicationID,
+		ApplicationIDs: normalizeReleaseApplicationIDs(input.ApplicationIDs),
+		CreatorUserID:  strings.TrimSpace(input.CreatorUserID),
+		BindingID:      input.BindingID,
+		EnvCode:        input.EnvCode,
+		Status:         input.Status,
+		TriggerType:    input.TriggerType,
+		Page:           input.Page,
+		PageSize:       input.PageSize,
 	})
+}
+
+func normalizeReleaseApplicationIDs(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (uc *ReleaseOrderManager) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
@@ -562,6 +616,9 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 
 	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, pipelineID)
 	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
 		return domain.ReleaseOrder{}, err
 	}
 	if pipeline.Provider != pipelinedomain.ProviderJenkins {

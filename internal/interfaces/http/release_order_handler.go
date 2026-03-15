@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +69,8 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 
 	router.GET("/release-orders/:id/params", h.ListParams)
 	router.GET("/release-orders/:id/steps", h.ListSteps)
+	router.GET("/release-orders/:id/pipeline-stages", h.ListPipelineStages)
+	router.GET("/release-orders/:id/pipeline-stages/:stage_id/log", h.GetPipelineStageLog)
 	router.POST("/release-orders/:id/steps/:step_code/start", h.StartStep)
 	router.POST("/release-orders/:id/steps/:step_code/finish", h.FinishStep)
 }
@@ -125,6 +128,7 @@ type ReleaseOrderResponse struct {
 	TriggerType     string     `json:"trigger_type"`
 	Status          string     `json:"status"`
 	Remark          string     `json:"remark"`
+	CreatorUserID   string     `json:"creator_user_id"`
 	TriggeredBy     string     `json:"triggered_by"`
 	StartedAt       *time.Time `json:"started_at"`
 	FinishedAt      *time.Time `json:"finished_at"`
@@ -238,7 +242,8 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		ImageTag:      req.ImageTag,
 		TriggerType:   domain.TriggerType(strings.TrimSpace(req.TriggerType)),
 		Remark:        req.Remark,
-		TriggeredBy:   resolveTriggeredBy(currentUser),
+		CreatorUserID: strings.TrimSpace(currentUser.ID),
+		TriggeredBy:   firstNonEmpty(resolveTriggeredBy(currentUser), req.TriggeredBy),
 		Params:        params,
 		Steps:         steps,
 	})
@@ -266,7 +271,12 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders [get]
 func (h *ReleaseOrderHandler) List(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "release.view", "", "") {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 	page, err := parsePositiveInt(c, "page")
@@ -279,15 +289,33 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	applicationID := strings.TrimSpace(c.Query("application_id"))
+	allowAll, visibleApplicationIDs, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	if !ok {
+		return
+	}
+	if !allowAll {
+		if applicationID != "" {
+			if !containsString(visibleApplicationIDs, applicationID) {
+				writeEmptyReleaseOrderList(c, page, pageSize)
+				return
+			}
+		} else if len(visibleApplicationIDs) == 0 {
+			writeEmptyReleaseOrderList(c, page, pageSize)
+			return
+		}
+	}
 
 	items, total, err := h.manager.List(c.Request.Context(), usecase.ListReleaseOrderInput{
-		ApplicationID: c.Query("application_id"),
-		BindingID:     c.Query("binding_id"),
-		EnvCode:       c.Query("env_code"),
-		Status:        domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
-		TriggerType:   domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
-		Page:          page,
-		PageSize:      pageSize,
+		ApplicationID:  applicationID,
+		ApplicationIDs: resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		CreatorUserID:  resolveReleaseOrderCreatorFilter(currentUser),
+		BindingID:      c.Query("binding_id"),
+		EnvCode:        c.Query("env_code"),
+		Status:         domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
+		TriggerType:    domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
+		Page:           page,
+		PageSize:       pageSize,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -317,12 +345,15 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id} [get]
 func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "release.view", "", "") {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
 		return
 	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, item.ApplicationID, item.CreatorUserID) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
@@ -342,6 +373,9 @@ func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
 	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
 		return
 	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.cancel", existing.ApplicationID) {
@@ -371,6 +405,9 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
 		return
 	}
@@ -394,11 +431,19 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/logs/stream [get]
 func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "release.view", "", "") {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
 		return
 	}
 	if h.logStreamer == nil {
 		c.JSON(http.StatusNotImplemented, gin.H{"error": "log stream is not configured"})
+		return
+	}
+	order, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
 		return
 	}
 
@@ -463,7 +508,15 @@ func (h *ReleaseOrderHandler) StreamLogs(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/params [get]
 func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "release.view", "", "") {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	order, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
 		return
 	}
 	items, err := h.manager.ListParams(c.Request.Context(), c.Param("id"))
@@ -490,7 +543,15 @@ func (h *ReleaseOrderHandler) ListParams(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /release-orders/{id}/steps [get]
 func (h *ReleaseOrderHandler) ListSteps(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "release.view", "", "") {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	order, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
 		return
 	}
 	items, err := h.manager.ListSteps(c.Request.Context(), c.Param("id"))
@@ -523,6 +584,9 @@ func (h *ReleaseOrderHandler) StartStep(c *gin.Context) {
 	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
 		return
 	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
@@ -567,6 +631,9 @@ func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
 		return
 	}
@@ -609,6 +676,7 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		TriggerType:     string(item.TriggerType),
 		Status:          string(item.Status),
 		Remark:          item.Remark,
+		CreatorUserID:   item.CreatorUserID,
 		TriggeredBy:     item.TriggeredBy,
 		StartedAt:       item.StartedAt,
 		FinishedAt:      item.FinishedAt,
@@ -656,6 +724,7 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 		errors.Is(err, pipelinedomain.ErrBindingNotFound),
 		errors.Is(err, domain.ErrOrderNotFound),
 		errors.Is(err, domain.ErrStepNotFound),
+		errors.Is(err, domain.ErrPipelineStageNotFound),
 		errors.Is(err, domain.ErrTemplateNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 
@@ -716,12 +785,209 @@ func ensureReleaseApplicationPermission(
 	)
 }
 
+var releaseOrderDisplayPermissionCodes = []string{
+	"release.view",
+	"release.create",
+	"release.execute",
+	"release.cancel",
+}
+
+func ensureAnyReleaseOrderDisplayPermission(c *gin.Context, authz RequestAuthorizer) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+
+	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	for _, item := range items {
+		if !item.Enabled || !isReleaseOrderDisplayPermission(item.PermissionCode) {
+			continue
+		}
+		scopeType := strings.ToLower(strings.TrimSpace(item.ScopeType))
+		switch scopeType {
+		case "", "global":
+			return true
+		case "application":
+			if strings.TrimSpace(item.ScopeValue) != "" {
+				return true
+			}
+		}
+	}
+
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+	return false
+}
+
+func ensureReleaseOrderVisible(
+	c *gin.Context,
+	authz RequestAuthorizer,
+	applicationID string,
+	creatorUserID string,
+) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+	if strings.TrimSpace(creatorUserID) == "" || strings.TrimSpace(creatorUserID) != strings.TrimSpace(user.ID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+		return false
+	}
+
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+		return false
+	}
+
+	for _, code := range releaseOrderDisplayPermissionCodes {
+		allowed, err := authz.HasPermission(c.Request.Context(), user, code, "application", applicationID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return false
+		}
+		if allowed {
+			return true
+		}
+	}
+
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+	return false
+}
+
+func resolveVisibleReleaseOrderApplicationIDs(
+	c *gin.Context,
+	authz RequestAuthorizer,
+) (allowAll bool, applicationIDs []string, ok bool) {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false, nil, false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false, nil, false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true, nil, true
+	}
+
+	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false, nil, false
+	}
+
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if !isReleaseOrderDisplayPermission(item.PermissionCode) {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
+			continue
+		}
+		applicationID := strings.TrimSpace(item.ScopeValue)
+		if applicationID == "" {
+			continue
+		}
+		if _, exists := seen[applicationID]; exists {
+			continue
+		}
+		seen[applicationID] = struct{}{}
+		result = append(result, applicationID)
+	}
+	sort.Strings(result)
+	return false, result, true
+}
+
+func isReleaseOrderDisplayPermission(code string) bool {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "release.view", "release.create", "release.execute", "release.cancel":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveReleaseListApplicationIDs(applicationID string, allowAll bool, visibleApplicationIDs []string) []string {
+	if allowAll || strings.TrimSpace(applicationID) != "" {
+		return nil
+	}
+	return visibleApplicationIDs
+}
+
+func resolveReleaseOrderCreatorFilter(user userdomain.User) string {
+	if user.Role == userdomain.RoleAdmin {
+		return ""
+	}
+	return strings.TrimSpace(user.ID)
+}
+
+func writeEmptyReleaseOrderList(c *gin.Context, page int, pageSize int) {
+	c.JSON(http.StatusOK, gin.H{
+		"data":      []ReleaseOrderResponse{},
+		"page":      resolvedPage(page),
+		"page_size": resolvedPageSize(pageSize),
+		"total":     0,
+	})
+}
+
+func containsString(items []string, target string) bool {
+	value := strings.TrimSpace(target)
+	if value == "" {
+		return false
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func resolveTriggeredBy(user userdomain.User) string {
 	displayName := strings.TrimSpace(user.DisplayName)
 	if displayName != "" {
 		return displayName
 	}
-	return strings.TrimSpace(user.Username)
+	username := strings.TrimSpace(user.Username)
+	if username != "" {
+		return username
+	}
+	return strings.TrimSpace(user.ID)
 }
 
 func parseNonNegativeInt64Query(c *gin.Context, name string) (int64, error) {

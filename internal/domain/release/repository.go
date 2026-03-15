@@ -21,6 +21,9 @@ type Repository interface {
 	ListParams(ctx context.Context, releaseOrderID string) ([]ReleaseOrderParam, error)
 	ListSteps(ctx context.Context, releaseOrderID string) ([]ReleaseOrderStep, error)
 	GetStepByCode(ctx context.Context, releaseOrderID string, stepCode string) (ReleaseOrderStep, error)
+	ReplacePipelineStages(ctx context.Context, releaseOrderID string, stages []ReleaseOrderPipelineStage) error
+	ListPipelineStages(ctx context.Context, releaseOrderID string) ([]ReleaseOrderPipelineStage, error)
+	GetPipelineStageByID(ctx context.Context, releaseOrderID string, stageID string) (ReleaseOrderPipelineStage, error)
 	UpdateStep(
 		ctx context.Context,
 		releaseOrderID string,
@@ -35,13 +38,15 @@ type Repository interface {
 }
 
 type ListFilter struct {
-	ApplicationID string
-	BindingID     string
-	EnvCode       string
-	Status        OrderStatus
-	TriggerType   TriggerType
-	Page          int
-	PageSize      int
+	ApplicationID  string
+	ApplicationIDs []string
+	CreatorUserID  string
+	BindingID      string
+	EnvCode        string
+	Status         OrderStatus
+	TriggerType    TriggerType
+	Page           int
+	PageSize       int
 }
 
 type StepUpdateInput struct {
@@ -52,9 +57,10 @@ type StepUpdateInput struct {
 }
 
 type TemplateListFilter struct {
-	ApplicationID string
-	BindingID     string
-	Status        TemplateStatus
-	Page          int
-	PageSize      int
+	ApplicationID  string
+	ApplicationIDs []string
+	BindingID      string
+	Status         TemplateStatus
+	Page           int
+	PageSize       int
 }

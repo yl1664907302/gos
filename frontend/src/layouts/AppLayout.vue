@@ -33,7 +33,7 @@ const activeMenuKey = computed(() => {
     return ['pipeline-param-management']
   }
   if (route.path.startsWith('/components/jenkins')) {
-    return ['jenkins-management']
+    return ['jenkins-pipeline-list']
   }
   if (route.path.startsWith('/releases')) {
     return ['release-orders']
@@ -49,7 +49,7 @@ const activeMenuKey = computed(() => {
 
 const openMenuKeys = computed(() => {
   if (route.path.startsWith('/components/')) {
-    return ['component-management']
+    return ['component-management', 'jenkins-management-group']
   }
   if (route.path.startsWith('/releases')) {
     return ['release-management']
@@ -188,12 +188,16 @@ async function handleLogout() {
           </template>
           <template #title>组件管理</template>
 
-          <a-menu-item v-if="canViewComponent" key="jenkins-management" @click="goToJenkinsManagement">
-            Jenkins管理
-          </a-menu-item>
-          <a-menu-item v-if="canManagePipelineParam" key="pipeline-param-management" @click="goToPipelineParamManagement">
-            管线参数
-          </a-menu-item>
+          <a-sub-menu v-if="canViewComponent || canManagePipelineParam" key="jenkins-management-group">
+            <template #title>Jenkins管理</template>
+
+            <a-menu-item v-if="canViewComponent" key="jenkins-pipeline-list" @click="goToJenkinsManagement">
+              管线列表
+            </a-menu-item>
+            <a-menu-item v-if="canManagePipelineParam" key="pipeline-param-management" @click="goToPipelineParamManagement">
+              管线参数
+            </a-menu-item>
+          </a-sub-menu>
         </a-sub-menu>
 
         <a-sub-menu v-if="showReleaseMenu" key="release-management">

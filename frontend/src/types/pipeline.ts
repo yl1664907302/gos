@@ -3,6 +3,7 @@ export type PipelineProvider = 'jenkins' | 'argocd'
 export type BindingType = 'ci' | 'cd'
 export type TriggerMode = 'manual' | 'webhook'
 export type ExecutorType = 'jenkins' | 'argocd' | 'custom'
+export type PipelineParamStatus = 'active' | 'inactive'
 
 export interface Pipeline {
   id: string
@@ -35,16 +36,54 @@ export interface PipelineListResponse {
   total: number
 }
 
+export interface PipelineDataResponse {
+  data: Pipeline
+}
+
 export interface PipelineRawScriptData {
   pipeline: Pipeline
   definition_class: string
+  description: string
   script: string
   script_path: string
+  sandbox: boolean
   from_scm: boolean
 }
 
 export interface PipelineRawScriptDataResponse {
   data: PipelineRawScriptData
+}
+
+export interface PipelineConfigXMLData {
+  pipeline?: Pipeline
+  config_xml: string
+}
+
+export interface PipelineConfigXMLDataResponse {
+  data: PipelineConfigXMLData
+}
+
+export interface PipelineOriginalLinkData {
+  pipeline: Pipeline
+  original_link: string
+}
+
+export interface PipelineOriginalLinkDataResponse {
+  data: PipelineOriginalLinkData
+}
+
+export interface CreateJenkinsRawPipelinePayload {
+  full_name: string
+  description?: string
+  script: string
+  sandbox?: boolean
+}
+
+export interface UpdateJenkinsRawPipelinePayload {
+  full_name?: string
+  description?: string
+  script: string
+  sandbox?: boolean
 }
 
 export interface PipelineBinding {
@@ -114,6 +153,7 @@ export interface PipelineParamDef {
   visible: boolean
   editable: boolean
   source_from: string
+  status: PipelineParamStatus
   raw_meta: string
   sort_no: number
   can_view: boolean
@@ -127,6 +167,7 @@ export interface ApplicationPipelineParamListParams {
   visible?: boolean
   editable?: boolean
   param_key?: string
+  status?: PipelineParamStatus
   page?: number
   page_size?: number
 }

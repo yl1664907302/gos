@@ -24,9 +24,21 @@ type VerifyPipelineOutput struct {
 type PipelineRawScriptOutput struct {
 	Pipeline        domain.Pipeline `json:"pipeline"`
 	DefinitionClass string          `json:"definition_class"`
+	Description     string          `json:"description"`
 	Script          string          `json:"script"`
 	ScriptPath      string          `json:"script_path"`
+	Sandbox         bool            `json:"sandbox"`
 	FromSCM         bool            `json:"from_scm"`
+}
+
+type PipelineConfigXMLOutput struct {
+	Pipeline  domain.Pipeline `json:"pipeline"`
+	ConfigXML string          `json:"config_xml"`
+}
+
+type PipelineOriginalLinkOutput struct {
+	Pipeline     domain.Pipeline `json:"pipeline"`
+	OriginalLink string          `json:"original_link"`
 }
 
 func NewQueryPipeline(repo domain.Repository, jenkins JenkinsPipelineClient) *QueryPipeline {
@@ -127,8 +139,59 @@ func (uc *QueryPipeline) GetRawScript(ctx context.Context, id string) (PipelineR
 	return PipelineRawScriptOutput{
 		Pipeline:        p,
 		DefinitionClass: script.DefinitionClass,
+		Description:     script.Description,
 		Script:          script.Script,
 		ScriptPath:      script.ScriptPath,
+		Sandbox:         script.Sandbox,
 		FromSCM:         script.FromSCM,
+	}, nil
+}
+
+func (uc *QueryPipeline) GetConfigXML(ctx context.Context, id string) (PipelineConfigXMLOutput, error) {
+	if strings.TrimSpace(id) == "" {
+		return PipelineConfigXMLOutput{}, ErrInvalidID
+	}
+
+	p, err := uc.repo.GetPipelineByID(ctx, id)
+	if err != nil {
+		return PipelineConfigXMLOutput{}, err
+	}
+	if p.Provider != domain.ProviderJenkins {
+		return PipelineConfigXMLOutput{}, ErrInvalidProvider
+	}
+	if strings.TrimSpace(p.JobFullName) == "" {
+		return PipelineConfigXMLOutput{}, ErrInvalidInput
+	}
+
+	configXML, err := uc.jenkins.GetPipelineConfigXML(ctx, p.JobFullName)
+	if err != nil {
+		return PipelineConfigXMLOutput{}, err
+	}
+
+	return PipelineConfigXMLOutput{
+		Pipeline:  p,
+		ConfigXML: configXML,
+	}, nil
+}
+
+func (uc *QueryPipeline) GetOriginalLink(ctx context.Context, id string) (PipelineOriginalLinkOutput, error) {
+	if strings.TrimSpace(id) == "" {
+		return PipelineOriginalLinkOutput{}, ErrInvalidID
+	}
+
+	p, err := uc.repo.GetPipelineByID(ctx, id)
+	if err != nil {
+		return PipelineOriginalLinkOutput{}, err
+	}
+	if p.Provider != domain.ProviderJenkins {
+		return PipelineOriginalLinkOutput{}, ErrInvalidProvider
+	}
+	if strings.TrimSpace(p.JobFullName) == "" {
+		return PipelineOriginalLinkOutput{}, ErrInvalidInput
+	}
+
+	return PipelineOriginalLinkOutput{
+		Pipeline:     p,
+		OriginalLink: uc.jenkins.BuildJobURL(p.JobFullName),
 	}, nil
 }

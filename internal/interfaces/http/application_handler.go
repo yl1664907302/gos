@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -171,12 +172,12 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id} [get]
 func (h *ApplicationHandler) GetByID(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "application.view", "", "") {
-		return
-	}
 	app, err := h.query.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeHTTPError(c, err)
+		return
+	}
+	if !ensureApplicationVisible(c, h.authz, app.ID) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": toResponse(app)})
@@ -196,9 +197,6 @@ func (h *ApplicationHandler) GetByID(c *gin.Context) {
 // @Failure      500     {object}  ErrorResponse
 // @Router       /applications [get]
 func (h *ApplicationHandler) List(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "application.view", "", "") {
-		return
-	}
 	page, err := parsePositiveIntQuery(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -210,12 +208,27 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 		return
 	}
 
+	allowAll, visibleApplicationIDs, ok := resolveVisibleApplicationIDsForApplications(c, h.authz)
+	if !ok {
+		return
+	}
+	if !allowAll && len(visibleApplicationIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"data":      []ApplicationResponse{},
+			"page":      resolvePage(page),
+			"page_size": resolvePageSize(pageSize),
+			"total":     0,
+		})
+		return
+	}
+
 	apps, total, err := h.query.List(c.Request.Context(), domain.ListFilter{
-		Key:      c.Query("key"),
-		Name:     c.Query("name"),
-		Status:   domain.Status(strings.TrimSpace(c.Query("status"))),
-		Page:     page,
-		PageSize: pageSize,
+		Key:            c.Query("key"),
+		Name:           c.Query("name"),
+		Status:         domain.Status(strings.TrimSpace(c.Query("status"))),
+		ApplicationIDs: resolveApplicationFilterIDs(strings.TrimSpace(c.Query("application_id")), allowAll, visibleApplicationIDs),
+		Page:           page,
+		PageSize:       pageSize,
 	})
 	if err != nil {
 		writeHTTPError(c, err)
@@ -232,6 +245,118 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 		"page_size": resolvePageSize(pageSize),
 		"total":     total,
 	})
+}
+
+func ensureApplicationVisible(c *gin.Context, authz RequestAuthorizer, applicationID string) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+
+	manageAllowed, err := authz.HasPermission(c.Request.Context(), user, "application.manage", "", "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	if manageAllowed {
+		return true
+	}
+
+	allowed, err := authz.HasPermission(c.Request.Context(), user, "application.view", "application", strings.TrimSpace(applicationID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	if !allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+		return false
+	}
+	return true
+}
+
+func resolveVisibleApplicationIDsForApplications(
+	c *gin.Context,
+	authz RequestAuthorizer,
+) (allowAll bool, applicationIDs []string, ok bool) {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false, nil, false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false, nil, false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true, nil, true
+	}
+
+	manageAllowed, err := authz.HasPermission(c.Request.Context(), user, "application.manage", "", "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false, nil, false
+	}
+	if manageAllowed {
+		return true, nil, true
+	}
+
+	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false, nil, false
+	}
+
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "application.view" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
+			continue
+		}
+		applicationID := strings.TrimSpace(item.ScopeValue)
+		if applicationID == "" {
+			continue
+		}
+		if _, exists := seen[applicationID]; exists {
+			continue
+		}
+		seen[applicationID] = struct{}{}
+		result = append(result, applicationID)
+	}
+	sort.Strings(result)
+	return false, result, true
+}
+
+func resolveApplicationFilterIDs(applicationID string, allowAll bool, visibleApplicationIDs []string) []string {
+	applicationID = strings.TrimSpace(applicationID)
+	if allowAll {
+		if applicationID == "" {
+			return nil
+		}
+		return []string{applicationID}
+	}
+	if applicationID != "" {
+		for _, item := range visibleApplicationIDs {
+			if strings.TrimSpace(item) == applicationID {
+				return []string{applicationID}
+			}
+		}
+		return []string{"__none__"}
+	}
+	return visibleApplicationIDs
 }
 
 // Update godoc

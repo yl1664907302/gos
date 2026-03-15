@@ -420,6 +420,50 @@ WHERE provider = ? AND job_full_name = ?;`
 	return created, updated, nil
 }
 
+func (r *PipelineRepository) MarkMissingPipelinesInactive(
+	ctx context.Context,
+	provider domain.Provider,
+	keepIDs []string,
+	updatedAt time.Time,
+) (int, error) {
+	if !provider.Valid() {
+		return 0, fmt.Errorf("invalid pipeline provider: %s", provider)
+	}
+
+	query := `UPDATE pipelines SET status = ?, updated_at = ? WHERE provider = ? AND status <> ?`
+	args := []any{
+		string(domain.StatusInactive),
+		updatedAt.UTC().UnixNano(),
+		string(provider),
+		string(domain.StatusInactive),
+	}
+
+	keep := make([]string, 0, len(keepIDs))
+	for _, id := range keepIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		keep = append(keep, id)
+	}
+	if len(keep) > 0 {
+		query += " AND id NOT IN (" + strings.TrimRight(strings.Repeat("?,", len(keep)), ",") + ")"
+		for _, id := range keep {
+			args = append(args, id)
+		}
+	}
+
+	res, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
 func (r *PipelineRepository) ListPipelines(ctx context.Context, filter domain.PipelineListFilter) ([]domain.Pipeline, int64, error) {
 	where := make([]string, 0, 3)
 	args := make([]any, 0, 3)

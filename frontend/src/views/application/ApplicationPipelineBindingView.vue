@@ -26,7 +26,7 @@ import type {
   PipelineStatus,
   TriggerMode,
 } from '../../types/pipeline'
-import { extractHTTPErrorMessage } from '../../utils/http-error'
+import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
 type FormMode = 'create' | 'edit'
 
@@ -235,7 +235,9 @@ async function loadTemplateAvailability() {
     )
   } catch (error) {
     activeTemplateBindingIDs.value = new Set()
-    message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    if (!isHTTPStatus(error, 403)) {
+      message.error(extractHTTPErrorMessage(error, '发布模板状态加载失败'))
+    }
   } finally {
     loadingTemplateAvailability.value = false
   }

@@ -18,6 +18,7 @@ type PipelineHandler struct {
 	syncer  *usecase.SyncPipelines
 	query   *usecase.QueryPipeline
 	binding *usecase.PipelineBindingManager
+	manager *usecase.JenkinsPipelineManager
 	authz   RequestAuthorizer
 }
 
@@ -25,21 +26,29 @@ func NewPipelineHandler(
 	syncer *usecase.SyncPipelines,
 	query *usecase.QueryPipeline,
 	binding *usecase.PipelineBindingManager,
+	manager *usecase.JenkinsPipelineManager,
 	authz RequestAuthorizer,
 ) *PipelineHandler {
 	return &PipelineHandler{
 		syncer:  syncer,
 		query:   query,
 		binding: binding,
+		manager: manager,
 		authz:   authz,
 	}
 }
 
 func (h *PipelineHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/jenkins/pipelines/sync", h.Sync)
+	router.POST("/jenkins/pipelines/raw", h.CreateRawPipeline)
+	router.POST("/jenkins/pipelines/raw/preview-config-xml", h.PreviewRawPipelineConfigXML)
 	router.GET("/pipelines", h.ListPipelines)
 	router.GET("/pipelines/:id", h.GetPipelineByID)
+	router.GET("/pipelines/:id/original-link", h.GetPipelineOriginalLink)
+	router.GET("/pipelines/:id/config-xml", h.GetPipelineConfigXML)
 	router.GET("/pipelines/:id/raw-script", h.GetPipelineRawScript)
+	router.PUT("/pipelines/:id/raw", h.UpdateRawPipeline)
+	router.DELETE("/pipelines/:id/raw", h.DeleteRawPipeline)
 	router.POST("/pipelines/:id/verify", h.VerifyPipeline)
 
 	router.POST("/applications/:id/pipeline-bindings", h.CreateBinding)
@@ -73,9 +82,25 @@ type PipelineRawScriptDataResponse struct {
 	Data struct {
 		Pipeline        PipelineResponse `json:"pipeline"`
 		DefinitionClass string           `json:"definition_class"`
+		Description     string           `json:"description"`
 		Script          string           `json:"script"`
 		ScriptPath      string           `json:"script_path"`
+		Sandbox         bool             `json:"sandbox"`
 		FromSCM         bool             `json:"from_scm"`
+	} `json:"data"`
+}
+
+type PipelineConfigXMLDataResponse struct {
+	Data struct {
+		Pipeline  PipelineResponse `json:"pipeline"`
+		ConfigXML string           `json:"config_xml"`
+	} `json:"data"`
+}
+
+type PipelineOriginalLinkDataResponse struct {
+	Data struct {
+		Pipeline     PipelineResponse `json:"pipeline"`
+		OriginalLink string           `json:"original_link"`
 	} `json:"data"`
 }
 
@@ -97,6 +122,26 @@ type VerifyPipelineResponse struct {
 
 type SyncPipelinesResponse struct {
 	Data usecase.SyncPipelinesOutput `json:"data"`
+}
+
+type CreateRawPipelineRequest struct {
+	FullName    string `json:"full_name"`
+	Description string `json:"description"`
+	Script      string `json:"script"`
+	Sandbox     *bool  `json:"sandbox"`
+}
+
+type UpdateRawPipelineRequest struct {
+	Description string `json:"description"`
+	Script      string `json:"script"`
+	Sandbox     *bool  `json:"sandbox"`
+}
+
+type PreviewRawPipelineConfigXMLRequest struct {
+	FullName    string `json:"full_name"`
+	Description string `json:"description"`
+	Script      string `json:"script"`
+	Sandbox     *bool  `json:"sandbox"`
 }
 
 type CreateBindingRequest struct {
@@ -261,11 +306,159 @@ func (h *PipelineHandler) GetPipelineRawScript(c *gin.Context) {
 		"data": gin.H{
 			"pipeline":         toPipelineResponse(result.Pipeline),
 			"definition_class": result.DefinitionClass,
+			"description":      result.Description,
 			"script":           result.Script,
 			"script_path":      result.ScriptPath,
+			"sandbox":          result.Sandbox,
 			"from_scm":         result.FromSCM,
 		},
 	})
+}
+
+func (h *PipelineHandler) GetPipelineConfigXML(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.view", "", "") {
+		return
+	}
+	result, err := h.query.GetConfigXML(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"pipeline":   toPipelineResponse(result.Pipeline),
+			"config_xml": result.ConfigXML,
+		},
+	})
+}
+
+func (h *PipelineHandler) GetPipelineOriginalLink(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.view", "", "") {
+		return
+	}
+	result, err := h.query.GetOriginalLink(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"pipeline":      toPipelineResponse(result.Pipeline),
+			"original_link": result.OriginalLink,
+		},
+	})
+}
+
+func (h *PipelineHandler) CreateRawPipeline(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pipeline manager is not configured"})
+		return
+	}
+
+	var req CreateRawPipelineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	sandbox := true
+	if req.Sandbox != nil {
+		sandbox = *req.Sandbox
+	}
+	item, err := h.manager.CreateRaw(c.Request.Context(), usecase.CreateJenkinsRawPipelineInput{
+		FullName:    req.FullName,
+		Description: req.Description,
+		Script:      req.Script,
+		Sandbox:     sandbox,
+	})
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": toPipelineResponse(item)})
+}
+
+func (h *PipelineHandler) UpdateRawPipeline(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pipeline manager is not configured"})
+		return
+	}
+
+	var req UpdateRawPipelineRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	sandbox := true
+	if req.Sandbox != nil {
+		sandbox = *req.Sandbox
+	}
+	item, err := h.manager.UpdateRaw(c.Request.Context(), c.Param("id"), usecase.UpdateJenkinsRawPipelineInput{
+		Description: req.Description,
+		Script:      req.Script,
+		Sandbox:     sandbox,
+	})
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": toPipelineResponse(item)})
+}
+
+func (h *PipelineHandler) DeleteRawPipeline(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pipeline manager is not configured"})
+		return
+	}
+
+	item, err := h.manager.DeleteRaw(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": toPipelineResponse(item)})
+}
+
+func (h *PipelineHandler) PreviewRawPipelineConfigXML(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "pipeline.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "pipeline manager is not configured"})
+		return
+	}
+
+	var req PreviewRawPipelineConfigXMLRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	sandbox := true
+	if req.Sandbox != nil {
+		sandbox = *req.Sandbox
+	}
+	configXML, err := h.manager.PreviewRawConfigXML(c.Request.Context(), usecase.PreviewJenkinsRawPipelineConfigInput{
+		FullName:    req.FullName,
+		Description: req.Description,
+		Script:      req.Script,
+		Sandbox:     sandbox,
+	})
+	if err != nil {
+		writePipelineHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"config_xml": configXML}})
 }
 
 // VerifyPipeline godoc
@@ -353,15 +546,7 @@ func (h *PipelineHandler) CreateBinding(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id}/pipeline-bindings [get]
 func (h *PipelineHandler) ListBindings(c *gin.Context) {
-	if !ensureAnyPermission(
-		c,
-		h.authz,
-		"pipeline.view",
-		"release.view",
-		"release.create",
-		"release.execute",
-		"release.cancel",
-	) {
+	if !ensurePipelineBindingListPermission(c, h.authz, c.Param("id")) {
 		return
 	}
 	page, err := parsePositiveInt(c, "page")
@@ -398,6 +583,36 @@ func (h *PipelineHandler) ListBindings(c *gin.Context) {
 		"page_size": resolvedPageSize(pageSize),
 		"total":     total,
 	})
+}
+
+func ensurePipelineBindingListPermission(c *gin.Context, authz RequestAuthorizer, applicationID string) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+	allowed, err := authz.HasPermission(c.Request.Context(), user, "pipeline.view", "", "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	if allowed {
+		return true
+	}
+	return ensureAnyApplicationPermission(
+		c,
+		authz,
+		applicationID,
+		"application.view",
+		"release.view",
+		"release.create",
+		"release.execute",
+		"release.cancel",
+	)
 }
 
 // GetBindingByID godoc

@@ -105,7 +105,15 @@ type JenkinsJob struct {
 
 type JenkinsPipelineScript struct {
 	DefinitionClass string
+	Description     string
 	Script          string
 	ScriptPath      string
+	Sandbox         bool
 	FromSCM         bool
+}
+
+type JenkinsRawPipelineConfig struct {
+	Description string
+	Script      string
+	Sandbox     bool
 }

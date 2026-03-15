@@ -12,6 +12,7 @@ import (
 
 var queueURLPattern = regexp.MustCompile(`queue:\s*([^\s]+)`)
 var buildURLPattern = regexp.MustCompile(`build:\s*([^\s]+)`)
+var rawURLPattern = regexp.MustCompile(`https?://[^\s]+`)
 
 type JenkinsReleaseStatusClient interface {
 	GetQueueItem(ctx context.Context, queueURL string) (executableURL string, cancelled bool, why string, err error)
@@ -157,6 +158,10 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		}
 	}
 
+	if binding, bindingErr := uc.manager.pipelineRepo.GetBindingByID(ctx, order.BindingID); bindingErr == nil {
+		_, _ = uc.manager.refreshPipelineStages(ctx, order, binding)
+	}
+
 	building, result, statusErr := uc.jenkins.GetBuildStatus(ctx, buildURL)
 	if statusErr != nil {
 		if isResourceNotFoundError(statusErr) {
@@ -185,7 +190,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 
 	switch result {
 	case "SUCCESS":
-		updated1, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusSuccess, "Jenkins 构建成功: "+buildURL)
+		updated1, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusSuccess, messageWithBuildURL("Jenkins 构建成功", buildURL))
 		if err != nil {
 			return false, false, err
 		}
@@ -195,7 +200,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		}
 		return updated1 || updated2, false, nil
 	case "FAILURE", "ABORTED", "UNSTABLE", "NOT_BUILT":
-		updated, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, "Jenkins 结果: "+result)
+		updated, err := uc.finishStep(ctx, order.ID, "pipeline_running", domain.StepStatusFailed, messageWithBuildURL("Jenkins 结果: "+result, buildURL))
 		return updated, false, err
 	default:
 		return false, false, nil
@@ -341,11 +346,38 @@ func extractQueueURL(message string) string {
 func extractBuildURL(message string) string {
 	matches := buildURLPattern.FindStringSubmatch(strings.TrimSpace(message))
 	if len(matches) < 2 {
+		for _, candidate := range rawURLPattern.FindAllString(strings.TrimSpace(message), -1) {
+			buildURL := strings.TrimSpace(candidate)
+			buildURL = strings.TrimRight(buildURL, "，,;；")
+			lowerURL := strings.ToLower(buildURL)
+			if strings.Contains(lowerURL, "/queue/item/") {
+				continue
+			}
+			if strings.Contains(lowerURL, "/job/") {
+				return buildURL
+			}
+		}
 		return ""
 	}
 	buildURL := strings.TrimSpace(matches[1])
 	buildURL = strings.TrimRight(buildURL, "，,;；")
 	return buildURL
+}
+
+func messageWithBuildURL(message string, buildURL string) string {
+	message = strings.TrimSpace(message)
+	buildURL = strings.TrimSpace(buildURL)
+	if buildURL == "" {
+		return message
+	}
+	if extracted := extractBuildURL(message); extracted != "" {
+		return message
+	}
+	message = strings.TrimRight(message, "，,;； ")
+	if message == "" {
+		return "build: " + buildURL
+	}
+	return message + "，build: " + buildURL
 }
 
 func isResourceNotFoundError(err error) bool {

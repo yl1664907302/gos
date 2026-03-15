@@ -242,6 +242,7 @@ async function loadSelectableParams() {
   try {
     const response = await listApplicationPipelineParamDefs(formState.application_id, {
       binding_type: selectedBinding.value.binding_type as 'ci' | 'cd',
+      status: 'active',
       page: 1,
       page_size: 200,
     })

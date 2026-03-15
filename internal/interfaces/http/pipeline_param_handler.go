@@ -74,6 +74,7 @@ type PipelineParamDefResponse struct {
 	Visible           bool      `json:"visible"`
 	Editable          bool      `json:"editable"`
 	SourceFrom        string    `json:"source_from"`
+	Status            string    `json:"status"`
 	RawMeta           string    `json:"raw_meta"`
 	SortNo            int       `json:"sort_no"`
 	CanView           bool      `json:"can_view"`
@@ -143,6 +144,7 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 			Visible:  visible,
 			Editable: editable,
 			ParamKey: c.Query("param_key"),
+			Status:   domain.Status(strings.TrimSpace(c.Query("status"))),
 			Page:     page,
 			PageSize: pageSize,
 		},
@@ -285,6 +287,7 @@ func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
 		Visible:      visible,
 		Editable:     editable,
 		ParamKey:     c.Query("param_key"),
+		Status:       domain.Status(strings.TrimSpace(c.Query("status"))),
 		Page:         page,
 		PageSize:     pageSize,
 	})
@@ -400,6 +403,7 @@ func toPipelineParamResponse(item domain.PipelineParamDef) PipelineParamDefRespo
 		Visible:           item.Visible,
 		Editable:          item.Editable,
 		SourceFrom:        string(item.SourceFrom),
+		Status:            string(item.Status),
 		RawMeta:           item.RawMeta,
 		SortNo:            item.SortNo,
 		CanView:           item.Visible,
@@ -413,6 +417,7 @@ func writePipelineParamHTTPError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, usecase.ErrInvalidInput),
 		errors.Is(err, usecase.ErrInvalidID),
+		errors.Is(err, usecase.ErrInvalidStatus),
 		errors.Is(err, usecase.ErrInvalidParamKey),
 		errors.Is(err, usecase.ErrInvalidExecutorType),
 		errors.Is(err, usecase.ErrInvalidBindingType):

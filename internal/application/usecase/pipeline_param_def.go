@@ -48,13 +48,20 @@ func (uc *PipelineParamDefManager) ListByPipeline(ctx context.Context, filter do
 	if filter.PipelineID == "" {
 		return nil, 0, ErrInvalidID
 	}
-	if _, err := uc.pipelineRepo.GetPipelineByID(ctx, filter.PipelineID); err != nil {
+	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, filter.PipelineID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := ensureActivePipelineRecord(pipeline, "当前管线"); err != nil {
 		return nil, 0, err
 	}
 	if filter.ExecutorType != "" && !filter.ExecutorType.Valid() {
 		return nil, 0, ErrInvalidExecutorType
 	}
 	filter.ParamKey = strings.TrimSpace(filter.ParamKey)
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, 0, ErrInvalidStatus
+	}
 	if filter.Page <= 0 {
 		filter.Page = defaultPage
 	}
@@ -108,6 +115,13 @@ func (uc *PipelineParamDefManager) ListByApplication(
 	}
 	if strings.TrimSpace(binding.PipelineID) == "" {
 		return nil, 0, fmt.Errorf("%w: bound pipeline id is empty", ErrInvalidInput)
+	}
+	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, binding.PipelineID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
+		return nil, 0, err
 	}
 
 	filter.PipelineID = binding.PipelineID

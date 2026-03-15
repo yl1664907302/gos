@@ -21,10 +21,11 @@ type SyncPipelineParamDefs struct {
 }
 
 type SyncPipelineParamDefsOutput struct {
-	Total   int `json:"total"`
-	Created int `json:"created"`
-	Updated int `json:"updated"`
-	Skipped int `json:"skipped"`
+	Total       int `json:"total"`
+	Created     int `json:"created"`
+	Updated     int `json:"updated"`
+	Inactivated int `json:"inactivated"`
+	Skipped     int `json:"skipped"`
 }
 
 func NewSyncPipelineParamDefs(repo domain.Repository, jenkins JenkinsPipelineParamClient) *SyncPipelineParamDefs {
@@ -94,6 +95,7 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 				Visible:           true,
 				Editable:          true,
 				SourceFrom:        domain.SourceFromSyncJenkins,
+				Status:            domain.StatusActive,
 				RawMeta:           strings.TrimSpace(snapshot.RawMeta),
 				SortNo:            sortNo,
 				CreatedAt:         now,
@@ -106,12 +108,21 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 	if err != nil {
 		return SyncPipelineParamDefsOutput{}, err
 	}
+	keepIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		keepIDs = append(keepIDs, item.ID)
+	}
+	inactivated, err := uc.repo.MarkMissingInactive(ctx, domain.ExecutorTypeJenkins, keepIDs, now)
+	if err != nil {
+		return SyncPipelineParamDefsOutput{}, err
+	}
 
 	return SyncPipelineParamDefsOutput{
-		Total:   len(items),
-		Created: created,
-		Updated: updated,
-		Skipped: skipped,
+		Total:       len(items),
+		Created:     created,
+		Updated:     updated,
+		Inactivated: inactivated,
+		Skipped:     skipped,
 	}, nil
 }
 

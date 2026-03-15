@@ -53,6 +53,22 @@ func (s SourceFrom) Valid() bool {
 	}
 }
 
+type Status string
+
+const (
+	StatusActive   Status = "active"
+	StatusInactive Status = "inactive"
+)
+
+func (s Status) Valid() bool {
+	switch s {
+	case StatusActive, StatusInactive:
+		return true
+	default:
+		return false
+	}
+}
+
 type PipelineParamDef struct {
 	ID                string
 	PipelineID        string
@@ -67,6 +83,7 @@ type PipelineParamDef struct {
 	Visible           bool
 	Editable          bool
 	SourceFrom        SourceFrom
+	Status            Status
 	RawMeta           string
 	SortNo            int
 	CreatedAt         time.Time

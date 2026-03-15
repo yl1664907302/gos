@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -119,7 +120,8 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 }
 
 func (h *ReleaseTemplateHandler) List(c *gin.Context) {
-	if !h.ensureListPermission(c) {
+	allowAll, applicationIDs, ok := h.resolveListApplications(c)
+	if !ok {
 		return
 	}
 	page, err := parsePositiveInt(c, "page")
@@ -133,11 +135,12 @@ func (h *ReleaseTemplateHandler) List(c *gin.Context) {
 		return
 	}
 	items, total, err := h.manager.List(c.Request.Context(), usecase.ListReleaseTemplateInput{
-		ApplicationID: c.Query("application_id"),
-		BindingID:     c.Query("binding_id"),
-		Status:        releasedomain.TemplateStatus(strings.TrimSpace(c.Query("status"))),
-		Page:          page,
-		PageSize:      pageSize,
+		ApplicationID:  c.Query("application_id"),
+		ApplicationIDs: resolveReleaseTemplateListFilterApplications(strings.TrimSpace(c.Query("application_id")), allowAll, applicationIDs),
+		BindingID:      c.Query("binding_id"),
+		Status:         releasedomain.TemplateStatus(strings.TrimSpace(c.Query("status"))),
+		Page:           page,
+		PageSize:       pageSize,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -205,42 +208,68 @@ func (h *ReleaseTemplateHandler) Delete(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func (h *ReleaseTemplateHandler) ensureListPermission(c *gin.Context) bool {
+func (h *ReleaseTemplateHandler) resolveListApplications(c *gin.Context) (allowAll bool, applicationIDs []string, ok bool) {
 	user, ok := getCurrentUser(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return false
+		return false, nil, false
 	}
 	if user.Role == userdomain.RoleAdmin {
-		return true
+		return true, nil, true
 	}
 	if h.authz == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
-		return false
+		return false, nil, false
 	}
 	manageAllowed, err := h.authz.HasPermission(c.Request.Context(), user, "release.template.manage", "", "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		return false
+		return false, nil, false
 	}
 	if manageAllowed {
-		return true
+		return true, nil, true
 	}
 	applicationID := strings.TrimSpace(c.Query("application_id"))
-	if applicationID == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-		return false
+	if applicationID != "" {
+		allowed, err := h.authz.HasPermission(c.Request.Context(), user, "release.create", "application", applicationID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return false, nil, false
+		}
+		if !allowed {
+			c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+			return false, nil, false
+		}
+		return false, nil, true
 	}
-	allowed, err := h.authz.HasPermission(c.Request.Context(), user, "release.create", "application", applicationID)
+
+	items, err := h.authz.ListEffectivePermissions(c.Request.Context(), user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		return false
+		return false, nil, false
 	}
-	if !allowed {
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-		return false
+
+	seen := make(map[string]struct{})
+	result := make([]string, 0)
+	for _, item := range items {
+		if !item.Enabled || strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "release.create" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
+			continue
+		}
+		value := strings.TrimSpace(item.ScopeValue)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
 	}
-	return true
+	sort.Strings(result)
+	return false, result, true
 }
 
 func (h *ReleaseTemplateHandler) ensureTemplateAccess(c *gin.Context, template releasedomain.ReleaseTemplate) bool {
@@ -270,6 +299,28 @@ func (h *ReleaseTemplateHandler) ensureTemplateAccess(c *gin.Context, template r
 		return false
 	}
 	return true
+}
+
+func resolveReleaseTemplateListFilterApplications(
+	applicationID string,
+	allowAll bool,
+	visibleApplicationIDs []string,
+) []string {
+	if allowAll || strings.TrimSpace(applicationID) != "" {
+		return nil
+	}
+	if len(visibleApplicationIDs) == 0 {
+		return []string{}
+	}
+	result := make([]string, 0, len(visibleApplicationIDs))
+	for _, item := range visibleApplicationIDs {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		result = append(result, value)
+	}
+	return result
 }
 
 func toReleaseTemplateResponse(item releasedomain.ReleaseTemplate) ReleaseTemplateResponse {

@@ -14,6 +14,7 @@ const currentUserContextKey = "current_user"
 
 type RequestAuthorizer interface {
 	HasPermission(ctx context.Context, user userdomain.User, permissionCode string, scopeType string, scopeValue string) (bool, error)
+	ListEffectivePermissions(ctx context.Context, user userdomain.User) ([]userdomain.UserPermission, error)
 }
 
 func setCurrentUser(c *gin.Context, user userdomain.User) {
@@ -103,6 +104,36 @@ func ensureAnyPermission(
 	}
 	for _, code := range permissionCodes {
 		allowed, err := authz.HasPermission(c.Request.Context(), user, strings.TrimSpace(code), "", "")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return false
+		}
+		if allowed {
+			return true
+		}
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+	return false
+}
+
+func ensureAnyApplicationPermission(
+	c *gin.Context,
+	authz RequestAuthorizer,
+	applicationID string,
+	permissionCodes ...string,
+) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+	appID := strings.TrimSpace(applicationID)
+	for _, code := range permissionCodes {
+		allowed, err := authz.HasPermission(c.Request.Context(), user, strings.TrimSpace(code), "application", appID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 			return false

@@ -103,6 +103,7 @@ func main() {
 		syncPipelines,
 		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
 		usecase.NewPipelineBindingManager(pipelineRepo, repo),
+		usecase.NewJenkinsPipelineManager(pipelineRepo, jenkinsClient, syncPipelines, syncPipelineParamDefs),
 		authSessionManager,
 	)
 	platformParamHandler := httpapi.NewPlatformParamHandler(
@@ -115,7 +116,7 @@ func main() {
 		authSessionManager,
 		authSessionManager,
 	)
-	releaseOrderManager := usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, jenkinsClient)
+	releaseOrderManager := usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, pipelineParamRepo, jenkinsClient)
 	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, pipelineRepo, pipelineParamRepo, platformParamRepo)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
@@ -139,10 +140,11 @@ func main() {
 			return err
 		}
 		log.Printf(
-			"jenkins auto sync completed: total=%d created=%d updated=%d skipped=%d",
+			"jenkins auto sync completed: total=%d created=%d updated=%d inactivated=%d skipped=%d",
 			pipelineResult.Total,
 			pipelineResult.Created,
 			pipelineResult.Updated,
+			pipelineResult.Inactivated,
 			pipelineResult.Skipped,
 		)
 
@@ -151,10 +153,11 @@ func main() {
 			return err
 		}
 		log.Printf(
-			"jenkins param auto sync completed: total=%d created=%d updated=%d skipped=%d",
+			"jenkins param auto sync completed: total=%d created=%d updated=%d inactivated=%d skipped=%d",
 			paramResult.Total,
 			paramResult.Created,
 			paramResult.Updated,
+			paramResult.Inactivated,
 			paramResult.Skipped,
 		)
 		return nil

@@ -17,6 +17,7 @@ import (
 
 	domain "gos/internal/domain/pipeline"
 	pipelineparamdomain "gos/internal/domain/pipelineparam"
+	releasedomain "gos/internal/domain/release"
 )
 
 type Config struct {
@@ -63,7 +64,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]domain.JenkinsJob, error) {
 	}
 
 	result := make([]domain.JenkinsJob, 0)
-	flattenJenkinsJobs("", resp.Jobs, &result)
+	flattenJenkinsJobs(c.baseURL, "", resp.Jobs, &result)
 	return result, nil
 }
 
@@ -88,8 +89,16 @@ func (c *Client) GetJob(ctx context.Context, fullName string) (domain.JenkinsJob
 	return domain.JenkinsJob{
 		Name:     resp.Name,
 		FullName: fullName,
-		URL:      resp.URL,
+		URL:      c.BuildJobURL(fullName),
 	}, nil
+}
+
+func (c *Client) BuildJobURL(fullName string) string {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return ""
+	}
+	return c.baseURL + buildJenkinsJobPath(fullName) + "/"
 }
 
 func (c *Client) GetPipelineScript(ctx context.Context, fullName string) (domain.JenkinsPipelineScript, error) {
@@ -98,21 +107,21 @@ func (c *Client) GetPipelineScript(ctx context.Context, fullName string) (domain
 		return domain.JenkinsPipelineScript{}, fmt.Errorf("job full name is required")
 	}
 
-	endpoint := c.baseURL + buildJenkinsJobConfigPath(fullName)
-	body, err := c.get(ctx, endpoint)
+	body, err := c.GetPipelineConfigXML(ctx, fullName)
 	if err != nil {
 		return domain.JenkinsPipelineScript{}, err
 	}
-	body = normalizeXMLVersion(body)
 
 	var config struct {
-		Definition struct {
+		Description string `xml:"description"`
+		Definition  struct {
 			Class      string `xml:"class,attr"`
 			Script     string `xml:"script"`
+			Sandbox    bool   `xml:"sandbox"`
 			ScriptPath string `xml:"scriptPath"`
 		} `xml:"definition"`
 	}
-	if err := xml.Unmarshal(body, &config); err != nil {
+	if err := xml.Unmarshal([]byte(body), &config); err != nil {
 		return domain.JenkinsPipelineScript{}, err
 	}
 
@@ -125,10 +134,68 @@ func (c *Client) GetPipelineScript(ctx context.Context, fullName string) (domain
 
 	return domain.JenkinsPipelineScript{
 		DefinitionClass: definitionClass,
+		Description:     strings.TrimSpace(config.Description),
 		Script:          script,
 		ScriptPath:      scriptPath,
+		Sandbox:         config.Definition.Sandbox,
 		FromSCM:         fromSCM,
 	}, nil
+}
+
+func (c *Client) GetPipelineConfigXML(ctx context.Context, fullName string) (string, error) {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return "", fmt.Errorf("job full name is required")
+	}
+
+	endpoint := c.baseURL + buildJenkinsJobConfigPath(fullName)
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return "", err
+	}
+	body = normalizeXMLVersion(body)
+	return string(body), nil
+}
+
+func (c *Client) CreateRawPipeline(ctx context.Context, fullName string, cfg domain.JenkinsRawPipelineConfig) error {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return fmt.Errorf("job full name is required")
+	}
+	jobName, parentPath := splitJenkinsJobFullName(fullName)
+	if jobName == "" {
+		return fmt.Errorf("job name is required")
+	}
+	endpoint := c.baseURL + buildJenkinsCreateItemPath(parentPath) + "?name=" + url.QueryEscape(jobName)
+	return c.postXML(ctx, endpoint, buildRawPipelineConfigXML(cfg))
+}
+
+func (c *Client) UpdateRawPipeline(ctx context.Context, fullName string, cfg domain.JenkinsRawPipelineConfig) error {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return fmt.Errorf("job full name is required")
+	}
+	endpoint := c.baseURL + buildJenkinsJobConfigPath(fullName)
+	return c.postXML(ctx, endpoint, buildRawPipelineConfigXML(cfg))
+}
+
+func (c *Client) DeletePipeline(ctx context.Context, fullName string) error {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return fmt.Errorf("job full name is required")
+	}
+	endpoint := buildJenkinsActionEndpoint(c.baseURL, buildJenkinsJobPath(fullName), "doDelete")
+	if strings.TrimSpace(endpoint) == "" {
+		return fmt.Errorf("job full name is required")
+	}
+	return c.postAction(ctx, endpoint)
+}
+
+func (c *Client) RenderRawPipelineConfigXML(cfg domain.JenkinsRawPipelineConfig) (string, error) {
+	if strings.TrimSpace(cfg.Script) == "" {
+		return "", fmt.Errorf("raw pipeline script is required")
+	}
+	return buildRawPipelineConfigXML(cfg), nil
 }
 
 func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[string]string) (string, error) {
@@ -209,8 +276,13 @@ func (c *Client) GetQueueItem(
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return "", false, "", err
 	}
-
-	return strings.TrimSpace(payload.Executable.URL), payload.Cancelled, strings.TrimSpace(payload.Why), nil
+	buildURL := strings.TrimSpace(payload.Executable.URL)
+	if buildURL != "" {
+		if normalized := resolveJenkinsResourcePrefix(c.baseURL, buildURL); normalized != "" {
+			buildURL = strings.TrimRight(normalized, "/") + "/"
+		}
+	}
+	return buildURL, payload.Cancelled, strings.TrimSpace(payload.Why), nil
 }
 
 func (c *Client) GetBuildStatus(ctx context.Context, buildURL string) (building bool, result string, err error) {
@@ -232,6 +304,126 @@ func (c *Client) GetBuildStatus(ctx context.Context, buildURL string) (building 
 		return false, "", err
 	}
 	return payload.Building, strings.TrimSpace(payload.Result), nil
+}
+
+func (c *Client) GetBuildStages(
+	ctx context.Context,
+	buildURL string,
+) ([]releasedomain.ReleaseOrderPipelineStage, error) {
+	endpoint := buildJenkinsWFAPIEndpoint(c.baseURL, buildURL, "describe")
+	if endpoint == "" {
+		return nil, fmt.Errorf("build url is required")
+	}
+
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	var payload struct {
+		Stages []struct {
+			ID              string `json:"id"`
+			Name            string `json:"name"`
+			Status          string `json:"status"`
+			StartTimeMillis int64  `json:"startTimeMillis"`
+			DurationMillis  int64  `json:"durationMillis"`
+		} `json:"stages"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	result := make([]releasedomain.ReleaseOrderPipelineStage, 0, len(payload.Stages))
+	for index, item := range payload.Stages {
+		stageKey := strings.TrimSpace(item.ID)
+		if stageKey == "" {
+			stageKey = strings.TrimSpace(item.Name)
+		}
+		if stageKey == "" {
+			continue
+		}
+
+		startedAt := jenkinsMillisToTime(item.StartTimeMillis)
+		finishedAt := deriveStageFinishedAt(startedAt, item.DurationMillis, item.Status)
+		result = append(result, releasedomain.ReleaseOrderPipelineStage{
+			StageKey:       stageKey,
+			StageName:      strings.TrimSpace(item.Name),
+			Status:         mapJenkinsStageStatus(item.Status),
+			RawStatus:      strings.TrimSpace(item.Status),
+			SortNo:         index + 1,
+			DurationMillis: maxInt64(item.DurationMillis, 0),
+			StartedAt:      startedAt,
+			FinishedAt:     finishedAt,
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) GetBuildStageLog(
+	ctx context.Context,
+	buildURL string,
+	stageKey string,
+) (log releasedomain.ReleaseOrderPipelineStageLog, err error) {
+	stageKey = strings.TrimSpace(stageKey)
+	if stageKey == "" {
+		return releasedomain.ReleaseOrderPipelineStageLog{}, fmt.Errorf("stage key is required")
+	}
+
+	detail, err := c.getBuildStageDetail(ctx, buildURL, stageKey)
+	if err != nil {
+		return releasedomain.ReleaseOrderPipelineStageLog{}, err
+	}
+
+	log = releasedomain.ReleaseOrderPipelineStageLog{
+		StageName: strings.TrimSpace(detail.Name),
+		RawStatus: strings.TrimSpace(detail.Status),
+		HasMore:   false,
+		FetchedAt: time.Now().UTC(),
+	}
+
+	nodes := detail.StageFlowNodes
+	if len(nodes) == 0 {
+		text, hasMore, logErr := c.getBuildNodeLog(ctx, buildURL, stageKey)
+		if logErr != nil {
+			return releasedomain.ReleaseOrderPipelineStageLog{}, logErr
+		}
+		log.Content = text
+		log.HasMore = hasMore
+		return log, nil
+	}
+
+	var builder strings.Builder
+	for _, node := range nodes {
+		text, hasMore, logErr := c.getBuildNodeLog(ctx, buildURL, node.ID)
+		if logErr != nil {
+			return releasedomain.ReleaseOrderPipelineStageLog{}, logErr
+		}
+		if hasMore {
+			log.HasMore = true
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteString("\n")
+		}
+		if len(nodes) > 1 {
+			title := strings.TrimSpace(node.Name)
+			if title == "" {
+				title = "阶段节点"
+			}
+			builder.WriteString(">>> ")
+			builder.WriteString(title)
+			builder.WriteString("\n")
+		}
+		builder.WriteString(text)
+		if !strings.HasSuffix(text, "\n") {
+			builder.WriteString("\n")
+		}
+	}
+	log.Content = strings.TrimSpace(builder.String())
+	return log, nil
 }
 
 func (c *Client) GetBuildConsoleText(
@@ -938,22 +1130,30 @@ type jenkinsJobNode struct {
 	Jobs []jenkinsJobNode `json:"jobs"`
 }
 
-func flattenJenkinsJobs(prefix string, jobs []jenkinsJobNode, result *[]domain.JenkinsJob) {
+func flattenJenkinsJobs(baseURL string, prefix string, jobs []jenkinsJobNode, result *[]domain.JenkinsJob) {
 	for _, job := range jobs {
 		fullName := job.Name
 		if prefix != "" {
 			fullName = prefix + "/" + job.Name
 		}
 		if len(job.Jobs) > 0 {
-			flattenJenkinsJobs(fullName, job.Jobs, result)
+			flattenJenkinsJobs(baseURL, fullName, job.Jobs, result)
 			continue
 		}
 		*result = append(*result, domain.JenkinsJob{
 			Name:     job.Name,
 			FullName: fullName,
-			URL:      job.URL,
+			URL:      strings.TrimSpace(buildJenkinsOriginalURL(baseURL, fullName, job.URL)),
 		})
 	}
+}
+
+func buildJenkinsOriginalURL(baseURL string, fullName string, fallback string) string {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName != "" {
+		return strings.TrimRight(strings.TrimSpace(baseURL), "/") + buildJenkinsJobPath(fullName) + "/"
+	}
+	return strings.TrimSpace(resolveJenkinsResourcePrefix(baseURL, fallback))
 }
 
 func buildJenkinsJobAPIPath(fullName string) string {
@@ -971,6 +1171,18 @@ func buildJenkinsAPIEndpoint(baseURL string, resourceURL string, tree string) st
 	return prefix + "/api/json?tree=" + tree
 }
 
+func buildJenkinsWFAPIEndpoint(baseURL string, resourceURL string, suffix string) string {
+	prefix := resolveJenkinsResourcePrefix(baseURL, resourceURL)
+	if prefix == "" {
+		return ""
+	}
+	suffix = strings.Trim(strings.TrimSpace(suffix), "/")
+	if suffix == "" {
+		return prefix + "/wfapi"
+	}
+	return prefix + "/wfapi/" + suffix
+}
+
 func buildJenkinsProgressiveTextEndpoint(baseURL string, buildURL string, start int64) string {
 	prefix := resolveJenkinsResourcePrefix(baseURL, buildURL)
 	if prefix == "" {
@@ -980,6 +1192,73 @@ func buildJenkinsProgressiveTextEndpoint(baseURL string, buildURL string, start 
 		start = 0
 	}
 	return fmt.Sprintf("%s/logText/progressiveText?start=%d", prefix, start)
+}
+
+func (c *Client) getBuildStageDetail(
+	ctx context.Context,
+	buildURL string,
+	stageKey string,
+) (struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Status         string `json:"status"`
+	StageFlowNodes []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"stageFlowNodes"`
+}, error) {
+	var payload struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		Status         string `json:"status"`
+		StageFlowNodes []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"stageFlowNodes"`
+	}
+
+	resourceURL := resolveJenkinsResourcePrefix(c.baseURL, buildURL)
+	if resourceURL == "" {
+		return payload, fmt.Errorf("build url is required")
+	}
+	endpoint := strings.TrimRight(resourceURL, "/") + "/execution/node/" + url.PathEscape(strings.TrimSpace(stageKey)) + "/wfapi/describe"
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return payload, err
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return payload, err
+	}
+	return payload, nil
+}
+
+func (c *Client) getBuildNodeLog(
+	ctx context.Context,
+	buildURL string,
+	nodeID string,
+) (content string, hasMore bool, err error) {
+	resourceURL := resolveJenkinsResourcePrefix(c.baseURL, buildURL)
+	if resourceURL == "" {
+		return "", false, fmt.Errorf("build url is required")
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return "", false, fmt.Errorf("node id is required")
+	}
+	endpoint := strings.TrimRight(resourceURL, "/") + "/execution/node/" + url.PathEscape(nodeID) + "/wfapi/log"
+	body, err := c.get(ctx, endpoint)
+	if err != nil {
+		return "", false, err
+	}
+
+	var payload struct {
+		Text    string `json:"text"`
+		HasMore bool   `json:"hasMore"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", false, err
+	}
+	return normalizeJenkinsLogContent(payload.Text), payload.HasMore, nil
 }
 
 func buildJenkinsActionEndpoint(baseURL string, resourceURL string, action string) string {
@@ -1020,8 +1299,64 @@ func resolveJenkinsResourcePrefix(baseURL string, resourceURL string) string {
 	return base + "/" + strings.Trim(trimmed, "/")
 }
 
+func jenkinsMillisToTime(value int64) *time.Time {
+	if value <= 0 {
+		return nil
+	}
+	t := time.UnixMilli(value).UTC()
+	return &t
+}
+
+func deriveStageFinishedAt(startedAt *time.Time, durationMillis int64, rawStatus string) *time.Time {
+	if startedAt == nil || durationMillis <= 0 {
+		return nil
+	}
+	status := strings.ToUpper(strings.TrimSpace(rawStatus))
+	switch status {
+	case "IN_PROGRESS", "PAUSED_PENDING_INPUT":
+		return nil
+	default:
+		t := startedAt.Add(time.Duration(durationMillis) * time.Millisecond)
+		return &t
+	}
+}
+
+func maxInt64(value int64, minimum int64) int64 {
+	if value < minimum {
+		return minimum
+	}
+	return value
+}
+
+func mapJenkinsStageStatus(raw string) releasedomain.PipelineStageStatus {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "SUCCESS":
+		return releasedomain.PipelineStageStatusSuccess
+	case "FAILED", "FAILURE", "ERROR", "UNSTABLE":
+		return releasedomain.PipelineStageStatusFailed
+	case "ABORTED":
+		return releasedomain.PipelineStageStatusCancelled
+	case "NOT_EXECUTED":
+		return releasedomain.PipelineStageStatusSkipped
+	case "IN_PROGRESS", "PAUSED_PENDING_INPUT":
+		return releasedomain.PipelineStageStatusRunning
+	case "PENDING", "QUEUED":
+		return releasedomain.PipelineStageStatusPending
+	default:
+		return releasedomain.PipelineStageStatusPending
+	}
+}
+
 func buildJenkinsJobConfigPath(fullName string) string {
 	return buildJenkinsJobPath(fullName) + "/config.xml"
+}
+
+func buildJenkinsCreateItemPath(parentFullName string) string {
+	parentFullName = strings.Trim(strings.TrimSpace(parentFullName), "/")
+	if parentFullName == "" {
+		return "/createItem"
+	}
+	return buildJenkinsJobPath(parentFullName) + "/createItem"
 }
 
 func buildJenkinsJobPath(fullName string) string {
@@ -1035,6 +1370,19 @@ func buildJenkinsJobPath(fullName string) string {
 		builder.WriteString(part)
 	}
 	return builder.String()
+}
+
+func splitJenkinsJobFullName(fullName string) (jobName string, parentPath string) {
+	fullName = strings.Trim(strings.TrimSpace(fullName), "/")
+	if fullName == "" {
+		return "", ""
+	}
+	parts := strings.Split(fullName, "/")
+	jobName = strings.TrimSpace(parts[len(parts)-1])
+	if len(parts) > 1 {
+		parentPath = strings.Join(parts[:len(parts)-1], "/")
+	}
+	return jobName, strings.Trim(strings.TrimSpace(parentPath), "/")
 }
 
 type crumbHeader struct {
@@ -1096,6 +1444,82 @@ func (c *Client) post(ctx context.Context, endpoint string, encodedForm string, 
 	}
 	queueURL := strings.TrimSpace(resp.Header.Get("Location"))
 	return queueURL, resp.StatusCode, nil
+}
+
+func (c *Client) postXML(ctx context.Context, endpoint string, payload string) error {
+	statusCode, err := c.postXMLOnce(ctx, endpoint, payload, crumbHeader{})
+	if err == nil {
+		return nil
+	}
+	if statusCode == http.StatusForbidden {
+		crumbField, crumbValue, crumbErr := c.getCrumb(ctx)
+		if crumbErr == nil {
+			if _, retryErr := c.postXMLOnce(ctx, endpoint, payload, crumbHeader{field: crumbField, value: crumbValue}); retryErr == nil {
+				return nil
+			} else {
+				err = retryErr
+			}
+		}
+	}
+	return err
+}
+
+func (c *Client) postXMLOnce(ctx context.Context, endpoint string, payload string, crumb crumbHeader) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	if c.username != "" && c.apiToken != "" {
+		req.SetBasicAuth(c.username, c.apiToken)
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	if crumb.field != "" && crumb.value != "" {
+		req.Header.Set(crumb.field, crumb.value)
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return resp.StatusCode, readErr
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusBadRequest {
+		return resp.StatusCode, nil
+	}
+	return resp.StatusCode, buildJenkinsHTTPError(resp.StatusCode, body)
+}
+
+func buildRawPipelineConfigXML(cfg domain.JenkinsRawPipelineConfig) string {
+	sandbox := "false"
+	if cfg.Sandbox {
+		sandbox = "true"
+	}
+
+	var descriptionBuilder strings.Builder
+	_ = xml.EscapeText(&descriptionBuilder, []byte(strings.TrimSpace(cfg.Description)))
+
+	scriptText := strings.ReplaceAll(cfg.Script, "\r\n", "\n")
+	scriptText = strings.ReplaceAll(scriptText, "\r", "\n")
+	var scriptBuilder strings.Builder
+	_ = xml.EscapeText(&scriptBuilder, []byte(scriptText))
+
+	return fmt.Sprintf(`<?xml version='1.0' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job">
+  <actions/>
+  <description>%s</description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script>%s</script>
+    <sandbox>%s</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>`, descriptionBuilder.String(), scriptBuilder.String(), sandbox)
 }
 
 func (c *Client) postAction(ctx context.Context, endpoint string) error {
@@ -1176,6 +1600,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 var (
 	htmlParagraphPattern = regexp.MustCompile(`(?is)<p[^>]*>(.*?)</p>`)
 	htmlH2Pattern        = regexp.MustCompile(`(?is)<h2[^>]*>(.*?)</h2>`)
+	htmlBreakPattern     = regexp.MustCompile(`(?is)<br\\s*/?>`)
 	htmlTagPattern       = regexp.MustCompile(`(?is)<[^>]+>`)
 	multiSpacePattern    = regexp.MustCompile(`\s+`)
 	paramInvalidPattern  = regexp.MustCompile(`(?i)parameter\s+[^\n]{1,300}?\s+is\s+invalid`)
@@ -1232,6 +1657,18 @@ func normalizeHTMLText(raw string) string {
 	}
 	decoded = htmlTagPattern.ReplaceAllString(decoded, " ")
 	decoded = multiSpacePattern.ReplaceAllString(decoded, " ")
+	return strings.TrimSpace(decoded)
+}
+
+func normalizeJenkinsLogContent(raw string) string {
+	decoded := html.UnescapeString(strings.TrimSpace(raw))
+	if decoded == "" {
+		return ""
+	}
+	decoded = strings.ReplaceAll(decoded, "\r\n", "\n")
+	decoded = strings.ReplaceAll(decoded, "\r", "\n")
+	decoded = htmlBreakPattern.ReplaceAllString(decoded, "\n")
+	decoded = htmlTagPattern.ReplaceAllString(decoded, "")
 	return strings.TrimSpace(decoded)
 }
 

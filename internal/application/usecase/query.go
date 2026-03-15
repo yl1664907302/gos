@@ -31,6 +31,7 @@ func (uc *QueryApplication) List(ctx context.Context, filter domain.ListFilter) 
 
 	filter.Key = strings.TrimSpace(filter.Key)
 	filter.Name = strings.TrimSpace(filter.Name)
+	filter.ApplicationIDs = normalizeApplicationIDs(filter.ApplicationIDs)
 	if filter.Status != "" && !filter.Status.Valid() {
 		return nil, 0, ErrInvalidStatus
 	}
@@ -44,4 +45,27 @@ func (uc *QueryApplication) List(ctx context.Context, filter domain.ListFilter) 
 		filter.PageSize = maxPageSize
 	}
 	return uc.repo.List(ctx, filter)
+}
+
+func normalizeApplicationIDs(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }

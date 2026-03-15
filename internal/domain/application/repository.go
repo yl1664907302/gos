@@ -15,11 +15,12 @@ type Repository interface {
 }
 
 type ListFilter struct {
-	Key      string
-	Name     string
-	Status   Status
-	Page     int
-	PageSize int
+	Key            string
+	Name           string
+	Status         Status
+	ApplicationIDs []string
+	Page           int
+	PageSize       int
 }
 
 type UpdateInput struct {

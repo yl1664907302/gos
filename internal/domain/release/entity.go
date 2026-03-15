@@ -97,6 +97,7 @@ type ReleaseOrder struct {
 	TriggerType     TriggerType
 	Status          OrderStatus
 	Remark          string
+	CreatorUserID   string
 	TriggeredBy     string
 	StartedAt       *time.Time
 	FinishedAt      *time.Time
@@ -125,6 +126,60 @@ type ReleaseOrderStep struct {
 	StartedAt      *time.Time
 	FinishedAt     *time.Time
 	CreatedAt      time.Time
+}
+
+type PipelineStageStatus string
+
+const (
+	PipelineStageStatusPending   PipelineStageStatus = "pending"
+	PipelineStageStatusRunning   PipelineStageStatus = "running"
+	PipelineStageStatusSuccess   PipelineStageStatus = "success"
+	PipelineStageStatusFailed    PipelineStageStatus = "failed"
+	PipelineStageStatusCancelled PipelineStageStatus = "cancelled"
+	PipelineStageStatusSkipped   PipelineStageStatus = "skipped"
+)
+
+func (s PipelineStageStatus) Valid() bool {
+	switch s {
+	case PipelineStageStatusPending,
+		PipelineStageStatusRunning,
+		PipelineStageStatusSuccess,
+		PipelineStageStatusFailed,
+		PipelineStageStatusCancelled,
+		PipelineStageStatusSkipped:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseOrderPipelineStage struct {
+	ID             string
+	ReleaseOrderID string
+	PipelineScope  string
+	ExecutorType   string
+	StageKey       string
+	StageName      string
+	Status         PipelineStageStatus
+	RawStatus      string
+	SortNo         int
+	DurationMillis int64
+	StartedAt      *time.Time
+	FinishedAt     *time.Time
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+type ReleaseOrderPipelineStageLog struct {
+	ReleaseOrderID string
+	StageID        string
+	PipelineScope  string
+	ExecutorType   string
+	StageName      string
+	RawStatus      string
+	Content        string
+	HasMore        bool
+	FetchedAt      time.Time
 }
 
 type TemplateStatus string

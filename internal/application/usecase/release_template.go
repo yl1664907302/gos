@@ -37,11 +37,12 @@ type UpdateReleaseTemplateInput struct {
 }
 
 type ListReleaseTemplateInput struct {
-	ApplicationID string
-	BindingID     string
-	Status        releasedomain.TemplateStatus
-	Page          int
-	PageSize      int
+	ApplicationID  string
+	ApplicationIDs []string
+	BindingID      string
+	Status         releasedomain.TemplateStatus
+	Page           int
+	PageSize       int
 }
 
 func NewReleaseTemplateManager(
@@ -144,11 +145,12 @@ func (uc *ReleaseTemplateManager) List(
 	)
 
 	filter := releasedomain.TemplateListFilter{
-		ApplicationID: strings.TrimSpace(input.ApplicationID),
-		BindingID:     strings.TrimSpace(input.BindingID),
-		Status:        input.Status,
-		Page:          input.Page,
-		PageSize:      input.PageSize,
+		ApplicationID:  strings.TrimSpace(input.ApplicationID),
+		ApplicationIDs: append([]string(nil), input.ApplicationIDs...),
+		BindingID:      strings.TrimSpace(input.BindingID),
+		Status:         input.Status,
+		Page:           input.Page,
+		PageSize:       input.PageSize,
 	}
 	if filter.Status != "" && !filter.Status.Valid() {
 		return nil, 0, ErrInvalidStatus
@@ -262,6 +264,13 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	if strings.TrimSpace(binding.PipelineID) == "" {
 		return pipelinedomain.PipelineBinding{}, nil, fmt.Errorf("%w: bound pipeline id is empty", ErrInvalidInput)
 	}
+	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, binding.PipelineID)
+	if err != nil {
+		return pipelinedomain.PipelineBinding{}, nil, err
+	}
+	if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
+		return pipelinedomain.PipelineBinding{}, nil, err
+	}
 
 	normalizedIDs := make([]string, 0, len(paramDefIDs))
 	seen := make(map[string]struct{}, len(paramDefIDs))
@@ -284,6 +293,9 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	for idx, id := range normalizedIDs {
 		paramDef, err := uc.paramRepo.GetByID(ctx, id)
 		if err != nil {
+			return pipelinedomain.PipelineBinding{}, nil, err
+		}
+		if err := ensureActivePipelineParamDef(paramDef, "所选模板参数"); err != nil {
 			return pipelinedomain.PipelineBinding{}, nil, err
 		}
 		if strings.TrimSpace(paramDef.PipelineID) != strings.TrimSpace(binding.PipelineID) {

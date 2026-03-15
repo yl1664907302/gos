@@ -57,6 +57,7 @@ const paramDefs = ref<PipelineParamDef[]>([])
 const selectedTemplate = ref<ReleaseTemplate | null>(null)
 const selectedTemplateParams = ref<ReleaseTemplateParam[]>([])
 const templateWarning = ref('')
+const paramLoadError = ref('')
 const paramValues = reactive<Record<string, string>>({})
 
 const formState = reactive<CreateFormState>({
@@ -66,12 +67,6 @@ const formState = reactive<CreateFormState>({
   trigger_type: 'manual',
   remark: '',
 })
-
-const triggerTypeOptions = [
-  { label: 'manual', value: 'manual' },
-  { label: 'webhook', value: 'webhook' },
-  { label: 'schedule', value: 'schedule' },
-]
 
 const defaultChoiceMeta: ChoiceMeta = {
   options: [],
@@ -140,11 +135,25 @@ const templateParamDefs = computed(() =>
 const hasTemplateParamDefs = computed(() => templateParamDefs.value.length > 0)
 const extraParamsLoading = computed(() => loadingTemplates.value || loadingTemplateDetail.value || loadingParamDefs.value)
 const hasResolvedTemplate = computed(() => Boolean(formState.template_id && selectedTemplate.value))
+const templateParamMismatchWarning = computed(() => {
+  if (!selectedTemplate.value || extraParamsLoading.value) {
+    return ''
+  }
+  if (selectedTemplateParams.value.length === 0) {
+    return ''
+  }
+  if (templateParamDefs.value.length === selectedTemplateParams.value.length) {
+    return ''
+  }
+  return '当前发布模板包含已失效的管线参数，请先在“发布模板”中重新配置。'
+})
 const canSubmitRelease = computed(
   () =>
     Boolean(formState.application_id && formState.binding_id) &&
     hasResolvedTemplate.value &&
     !templateWarning.value &&
+    !templateParamMismatchWarning.value &&
+    !paramLoadError.value &&
     !extraParamsLoading.value,
 )
 const showExtraParamArea = computed(() => extraParamsLoading.value || hasTemplateParamDefs.value)
@@ -172,6 +181,12 @@ const paramHintText = computed(() => {
   if (extraParamsLoading.value) {
     return '正在加载额外参数，请稍候。'
   }
+  if (paramLoadError.value) {
+    return paramLoadError.value
+  }
+  if (templateParamMismatchWarning.value) {
+    return templateParamMismatchWarning.value
+  }
   if (!selectedBinding.value) {
     return '当前管线选择不存在，请重新选择。'
   }
@@ -190,7 +205,6 @@ const paramHintText = computed(() => {
 const rules: Record<string, Rule[]> = {
   application_id: [{ required: true, message: '请选择应用', trigger: 'change' }],
   binding_id: [{ required: true, message: '请选择管线选择', trigger: 'change' }],
-  trigger_type: [{ required: true, message: '请选择触发方式', trigger: 'change' }],
 }
 
 function resetParamValues() {
@@ -441,6 +455,7 @@ function resetBindingAndTemplateState() {
   selectedTemplate.value = null
   selectedTemplateParams.value = []
   templateWarning.value = ''
+  paramLoadError.value = ''
   paramDefs.value = []
   resetParamValues()
 }
@@ -551,6 +566,7 @@ async function loadSelectedTemplateDetail() {
 
 async function loadPipelineParamDefs() {
   if (!formState.application_id || !formState.binding_id || !selectedBinding.value || !canLoadPipelineParams.value) {
+    paramLoadError.value = ''
     paramDefs.value = []
     resetParamValues()
     return
@@ -560,15 +576,19 @@ async function loadPipelineParamDefs() {
   try {
     const response = await listApplicationPipelineParamDefs(formState.application_id, {
       binding_type: selectedBinding.value.binding_type,
+      status: 'active',
       page: 1,
       page_size: 200,
     })
+    paramLoadError.value = ''
     paramDefs.value = response.data
     fillParamValues(response.data)
   } catch (error) {
+    const text = extractHTTPErrorMessage(error, '管线参数加载失败')
+    paramLoadError.value = text
     paramDefs.value = []
     resetParamValues()
-    message.error(extractHTTPErrorMessage(error, '管线参数加载失败'))
+    message.error(text)
   } finally {
     loadingParamDefs.value = false
   }
@@ -665,6 +685,10 @@ async function handleSubmit() {
     message.error(templateWarning.value)
     return
   }
+  if (templateParamMismatchWarning.value) {
+    message.error(templateParamMismatchWarning.value)
+    return
+  }
 
   let paramsPayload:
     | Array<{
@@ -688,6 +712,7 @@ async function handleSubmit() {
       binding_id: formState.binding_id.trim(),
       template_id: formState.template_id.trim() || undefined,
       trigger_type: formState.trigger_type,
+      triggered_by: currentUserDisplayName.value !== '-' ? currentUserDisplayName.value : undefined,
       remark: formState.remark.trim() || undefined,
       params: paramsPayload.length > 0 ? paramsPayload : undefined,
     })
@@ -783,17 +808,13 @@ onMounted(async () => {
 
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
-            <a-form-item label="触发方式" name="trigger_type">
-              <a-select
-                v-model:value="formState.trigger_type"
-                :options="triggerTypeOptions"
-                placeholder="请选择触发方式"
-              />
+            <a-form-item label="创建者">
+              <a-input :value="currentUserDisplayName" disabled />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
-            <a-form-item label="触发人">
-              <a-input :value="currentUserDisplayName" disabled />
+            <a-form-item label="触发方式">
+              <a-input value="manual" disabled />
             </a-form-item>
           </a-col>
         </a-row>

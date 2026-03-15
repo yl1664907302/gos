@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeftOutlined, ExclamationCircleOutlined, LoadingOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, ExclamationCircleOutlined, EyeOutlined, LoadingOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
@@ -10,7 +10,9 @@ import {
   cancelReleaseOrder,
   executeReleaseOrder,
   getReleaseOrderByID,
+  getReleaseOrderPipelineStageLog,
   listReleaseOrderParams,
+  listReleaseOrderPipelineStages,
   listReleaseOrderSteps,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
@@ -19,8 +21,11 @@ import type {
   ReleaseOrder,
   ReleaseOrderLogStreamEvent,
   ReleaseOrderParam,
+  ReleaseOrderPipelineStage,
+  ReleasePipelineStageStatus,
   ReleaseOrderStatus,
   ReleaseOrderStep,
+  ReleaseTriggerType,
 } from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
@@ -28,6 +33,7 @@ const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 5000
+const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 15000
 
 const loading = ref(false)
 const querying = ref(false)
@@ -38,6 +44,18 @@ const autoRefreshTimer = ref<number | null>(null)
 const order = ref<ReleaseOrder | null>(null)
 const params = ref<ReleaseOrderParam[]>([])
 const steps = ref<ReleaseOrderStep[]>([])
+const pipelineStages = ref<ReleaseOrderPipelineStage[]>([])
+const pipelineStageModuleVisible = ref(false)
+const pipelineStageExecutorType = ref('')
+const pipelineStageMessage = ref('')
+const pipelineStageLoading = ref(false)
+const stageLogDrawerVisible = ref(false)
+const stageLogLoading = ref(false)
+const stageLogContent = ref('')
+const stageLogHasMore = ref(false)
+const stageLogFetchedAt = ref('')
+const selectedPipelineStage = ref<ReleaseOrderPipelineStage | null>(null)
+const lastPipelineStageRefreshAt = ref(0)
 
 const logText = ref('')
 const logOffset = ref(0)
@@ -50,6 +68,7 @@ const logPanelRef = ref<HTMLElement | null>(null)
 const logStreamRef = ref<EventSource | null>(null)
 const reconnectTimer = ref<number | null>(null)
 const closeLogStreamIntentional = ref(false)
+const logAutoFollow = ref(true)
 
 const orderID = computed(() => String(route.params.id || '').trim())
 const executeLocked = ref(false)
@@ -72,16 +91,22 @@ const shouldKeepLogStreaming = computed(() => {
   return order.value.status === 'pending' || order.value.status === 'running'
 })
 const logStreamTagColor = computed(() => {
-  if (logStreamConnected.value) {
-    return 'processing'
-  }
   if (logStreamEnded.value) {
-    return 'success'
+    return 'default'
   }
   if (logStreamError.value) {
     return 'warning'
   }
-  return 'default'
+  return 'processing'
+})
+const logStreamHintText = computed(() => {
+  if (logStreamError.value) {
+    return '日志异常'
+  }
+  if (logStreamEnded.value) {
+    return '已结束'
+  }
+  return ''
 })
 
 const detailItems = computed(() => {
@@ -96,8 +121,8 @@ const detailItems = computed(() => {
     { label: '管线 ID', value: order.value.pipeline_id || '-' },
     { label: '环境', value: order.value.env_code || '-' },
     { label: '项目名称', value: order.value.project_name || order.value.son_service || '-' },
-    { label: '触发方式', value: order.value.trigger_type || '-' },
-    { label: '触发人', value: order.value.triggered_by || '-' },
+    { label: '触发方式', value: triggerTypeText(order.value.trigger_type) },
+    { label: '创建者', value: order.value.triggered_by || '-' },
     { label: 'Git 版本', value: order.value.git_ref || '-' },
     { label: '镜像版本', value: order.value.image_tag || '-' },
     { label: '备注', value: order.value.remark || '-' },
@@ -140,6 +165,37 @@ const { columns: stepColumns } = useResizableColumns(stepInitialColumns, {
   hitArea: 10,
 })
 
+const pipelineStageInitialColumns: TableColumnsType<ReleaseOrderPipelineStage> = [
+  { title: '顺序', dataIndex: 'sort_no', key: 'sort_no', width: 90 },
+  { title: '阶段名称', dataIndex: 'stage_name', key: 'stage_name', width: 240 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
+  { title: '耗时', dataIndex: 'duration_millis', key: 'duration_millis', width: 140 },
+  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 190 },
+  { title: '结束时间', dataIndex: 'finished_at', key: 'finished_at', width: 190 },
+  { title: '操作', key: 'actions', width: 120, fixed: 'right' },
+]
+const { columns: pipelineStageColumns } = useResizableColumns(pipelineStageInitialColumns, {
+  minWidth: 100,
+  maxWidth: 420,
+  hitArea: 10,
+})
+
+const pipelineStageGroups = computed(() => {
+  const groupMap = new Map<string, ReleaseOrderPipelineStage[]>()
+  for (const item of pipelineStages.value) {
+    const key = String(item.pipeline_scope || '').trim() || 'default'
+    if (!groupMap.has(key)) {
+      groupMap.set(key, [])
+    }
+    groupMap.get(key)?.push(item)
+  }
+  return Array.from(groupMap.entries()).map(([key, items]) => ({
+    key,
+    label: pipelineScopeText(key),
+    items: [...items].sort((a, b) => a.sort_no - b.sort_no),
+  }))
+})
+
 function formatTime(value: string | null) {
   if (!value) {
     return '-'
@@ -147,7 +203,7 @@ function formatTime(value: string | null) {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
 
-function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status']) {
+function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
   switch (status) {
     case 'success':
       return 'green'
@@ -157,12 +213,14 @@ function statusColor(status: ReleaseOrderStatus | ReleaseOrderStep['status']) {
       return 'blue'
     case 'cancelled':
       return 'default'
+    case 'skipped':
+      return 'default'
     default:
       return 'gold'
   }
 }
 
-function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status']) {
+function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
   switch (status) {
     case 'pending':
       return '待执行'
@@ -174,13 +232,56 @@ function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status']) {
       return '失败'
     case 'cancelled':
       return '已取消'
+    case 'skipped':
+      return '已跳过'
     default:
       return status
   }
 }
 
-function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status']) {
+function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined) {
+  switch (String(triggerType || '').trim().toLowerCase()) {
+    case 'manual':
+      return '手动'
+    case 'webhook':
+      return 'Webhook'
+    case 'schedule':
+      return '定时'
+    default:
+      return triggerType || '-'
+  }
+}
+
+function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus) {
   return status === 'running'
+}
+
+function pipelineScopeText(scope: string) {
+  switch (String(scope || '').trim().toLowerCase()) {
+    case 'ci':
+      return 'CI 管线'
+    case 'cd':
+      return 'CD 管线'
+    default:
+      return '管线阶段'
+  }
+}
+
+function formatDuration(durationMillis: number) {
+  const value = Number(durationMillis || 0)
+  if (!Number.isFinite(value) || value <= 0) {
+    return '-'
+  }
+  if (value < 1000) {
+    return `${Math.floor(value)} ms`
+  }
+  const totalSeconds = Math.floor(value / 1000)
+  if (totalSeconds < 60) {
+    return `${totalSeconds} s`
+  }
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}m ${seconds}s`
 }
 
 function parseStreamEvent(data: string): ReleaseOrderLogStreamEvent | null {
@@ -206,10 +307,7 @@ function appendLogContent(content: string) {
     logText.value += chunk
   }
   void nextTick(() => {
-    if (!logPanelRef.value) {
-      return
-    }
-    logPanelRef.value.scrollTop = logPanelRef.value.scrollHeight
+    scrollLogToBottom()
   })
 }
 
@@ -227,6 +325,44 @@ function clearReconnectTimer() {
     window.clearTimeout(reconnectTimer.value)
     reconnectTimer.value = null
   }
+}
+
+function isLogNearBottom() {
+  if (!logPanelRef.value) {
+    return true
+  }
+  const remain = logPanelRef.value.scrollHeight - logPanelRef.value.scrollTop - logPanelRef.value.clientHeight
+  return remain <= 48
+}
+
+function scrollLogToBottom(force = false) {
+  if (!logPanelRef.value) {
+    return
+  }
+  if (!force && !logAutoFollow.value) {
+    return
+  }
+  logPanelRef.value.scrollTop = logPanelRef.value.scrollHeight
+}
+
+function syncLogFollowState() {
+  logAutoFollow.value = isLogNearBottom()
+}
+
+function handleLogFollowChange(checked: boolean) {
+  logAutoFollow.value = checked
+  if (checked) {
+    void nextTick(() => {
+      scrollLogToBottom(true)
+    })
+  }
+}
+
+function jumpLogToBottom() {
+  logAutoFollow.value = true
+  void nextTick(() => {
+    scrollLogToBottom(true)
+  })
 }
 
 function closeLogStream() {
@@ -265,6 +401,7 @@ async function startLogStream(reset: boolean) {
     logStreamError.value = ''
     logStreamEnded.value = false
     logStreamStatusText.value = '准备连接'
+    logAutoFollow.value = true
   }
 
   const streamURL = buildReleaseOrderLogStreamURL(
@@ -351,8 +488,7 @@ async function startLogStream(reset: boolean) {
     if (closeLogStreamIntentional.value || logStreamEnded.value) {
       return
     }
-    logStreamError.value = '日志连接中断，准备自动重连'
-    logStreamStatusText.value = '连接中断'
+    logStreamError.value = ''
     source.close()
     logStreamRef.value = null
     scheduleReconnect()
@@ -361,9 +497,12 @@ async function startLogStream(reset: boolean) {
 
 function reconnectLogStream() {
   logStreamError.value = ''
-  logStreamEnded.value = false
   logStreamStatusText.value = '准备重连'
-  void startLogStream(false)
+  const shouldReset = logStreamEnded.value || !shouldKeepLogStreaming.value
+  if (shouldReset) {
+    logStreamEnded.value = false
+  }
+  void startLogStream(shouldReset)
 }
 
 function clearLogOutput() {
@@ -371,6 +510,7 @@ function clearLogOutput() {
   logOffset.value = 0
   logStreamError.value = ''
   logStreamEnded.value = false
+  logAutoFollow.value = true
 }
 
 async function loadDetail(options?: { silent?: boolean }) {
@@ -391,6 +531,7 @@ async function loadDetail(options?: { silent?: boolean }) {
     loading.value = true
   }
   try {
+    const previousStatus = order.value?.status || ''
     const [orderResp, paramsResp, stepsResp] = await Promise.all([
       getReleaseOrderByID(orderID.value),
       listReleaseOrderParams(orderID.value),
@@ -399,6 +540,19 @@ async function loadDetail(options?: { silent?: boolean }) {
     order.value = orderResp.data
     params.value = paramsResp.data
     steps.value = stepsResp.data
+    const now = Date.now()
+    const shouldRefreshPipelineStages =
+      !stageLogDrawerVisible.value &&
+      (
+        !silent ||
+        !pipelineStageModuleVisible.value ||
+        pipelineStages.value.length === 0 ||
+        previousStatus !== orderResp.data.status ||
+        now - lastPipelineStageRefreshAt.value >= PIPELINE_STAGE_REFRESH_INTERVAL_MS
+      )
+    if (shouldRefreshPipelineStages) {
+      await loadPipelineStageView({ silent })
+    }
 
     if (shouldKeepLogStreaming.value) {
       if (!logStreamRef.value && !logStreamConnecting.value) {
@@ -423,6 +577,70 @@ async function loadDetail(options?: { silent?: boolean }) {
     if (!silent) {
       loading.value = false
     }
+  }
+}
+
+async function loadPipelineStageView(options?: { silent?: boolean }) {
+  if (!orderID.value) {
+    return
+  }
+  const silent = Boolean(options?.silent)
+  if (!silent) {
+    pipelineStageLoading.value = true
+  }
+  try {
+    const response = await listReleaseOrderPipelineStages(orderID.value)
+    pipelineStageModuleVisible.value = Boolean(response.show_module)
+    pipelineStageExecutorType.value = String(response.executor_type || '').trim()
+    pipelineStageMessage.value = String(response.message || '').trim()
+    pipelineStages.value = response.data || []
+    lastPipelineStageRefreshAt.value = Date.now()
+  } catch (error) {
+    if (silent) {
+      pipelineStageMessage.value = extractHTTPErrorMessage(error, '管线阶段暂时同步失败，请稍后手动刷新')
+    } else {
+      pipelineStageModuleVisible.value = false
+      pipelineStageExecutorType.value = ''
+      pipelineStageMessage.value = ''
+      pipelineStages.value = []
+      message.error(extractHTTPErrorMessage(error, '管线阶段加载失败'))
+    }
+  } finally {
+    if (!silent) {
+      pipelineStageLoading.value = false
+    }
+  }
+}
+
+async function openStageLogDrawer(stage: ReleaseOrderPipelineStage) {
+  selectedPipelineStage.value = stage
+  stageLogDrawerVisible.value = true
+  await loadStageLog()
+}
+
+function closeStageLogDrawer() {
+  stageLogDrawerVisible.value = false
+  selectedPipelineStage.value = null
+  stageLogContent.value = ''
+  stageLogHasMore.value = false
+  stageLogFetchedAt.value = ''
+}
+
+async function loadStageLog() {
+  if (!orderID.value || !selectedPipelineStage.value) {
+    return
+  }
+  stageLogLoading.value = true
+  try {
+    const response = await getReleaseOrderPipelineStageLog(orderID.value, selectedPipelineStage.value.id)
+    selectedPipelineStage.value = response.data.stage
+    stageLogContent.value = response.data.content || ''
+    stageLogHasMore.value = Boolean(response.data.has_more)
+    stageLogFetchedAt.value = formatTime(response.data.fetched_at)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '阶段日志加载失败'))
+  } finally {
+    stageLogLoading.value = false
   }
 }
 
@@ -609,18 +827,110 @@ onBeforeUnmount(() => {
       </a-table>
     </a-card>
 
+    <a-card v-if="pipelineStageModuleVisible" class="detail-card" title="管线进度" :loading="pipelineStageLoading" :bordered="true">
+      <template #extra>
+        <a-space>
+          <a-tag color="processing">{{ pipelineStageExecutorType || 'jenkins' }}</a-tag>
+          <a-button size="small" @click="loadPipelineStageView">刷新阶段</a-button>
+        </a-space>
+      </template>
+
+      <a-alert
+        v-if="pipelineStageMessage"
+        class="pipeline-stage-alert"
+        type="info"
+        show-icon
+        :message="pipelineStageMessage"
+      />
+
+      <a-empty v-if="pipelineStageGroups.length === 0" description="暂无管线阶段数据" />
+      <div v-else>
+        <div v-for="group in pipelineStageGroups" :key="group.key" class="pipeline-stage-group">
+          <div class="pipeline-stage-group-header">
+            <a-tag>{{ group.label }}</a-tag>
+          </div>
+          <a-table
+            row-key="id"
+            :columns="pipelineStageColumns"
+            :data-source="group.items"
+            :pagination="false"
+            :scroll="{ x: 1200 }"
+          >
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.key === 'status'">
+                <a-tag :color="statusColor(record.status)" class="status-tag">
+                  <LoadingOutlined v-if="isRunningStatus(record.status)" spin />
+                  <span>{{ statusText(record.status) }}</span>
+                </a-tag>
+              </template>
+              <template v-else-if="column.key === 'duration_millis'">
+                {{ formatDuration(record.duration_millis) }}
+              </template>
+              <template v-else-if="column.key === 'started_at'">
+                {{ formatTime(record.started_at) }}
+              </template>
+              <template v-else-if="column.key === 'finished_at'">
+                {{ formatTime(record.finished_at) }}
+              </template>
+              <template v-else-if="column.key === 'actions'">
+                <a-button type="link" size="small" @click="openStageLogDrawer(record)">
+                  <template #icon>
+                    <EyeOutlined />
+                  </template>
+                  查看日志
+                </a-button>
+              </template>
+            </template>
+          </a-table>
+        </div>
+      </div>
+    </a-card>
+
     <a-card class="detail-card" title="构建日志" :bordered="true">
       <template #extra>
         <a-space>
-          <a-tag :color="logStreamTagColor">{{ logStreamStatusText }}</a-tag>
+          <a-tag v-if="logStreamHintText" :color="logStreamTagColor">{{ logStreamHintText }}</a-tag>
+          <a-switch
+            size="small"
+            :checked="logAutoFollow"
+            checked-children="跟随日志"
+            un-checked-children="暂停跟随"
+            @change="handleLogFollowChange"
+          />
+          <a-button size="small" @click="jumpLogToBottom">回到底部</a-button>
           <a-button size="small" @click="reconnectLogStream" :loading="logStreamConnecting">重连日志</a-button>
           <a-button size="small" @click="clearLogOutput">清空</a-button>
         </a-space>
       </template>
 
       <a-alert v-if="logStreamError" class="log-alert" type="warning" show-icon :message="logStreamError" />
-      <pre ref="logPanelRef" class="log-panel">{{ logText || '暂无日志输出' }}</pre>
+      <pre ref="logPanelRef" class="log-panel" @scroll="syncLogFollowState">{{ logText || '暂无日志输出' }}</pre>
     </a-card>
+
+    <a-drawer
+      :open="stageLogDrawerVisible"
+      :width="760"
+      :title="selectedPipelineStage ? `阶段日志 · ${selectedPipelineStage.stage_name}` : '阶段日志'"
+      @close="closeStageLogDrawer"
+    >
+      <template #extra>
+        <a-space>
+          <a-tag v-if="selectedPipelineStage" :color="statusColor(selectedPipelineStage.status)">
+            {{ statusText(selectedPipelineStage.status) }}
+          </a-tag>
+          <a-button size="small" :loading="stageLogLoading" @click="loadStageLog">刷新日志</a-button>
+        </a-space>
+      </template>
+
+      <a-alert
+        v-if="stageLogFetchedAt"
+        class="pipeline-stage-alert"
+        type="info"
+        show-icon
+        :message="`最近同步时间：${stageLogFetchedAt}${stageLogHasMore ? '，当前阶段仍在持续输出日志' : ''}`"
+      />
+      <pre class="log-panel stage-log-panel">{{ stageLogContent || '暂无阶段日志输出' }}</pre>
+    </a-drawer>
   </div>
 </template>
 
@@ -656,6 +966,18 @@ onBeforeUnmount(() => {
   margin-bottom: 12px;
 }
 
+.pipeline-stage-alert {
+  margin-bottom: 12px;
+}
+
+.pipeline-stage-group + .pipeline-stage-group {
+  margin-top: 16px;
+}
+
+.pipeline-stage-group-header {
+  margin-bottom: 10px;
+}
+
 .log-panel {
   margin: 0;
   min-height: 260px;
@@ -670,6 +992,10 @@ onBeforeUnmount(() => {
   font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.stage-log-panel {
+  min-height: 220px;
 }
 
 @media (max-width: 768px) {

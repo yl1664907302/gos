@@ -68,6 +68,7 @@ const filters = reactive({
   application_id: '',
   binding_type: 'ci' as BindingType,
   param_key: '',
+  status: '' as '' | 'active' | 'inactive',
   visible: '' as '' | 'true' | 'false',
   editable: '' as '' | 'true' | 'false',
   page: 1,
@@ -85,6 +86,7 @@ const initialColumns: TableColumnsType<PipelineParamDef> = [
   { title: '真实参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
   { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
   { title: '参数类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 110 },
   { title: '必填', dataIndex: 'required', key: 'required', width: 90 },
   { title: '默认值', dataIndex: 'default_value', key: 'default_value', width: 180, ellipsis: true },
   { title: '参数描述', dataIndex: 'description', key: 'description', width: 240, ellipsis: true },
@@ -133,6 +135,10 @@ function formatTime(value: string) {
 
 function boolText(value: boolean) {
   return value ? '是' : '否'
+}
+
+function statusColor(status: string) {
+  return status === 'inactive' ? 'default' : 'green'
 }
 
 function parseBooleanFilter(value: '' | 'true' | 'false') {
@@ -278,6 +284,7 @@ async function loadPipelineParams() {
     const response = await listApplicationPipelineParamDefs(filters.application_id, {
       binding_type: filters.binding_type,
       param_key: filters.param_key.trim() || undefined,
+      status: filters.status || undefined,
       visible: parseBooleanFilter(filters.visible),
       editable: parseBooleanFilter(filters.editable),
       page: filters.page,
@@ -305,6 +312,7 @@ function handleSearch() {
 function handleReset() {
   filters.binding_type = 'ci'
   filters.param_key = ''
+  filters.status = ''
   filters.visible = ''
   filters.editable = ''
   filters.page = 1
@@ -460,6 +468,18 @@ onMounted(async () => {
         <a-form-item label="平台标准 Key">
           <a-input v-model:value="filters.param_key" allow-clear placeholder="按平台标准 Key 查询" />
         </a-form-item>
+        <a-form-item label="状态">
+          <a-select
+            v-model:value="filters.status"
+            class="filter-select"
+            allow-clear
+            placeholder="全部"
+            :options="[
+              { label: 'active', value: 'active' },
+              { label: 'inactive', value: 'inactive' },
+            ]"
+          />
+        </a-form-item>
         <a-form-item label="展示">
           <a-select
             v-model:value="filters.visible"
@@ -510,6 +530,9 @@ onMounted(async () => {
             </template>
             <template v-else-if="column.key === 'pipeline_name'">
               {{ selectedPipelineLabel }}
+            </template>
+            <template v-else-if="column.key === 'status'">
+              <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
             </template>
             <template v-else-if="column.key === 'visible'">
               {{ boolText(record.visible) }}
