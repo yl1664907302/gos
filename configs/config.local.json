@@ -10,7 +10,7 @@
   },
   "database": {
     "driver": "mysql",
-    "mysql_dsn": "root:JSgc_w29Sd@tcp(58.240.122.214:2227)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
+    "mysql_dsn": "root:JSgc_w29Sd@tcp(xxx:2227)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
     "sqlite_path": "data/demo.db",
     "max_open_conns": 10,
     "max_idle_conns": 5,
@@ -22,7 +22,7 @@
   },
   "jenkins": {
     "enabled": true,
-    "base_url": "http://58.240.122.214:7888/",
+    "base_url": "http://xxx:7888/",
     "username": "shuang",
     "api_token": "112aabb50308085b4c9fddb1cf7660a6f2",
     "timeout_sec": 5,
