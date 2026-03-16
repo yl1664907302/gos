@@ -269,13 +269,6 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	if uc.pipelineRepo == nil {
 		return nil, nil, "", fmt.Errorf("%w: pipeline repository is not configured", ErrInvalidInput)
 	}
-	pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, binding.PipelineID)
-	if err != nil {
-		return pipelinedomain.PipelineBinding{}, nil, err
-	}
-	if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
-		return pipelinedomain.PipelineBinding{}, nil, err
-	}
 
 	ciBinding, ciParams, appName, err := uc.buildTemplateScopePayload(
 		ctx,
@@ -390,9 +383,6 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 		}
 		if err := ensureActivePipelineParamDef(paramDef, "所选模板参数"); err != nil {
 			return nil, nil, "", err
-		}
-		if err := ensureActivePipelineParamDef(paramDef, "所选模板参数"); err != nil {
-			return pipelinedomain.PipelineBinding{}, nil, err
 		}
 		if strings.TrimSpace(paramDef.PipelineID) != strings.TrimSpace(binding.PipelineID) {
 			return nil, nil, "", fmt.Errorf("%w: template param does not belong to selected binding", ErrInvalidInput)

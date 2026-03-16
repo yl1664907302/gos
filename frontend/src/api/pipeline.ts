@@ -68,12 +68,16 @@ export async function previewJenkinsRawPipelineConfigXML(
 }
 
 export async function syncJenkinsPipelines(): Promise<PipelineSyncResponse> {
-  const response = await http.post<PipelineSyncResponse>('/jenkins/pipelines/sync')
+  const response = await http.post<PipelineSyncResponse>('/jenkins/pipelines/sync', undefined, {
+    timeout: 120_000,
+  })
   return response.data
 }
 
 export async function syncJenkinsPipelineParamDefs(): Promise<PipelineSyncResponse> {
-  const response = await http.post<PipelineSyncResponse>('/jenkins/pipeline-param-defs/sync')
+  const response = await http.post<PipelineSyncResponse>('/jenkins/pipeline-param-defs/sync', undefined, {
+    timeout: 120_000,
+  })
   return response.data
 }
 

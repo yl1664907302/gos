@@ -3,8 +3,8 @@
   "server": {
     "addr": ":8080",
     "read_header_timeout_sec": 10,
-    "read_timeout_sec": 20,
-    "write_timeout_sec": 20,
+    "read_timeout_sec": 120,
+    "write_timeout_sec": 120,
     "idle_timeout_sec": 120,
     "shutdown_timeout_sec": 30
   },
