@@ -87,8 +87,8 @@ func defaultConfig() Config {
 		Server: ServerConfig{
 			Addr:                 ":8080",
 			ReadHeaderTimeoutSec: 5,
-			ReadTimeoutSec:       15,
-			WriteTimeoutSec:      15,
+			ReadTimeoutSec:       120,
+			WriteTimeoutSec:      120,
 			IdleTimeoutSec:       60,
 			ShutdownTimeoutSec:   10,
 		},
