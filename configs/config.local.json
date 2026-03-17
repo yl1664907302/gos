@@ -10,7 +10,7 @@
   },
   "database": {
     "driver": "mysql",
-    "mysql_dsn": "root:JSgc_w29Sd@tcp(xxx:2227)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
+    "mysql_dsn": "root:JSgc_w29Sd@tcp(192.168.49.227:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
     "sqlite_path": "data/demo.db",
     "max_open_conns": 10,
     "max_idle_conns": 5,
@@ -22,7 +22,7 @@
   },
   "jenkins": {
     "enabled": true,
-    "base_url": "http://xxx:7888/",
+    "base_url": "http://192.168.1.208:8000/",
     "username": "shuang",
     "api_token": "112aabb50308085b4c9fddb1cf7660a6f2",
     "timeout_sec": 5,
@@ -33,6 +33,30 @@
     "auto_sync_interval_sec": 5,
     "release_track_enabled": true,
     "release_track_interval_sec": 10
+  },
+  "argocd": {
+    "enabled": true,
+    "base_url": "https://192.168.49.125:31607",
+    "insecure_skip_verify": true,
+    "auth_mode": "token",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhcmdvY2QiLCJzdWIiOiJnb3M6YXBpS2V5IiwibmJmIjoxNzczNzMzNjMxLCJpYXQiOjE3NzM3MzM2MzEsImp0aSI6Imdvcy1wbGF0Zm9ybSJ9.tz12hCH0FaDQyOr2qI49-PLUJqD5F0BhbVdK4xikjIY",
+    "username": "gos",
+    "password": "yl1664907302..",
+    "startup_check_enabled": true,
+    "sync_enabled": true,
+    "sync_interval_sec": 300,
+    "request_timeout_sec": 30
+  },
+  "gitops": {
+    "enabled": true,
+    "local_root": "/Users/lingyunxieqing/Desktop/deploy-manifests",
+    "default_branch": "master",
+    "username": "yeling",
+    "password": "yl1664907302..",
+    "token": "",
+    "author_name": "yeling",
+    "author_email": "yl10115658@gmail.com",
+    "command_timeout_sec": 30
   },
   "auth": {
     "session_ttl_hours": 24,

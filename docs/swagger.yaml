@@ -45,6 +45,76 @@ definitions:
       updated_at:
         type: string
     type: object
+  httpapi.ArgoCDApplicationDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.ArgoCDApplicationResponse'
+    type: object
+  httpapi.ArgoCDApplicationListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.ArgoCDApplicationResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.ArgoCDApplicationResponse:
+    properties:
+      app_name:
+        type: string
+      argocd_url:
+        type: string
+      created_at:
+        type: string
+      dest_namespace:
+        type: string
+      dest_server:
+        type: string
+      health_status:
+        type: string
+      id:
+        type: string
+      last_synced_at:
+        type: string
+      operation_phase:
+        type: string
+      project:
+        type: string
+      raw_meta:
+        type: string
+      repo_url:
+        type: string
+      source_path:
+        type: string
+      status:
+        type: string
+      sync_status:
+        type: string
+      target_revision:
+        type: string
+      updated_at:
+        type: string
+    type: object
+  httpapi.ArgoCDApplicationSyncResponse:
+    properties:
+      data:
+        $ref: '#/definitions/usecase.SyncArgoCDApplicationsOutput'
+    type: object
+  httpapi.ArgoCDOriginalLinkDataResponse:
+    properties:
+      data:
+        properties:
+          application:
+            $ref: '#/definitions/httpapi.ArgoCDApplicationResponse'
+          original_link:
+            type: string
+        type: object
+    type: object
   httpapi.CreateApplicationRequest:
     properties:
       artifact_type:
@@ -85,8 +155,6 @@ definitions:
     type: object
   httpapi.CreatePlatformParamDictRequest:
     properties:
-      builtin:
-        type: boolean
       description:
         type: string
       name:
@@ -108,14 +176,14 @@ definitions:
         type: string
       param_value:
         type: string
+      pipeline_scope:
+        type: string
       value_source:
         type: string
     type: object
   httpapi.CreateReleaseOrderRequest:
     properties:
       application_id:
-        type: string
-      binding_id:
         type: string
       env_code:
         type: string
@@ -127,6 +195,8 @@ definitions:
         items:
           $ref: '#/definitions/httpapi.CreateReleaseOrderParamRequest'
         type: array
+      project_name:
+        type: string
       remark:
         type: string
       son_service:
@@ -135,6 +205,8 @@ definitions:
         items:
           $ref: '#/definitions/httpapi.CreateReleaseOrderStepRequest'
         type: array
+      template_id:
+        type: string
       trigger_type:
         type: string
       triggered_by:
@@ -153,6 +225,67 @@ definitions:
     properties:
       error:
         type: string
+    type: object
+  httpapi.ExecutorParamDefDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/httpapi.ExecutorParamDefResponse'
+    type: object
+  httpapi.ExecutorParamDefListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.ExecutorParamDefResponse'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  httpapi.ExecutorParamDefResponse:
+    properties:
+      can_edit:
+        type: boolean
+      can_view:
+        type: boolean
+      created_at:
+        type: string
+      default_value:
+        type: string
+      description:
+        type: string
+      editable:
+        type: boolean
+      executor_param_name:
+        type: string
+      executor_type:
+        type: string
+      id:
+        type: string
+      param_key:
+        type: string
+      param_type:
+        type: string
+      pipeline_id:
+        type: string
+      raw_meta:
+        type: string
+      required:
+        type: boolean
+      single_select:
+        type: boolean
+      sort_no:
+        type: integer
+      source_from:
+        type: string
+      status:
+        type: string
+      updated_at:
+        type: string
+      visible:
+        type: boolean
     type: object
   httpapi.FinishReleaseOrderStepRequest:
     properties:
@@ -224,75 +357,20 @@ definitions:
       total:
         type: integer
     type: object
-  httpapi.PipelineParamDefDataResponse:
-    properties:
-      data:
-        $ref: '#/definitions/httpapi.PipelineParamDefResponse'
-    type: object
-  httpapi.PipelineParamDefListResponse:
-    properties:
-      data:
-        items:
-          $ref: '#/definitions/httpapi.PipelineParamDefResponse'
-        type: array
-      page:
-        type: integer
-      page_size:
-        type: integer
-      total:
-        type: integer
-    type: object
-  httpapi.PipelineParamDefResponse:
-    properties:
-      can_edit:
-        type: boolean
-      can_view:
-        type: boolean
-      created_at:
-        type: string
-      default_value:
-        type: string
-      description:
-        type: string
-      editable:
-        type: boolean
-      executor_param_name:
-        type: string
-      executor_type:
-        type: string
-      id:
-        type: string
-      param_key:
-        type: string
-      param_type:
-        type: string
-      pipeline_id:
-        type: string
-      raw_meta:
-        type: string
-      required:
-        type: boolean
-      single_select:
-        type: boolean
-      sort_no:
-        type: integer
-      source_from:
-        type: string
-      updated_at:
-        type: string
-      visible:
-        type: boolean
-    type: object
   httpapi.PipelineRawScriptDataResponse:
     properties:
       data:
         properties:
           definition_class:
             type: string
+          description:
+            type: string
           from_scm:
             type: boolean
           pipeline:
             $ref: '#/definitions/httpapi.PipelineResponse'
+          sandbox:
+            type: boolean
           script:
             type: string
           script_path:
@@ -396,6 +474,8 @@ definitions:
     type: object
   httpapi.ReleaseOrderParamResponse:
     properties:
+      binding_id:
+        type: string
       created_at:
         type: string
       executor_param_name:
@@ -405,6 +485,8 @@ definitions:
       param_key:
         type: string
       param_value:
+        type: string
+      pipeline_scope:
         type: string
       release_order_id:
         type: string
@@ -421,6 +503,8 @@ definitions:
         type: string
       created_at:
         type: string
+      creator_user_id:
+        type: string
       env_code:
         type: string
       finished_at:
@@ -435,6 +519,8 @@ definitions:
         type: string
       pipeline_id:
         type: string
+      project_name:
+        type: string
       remark:
         type: string
       son_service:
@@ -442,6 +528,10 @@ definitions:
       started_at:
         type: string
       status:
+        type: string
+      template_id:
+        type: string
+      template_name:
         type: string
       trigger_type:
         type: string
@@ -471,6 +561,8 @@ definitions:
     properties:
       created_at:
         type: string
+      execution_id:
+        type: string
       finished_at:
         type: string
       id:
@@ -489,16 +581,18 @@ definitions:
         type: string
       step_name:
         type: string
+      step_scope:
+        type: string
     type: object
   httpapi.StartReleaseOrderStepRequest:
     properties:
       message:
         type: string
     type: object
-  httpapi.SyncPipelineParamDefsResponse:
+  httpapi.SyncExecutorParamDefsResponse:
     properties:
       data:
-        $ref: '#/definitions/usecase.SyncPipelineParamDefsOutput'
+        $ref: '#/definitions/usecase.SyncExecutorParamDefsOutput'
     type: object
   httpapi.SyncPipelinesResponse:
     properties:
@@ -541,15 +635,13 @@ definitions:
       trigger_mode:
         type: string
     type: object
-  httpapi.UpdatePipelineParamDefRequest:
+  httpapi.UpdateExecutorParamDefRequest:
     properties:
       param_key:
         type: string
     type: object
   httpapi.UpdatePlatformParamDictRequest:
     properties:
-      builtin:
-        type: boolean
       description:
         type: string
       name:
@@ -577,9 +669,22 @@ definitions:
             type: boolean
         type: object
     type: object
-  usecase.SyncPipelineParamDefsOutput:
+  usecase.SyncArgoCDApplicationsOutput:
     properties:
       created:
+        type: integer
+      inactivated:
+        type: integer
+      total:
+        type: integer
+      updated:
+        type: integer
+    type: object
+  usecase.SyncExecutorParamDefsOutput:
+    properties:
+      created:
+        type: integer
+      inactivated:
         type: integer
       skipped:
         type: integer
@@ -591,6 +696,8 @@ definitions:
   usecase.SyncPipelinesOutput:
     properties:
       created:
+        type: integer
+      inactivated:
         type: integer
       skipped:
         type: integer
@@ -778,6 +885,60 @@ paths:
       summary: Update application
       tags:
       - applications
+  /applications/{id}/executor-param-defs:
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Binding type, default ci
+        in: query
+        name: binding_type
+        type: string
+      - description: Visible flag
+        in: query
+        name: visible
+        type: boolean
+      - description: Editable flag
+        in: query
+        name: editable
+        type: boolean
+      - description: Mapped platform param key
+        in: query
+        name: param_key
+        type: string
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page size
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ExecutorParamDefListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List bound executor param definitions by application
+      tags:
+      - executor-param-defs
   /applications/{id}/pipeline-bindings:
     get:
       parameters:
@@ -869,29 +1030,28 @@ paths:
       summary: Create pipeline binding for application
       tags:
       - pipeline-bindings
-  /applications/{id}/pipeline-param-defs:
+  /argocd/applications:
     get:
       parameters:
-      - description: Application ID
-        in: path
-        name: id
-        required: true
+      - description: Application name
+        in: query
+        name: app_name
         type: string
-      - description: Binding type, default ci
+      - description: ArgoCD project
         in: query
-        name: binding_type
+        name: project
         type: string
-      - description: Visible flag
+      - description: Sync status
         in: query
-        name: visible
-        type: boolean
-      - description: Editable flag
+        name: sync_status
+        type: string
+      - description: Health status
         in: query
-        name: editable
-        type: boolean
-      - description: Mapped platform param key
+        name: health_status
+        type: string
+      - description: Record status
         in: query
-        name: param_key
+        name: status
         type: string
       - description: Page number
         in: query
@@ -907,7 +1067,33 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/httpapi.PipelineParamDefListResponse'
+            $ref: '#/definitions/httpapi.ArgoCDApplicationListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List ArgoCD applications
+      tags:
+      - argocd
+  /argocd/applications/{id}:
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ArgoCDApplicationDataResponse'
         "400":
           description: Bad Request
           schema:
@@ -920,10 +1106,40 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: List bound Jenkins pipeline param definitions by application
+      summary: Get ArgoCD application detail
       tags:
-      - pipeline-param-defs
-  /jenkins/pipeline-param-defs/sync:
+      - argocd
+  /argocd/applications/{id}/original-link:
+    get:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ArgoCDOriginalLinkDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get ArgoCD application original link
+      tags:
+      - argocd
+  /argocd/applications/sync:
     post:
       produces:
       - application/json
@@ -931,14 +1147,97 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/httpapi.SyncPipelineParamDefsResponse'
+            $ref: '#/definitions/httpapi.ArgoCDApplicationSyncResponse'
         "500":
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: Sync pipeline param definitions from Jenkins
+      summary: Sync ArgoCD applications metadata
       tags:
-      - pipeline-param-defs
+      - argocd
+  /executor-param-defs/{id}:
+    get:
+      parameters:
+      - description: Executor param definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ExecutorParamDefDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get executor param definition by ID
+      tags:
+      - executor-param-defs
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: Executor param definition ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Update executor param definition request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdateExecutorParamDefRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ExecutorParamDefDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update executor param definition mapping
+      tags:
+      - executor-param-defs
+  /jenkins/executor-param-defs/sync:
+    post:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.SyncExecutorParamDefsResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Sync executor param definitions from Jenkins
+      tags:
+      - executor-param-defs
   /jenkins/pipelines/sync:
     post:
       produces:
@@ -1051,73 +1350,6 @@ paths:
       summary: Update pipeline binding
       tags:
       - pipeline-bindings
-  /pipeline-param-defs/{id}:
-    get:
-      parameters:
-      - description: Pipeline param definition ID
-        in: path
-        name: id
-        required: true
-        type: string
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/httpapi.PipelineParamDefDataResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: Get pipeline param definition by ID
-      tags:
-      - pipeline-param-defs
-    put:
-      consumes:
-      - application/json
-      parameters:
-      - description: Pipeline param definition ID
-        in: path
-        name: id
-        required: true
-        type: string
-      - description: Update pipeline param definition request
-        in: body
-        name: request
-        required: true
-        schema:
-          $ref: '#/definitions/httpapi.UpdatePipelineParamDefRequest'
-      produces:
-      - application/json
-      responses:
-        "200":
-          description: OK
-          schema:
-            $ref: '#/definitions/httpapi.PipelineParamDefDataResponse'
-        "400":
-          description: Bad Request
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-        "404":
-          description: Not Found
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-        "500":
-          description: Internal Server Error
-          schema:
-            $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: Update pipeline param definition mapping
-      tags:
-      - pipeline-param-defs
   /pipelines:
     get:
       parameters:
@@ -1227,7 +1459,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/httpapi.PipelineParamDefListResponse'
+            $ref: '#/definitions/httpapi.ExecutorParamDefListResponse'
         "400":
           description: Bad Request
           schema:
@@ -1240,9 +1472,9 @@ paths:
           description: Internal Server Error
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
-      summary: List pipeline param definitions
+      summary: List executor param definitions
       tags:
-      - pipeline-param-defs
+      - executor-param-defs
   /pipelines/{id}/raw-script:
     get:
       parameters:

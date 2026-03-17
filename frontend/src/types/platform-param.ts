@@ -20,7 +20,6 @@ export interface PlatformParamDictPayload {
   description: string
   param_type: PlatformParamType
   required: boolean
-  builtin: boolean
   status: PlatformParamStatus
 }
 

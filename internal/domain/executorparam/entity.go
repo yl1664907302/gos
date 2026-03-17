@@ -1,7 +1,10 @@
-package pipelineparam
+package executorparam
 
 import "time"
 
+// ExecutorType 表示参数定义所属的执行器类型。
+// 这里故意使用“执行器”而不是“管线”，是为了兼容 Jenkins、ArgoCD
+// 以及后续可能接入的其他执行端，避免模型被单一 CI/CD 工具绑死。
 type ExecutorType string
 
 const (
@@ -69,7 +72,16 @@ func (s Status) Valid() bool {
 	}
 }
 
-type PipelineParamDef struct {
+// ExecutorParamDef 是平台统一维护的“执行器参数定义”模型。
+//
+// 设计上它不再只绑定 Jenkins pipeline：
+// 1. pipeline_id 仍然保留，用于关联当前执行记录来源；
+// 2. executor_type 决定这条参数定义属于 Jenkins / ArgoCD / custom；
+// 3. executor_param_name 保存执行器侧的真实参数名；
+// 4. param_key 保存映射后的平台标准字段 key。
+//
+// 这样后续扩展 CD=ArgoCD 时，平台仍然可以复用同一套参数映射、模板与发布单逻辑。
+type ExecutorParamDef struct {
 	ID                string
 	PipelineID        string
 	ExecutorType      ExecutorType

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	pipelineparamdomain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
-	pipelineparamdomain "gos/internal/domain/pipelineparam"
 )
 
 func ensureActivePipelineRecord(pipeline pipelinedomain.Pipeline, scene string) error {
@@ -18,7 +18,7 @@ func ensureActivePipelineRecord(pipeline pipelinedomain.Pipeline, scene string) 
 	return nil
 }
 
-func ensureActivePipelineParamDef(param pipelineparamdomain.PipelineParamDef, scene string) error {
+func ensureActiveExecutorParamDef(param pipelineparamdomain.ExecutorParamDef, scene string) error {
 	if param.Status == pipelineparamdomain.StatusInactive {
 		if strings.TrimSpace(scene) == "" {
 			scene = "当前管线参数"

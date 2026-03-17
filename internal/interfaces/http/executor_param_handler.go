@@ -12,20 +12,20 @@ import (
 
 	"gos/internal/application/usecase"
 	appdomain "gos/internal/domain/application"
+	domain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
-	domain "gos/internal/domain/pipelineparam"
 	platformparamdomain "gos/internal/domain/platformparam"
 	userdomain "gos/internal/domain/user"
 )
 
-type PipelineParamHandler struct {
-	manager *usecase.PipelineParamDefManager
-	syncer  *usecase.SyncPipelineParamDefs
+type ExecutorParamHandler struct {
+	manager *usecase.ExecutorParamDefManager
+	syncer  *usecase.SyncExecutorParamDefs
 	authz   RequestAuthorizer
-	access  PipelineParamAccessResolver
+	access  ExecutorParamAccessResolver
 }
 
-type PipelineParamAccessResolver interface {
+type ExecutorParamAccessResolver interface {
 	ResolveParamAccess(
 		ctx context.Context,
 		user userdomain.User,
@@ -34,13 +34,13 @@ type PipelineParamAccessResolver interface {
 	) (canView bool, canEdit bool, err error)
 }
 
-func NewPipelineParamHandler(
-	manager *usecase.PipelineParamDefManager,
-	syncer *usecase.SyncPipelineParamDefs,
+func NewExecutorParamHandler(
+	manager *usecase.ExecutorParamDefManager,
+	syncer *usecase.SyncExecutorParamDefs,
 	authz RequestAuthorizer,
-	access PipelineParamAccessResolver,
-) *PipelineParamHandler {
-	return &PipelineParamHandler{
+	access ExecutorParamAccessResolver,
+) *ExecutorParamHandler {
+	return &ExecutorParamHandler{
 		manager: manager,
 		syncer:  syncer,
 		authz:   authz,
@@ -48,19 +48,19 @@ func NewPipelineParamHandler(
 	}
 }
 
-func (h *PipelineParamHandler) RegisterRoutes(router gin.IRouter) {
-	router.GET("/applications/:id/pipeline-param-defs", h.ListByApplication)
+func (h *ExecutorParamHandler) RegisterRoutes(router gin.IRouter) {
+	router.GET("/applications/:id/executor-param-defs", h.ListByApplication)
 	router.GET("/pipelines/:id/param-defs", h.ListByPipeline)
-	router.GET("/pipeline-param-defs/:id", h.GetByID)
-	router.PUT("/pipeline-param-defs/:id", h.Update)
-	router.POST("/jenkins/pipeline-param-defs/sync", h.Sync)
+	router.GET("/executor-param-defs/:id", h.GetByID)
+	router.PUT("/executor-param-defs/:id", h.Update)
+	router.POST("/jenkins/executor-param-defs/sync", h.Sync)
 }
 
-type UpdatePipelineParamDefRequest struct {
+type UpdateExecutorParamDefRequest struct {
 	ParamKey string `json:"param_key"`
 }
 
-type PipelineParamDefResponse struct {
+type ExecutorParamDefResponse struct {
 	ID                string    `json:"id"`
 	PipelineID        string    `json:"pipeline_id"`
 	ExecutorType      string    `json:"executor_type"`
@@ -83,24 +83,24 @@ type PipelineParamDefResponse struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
-type PipelineParamDefDataResponse struct {
-	Data PipelineParamDefResponse `json:"data"`
+type ExecutorParamDefDataResponse struct {
+	Data ExecutorParamDefResponse `json:"data"`
 }
 
-type PipelineParamDefListResponse struct {
-	Data     []PipelineParamDefResponse `json:"data"`
+type ExecutorParamDefListResponse struct {
+	Data     []ExecutorParamDefResponse `json:"data"`
 	Page     int                        `json:"page"`
 	PageSize int                        `json:"page_size"`
 	Total    int64                      `json:"total"`
 }
 
-type SyncPipelineParamDefsResponse struct {
-	Data usecase.SyncPipelineParamDefsOutput `json:"data"`
+type SyncExecutorParamDefsResponse struct {
+	Data usecase.SyncExecutorParamDefsOutput `json:"data"`
 }
 
 // ListByApplication godoc
-// @Summary      List bound Jenkins pipeline param definitions by application
-// @Tags         pipeline-param-defs
+// @Summary      List bound executor param definitions by application
+// @Tags         executor-param-defs
 // @Produce      json
 // @Param        id            path      string  true   "Application ID"
 // @Param        binding_type  query     string  false  "Binding type, default ci"
@@ -109,12 +109,12 @@ type SyncPipelineParamDefsResponse struct {
 // @Param        param_key     query     string  false  "Mapped platform param key"
 // @Param        page          query     int     false  "Page number"
 // @Param        page_size     query     int     false  "Page size"
-// @Success      200  {object}  PipelineParamDefListResponse
+// @Success      200  {object}  ExecutorParamDefListResponse
 // @Failure      400  {object}  ErrorResponse
 // @Failure      404  {object}  ErrorResponse
 // @Failure      500  {object}  ErrorResponse
-// @Router       /applications/{id}/pipeline-param-defs [get]
-func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
+// @Router       /applications/{id}/executor-param-defs [get]
+func (h *ExecutorParamHandler) ListByApplication(c *gin.Context) {
 	page, err := parsePositiveInt(c, "page")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -150,7 +150,7 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 		},
 	)
 	if err != nil {
-		writePipelineParamHTTPError(c, err)
+		writeExecutorParamHTTPError(c, err)
 		return
 	}
 
@@ -192,9 +192,9 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 		}
 	}
 
-	resp := make([]PipelineParamDefResponse, 0, len(items))
+	resp := make([]ExecutorParamDefResponse, 0, len(items))
 	for _, item := range items {
-		entry := toPipelineParamResponse(item)
+		entry := toExecutorParamResponse(item)
 		if currentUser.Role == userdomain.RoleAdmin || manageAll {
 			entry.CanView = true
 			entry.CanEdit = true
@@ -241,8 +241,8 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 }
 
 // ListByPipeline godoc
-// @Summary      List pipeline param definitions
-// @Tags         pipeline-param-defs
+// @Summary      List executor param definitions
+// @Tags         executor-param-defs
 // @Produce      json
 // @Param        id             path      string  true   "Pipeline ID"
 // @Param        executor_type  query     string  false  "Executor type"
@@ -251,12 +251,12 @@ func (h *PipelineParamHandler) ListByApplication(c *gin.Context) {
 // @Param        param_key      query     string  false  "Mapped platform param key"
 // @Param        page           query     int     false  "Page number"
 // @Param        page_size      query     int     false  "Page size"
-// @Success      200  {object}  PipelineParamDefListResponse
+// @Success      200  {object}  ExecutorParamDefListResponse
 // @Failure      400  {object}  ErrorResponse
 // @Failure      404  {object}  ErrorResponse
 // @Failure      500  {object}  ErrorResponse
 // @Router       /pipelines/{id}/param-defs [get]
-func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
+func (h *ExecutorParamHandler) ListByPipeline(c *gin.Context) {
 	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
 		return
 	}
@@ -292,13 +292,13 @@ func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
 		PageSize:     pageSize,
 	})
 	if err != nil {
-		writePipelineParamHTTPError(c, err)
+		writeExecutorParamHTTPError(c, err)
 		return
 	}
 
-	resp := make([]PipelineParamDefResponse, 0, len(items))
+	resp := make([]ExecutorParamDefResponse, 0, len(items))
 	for _, item := range items {
-		entry := toPipelineParamResponse(item)
+		entry := toExecutorParamResponse(item)
 		entry.CanView = entry.Visible
 		entry.CanEdit = entry.Editable
 		resp = append(resp, entry)
@@ -312,47 +312,47 @@ func (h *PipelineParamHandler) ListByPipeline(c *gin.Context) {
 }
 
 // GetByID godoc
-// @Summary      Get pipeline param definition by ID
-// @Tags         pipeline-param-defs
+// @Summary      Get executor param definition by ID
+// @Tags         executor-param-defs
 // @Produce      json
-// @Param        id   path      string  true  "Pipeline param definition ID"
-// @Success      200  {object}  PipelineParamDefDataResponse
+// @Param        id   path      string  true  "Executor param definition ID"
+// @Success      200  {object}  ExecutorParamDefDataResponse
 // @Failure      400  {object}  ErrorResponse
 // @Failure      404  {object}  ErrorResponse
 // @Failure      500  {object}  ErrorResponse
-// @Router       /pipeline-param-defs/{id} [get]
-func (h *PipelineParamHandler) GetByID(c *gin.Context) {
+// @Router       /executor-param-defs/{id} [get]
+func (h *ExecutorParamHandler) GetByID(c *gin.Context) {
 	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
 		return
 	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
-		writePipelineParamHTTPError(c, err)
+		writeExecutorParamHTTPError(c, err)
 		return
 	}
-	resp := toPipelineParamResponse(item)
+	resp := toExecutorParamResponse(item)
 	resp.CanView = resp.Visible
 	resp.CanEdit = resp.Editable
 	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 // Update godoc
-// @Summary      Update pipeline param definition mapping
-// @Tags         pipeline-param-defs
+// @Summary      Update executor param definition mapping
+// @Tags         executor-param-defs
 // @Accept       json
 // @Produce      json
-// @Param        id       path      string                         true  "Pipeline param definition ID"
-// @Param        request  body      UpdatePipelineParamDefRequest  true  "Update pipeline param definition request"
-// @Success      200      {object}  PipelineParamDefDataResponse
+// @Param        id       path      string                         true  "Executor param definition ID"
+// @Param        request  body      UpdateExecutorParamDefRequest  true  "Update executor param definition request"
+// @Success      200      {object}  ExecutorParamDefDataResponse
 // @Failure      400      {object}  ErrorResponse
 // @Failure      404      {object}  ErrorResponse
 // @Failure      500      {object}  ErrorResponse
-// @Router       /pipeline-param-defs/{id} [put]
-func (h *PipelineParamHandler) Update(c *gin.Context) {
+// @Router       /executor-param-defs/{id} [put]
+func (h *ExecutorParamHandler) Update(c *gin.Context) {
 	if !ensurePermission(c, h.authz, "pipeline_param.manage", "", "") {
 		return
 	}
-	var req UpdatePipelineParamDefRequest
+	var req UpdateExecutorParamDefRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
@@ -360,36 +360,36 @@ func (h *PipelineParamHandler) Update(c *gin.Context) {
 
 	item, err := h.manager.UpdateParamKey(c.Request.Context(), c.Param("id"), req.ParamKey)
 	if err != nil {
-		writePipelineParamHTTPError(c, err)
+		writeExecutorParamHTTPError(c, err)
 		return
 	}
-	resp := toPipelineParamResponse(item)
+	resp := toExecutorParamResponse(item)
 	resp.CanView = resp.Visible
 	resp.CanEdit = resp.Editable
 	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 // Sync godoc
-// @Summary      Sync pipeline param definitions from Jenkins
-// @Tags         pipeline-param-defs
+// @Summary      Sync executor param definitions from Jenkins
+// @Tags         executor-param-defs
 // @Produce      json
-// @Success      200  {object}  SyncPipelineParamDefsResponse
+// @Success      200  {object}  SyncExecutorParamDefsResponse
 // @Failure      500  {object}  ErrorResponse
-// @Router       /jenkins/pipeline-param-defs/sync [post]
-func (h *PipelineParamHandler) Sync(c *gin.Context) {
+// @Router       /jenkins/executor-param-defs/sync [post]
+func (h *ExecutorParamHandler) Sync(c *gin.Context) {
 	if !ensureAnyPermission(c, h.authz, "pipeline_param.manage", "pipeline.manage") {
 		return
 	}
 	result, err := h.syncer.Execute(c.Request.Context())
 	if err != nil {
-		writePipelineParamHTTPError(c, err)
+		writeExecutorParamHTTPError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
-func toPipelineParamResponse(item domain.PipelineParamDef) PipelineParamDefResponse {
-	return PipelineParamDefResponse{
+func toExecutorParamResponse(item domain.ExecutorParamDef) ExecutorParamDefResponse {
+	return ExecutorParamDefResponse{
 		ID:                item.ID,
 		PipelineID:        item.PipelineID,
 		ExecutorType:      string(item.ExecutorType),
@@ -413,7 +413,7 @@ func toPipelineParamResponse(item domain.PipelineParamDef) PipelineParamDefRespo
 	}
 }
 
-func writePipelineParamHTTPError(c *gin.Context, err error) {
+func writeExecutorParamHTTPError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, usecase.ErrInvalidInput),
 		errors.Is(err, usecase.ErrInvalidID),

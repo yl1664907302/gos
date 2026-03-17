@@ -220,7 +220,7 @@ export interface ReleaseTemplateParam {
   template_binding_id: string
   pipeline_scope: ReleasePipelineScope
   binding_id: string
-  pipeline_param_def_id: string
+  executor_param_def_id: string
   param_key: string
   param_name: string
   executor_param_name: string
@@ -258,6 +258,7 @@ export interface ReleaseTemplatePayload {
   application_id: string
   ci_binding_id?: string
   cd_binding_id?: string
+  cd_provider?: string
   status: ReleaseTemplateStatus
   remark?: string
   ci_param_def_ids: string[]
@@ -268,6 +269,7 @@ export interface UpdateReleaseTemplatePayload {
   name: string
   ci_binding_id?: string
   cd_binding_id?: string
+  cd_provider?: string
   status: ReleaseTemplateStatus
   remark?: string
   ci_param_def_ids: string[]

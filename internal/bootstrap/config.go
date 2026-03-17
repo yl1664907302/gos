@@ -14,6 +14,8 @@ type Config struct {
 	Server      ServerConfig   `json:"server"`
 	Database    DatabaseConfig `json:"database"`
 	Jenkins     JenkinsConfig  `json:"jenkins"`
+	ArgoCD      ArgoCDConfig   `json:"argocd"`
+	GitOps      GitOpsConfig   `json:"gitops"`
 	Auth        AuthConfig     `json:"auth"`
 }
 
@@ -52,6 +54,39 @@ type JenkinsConfig struct {
 	AutoSyncIntervalSec     int    `json:"auto_sync_interval_sec"`
 	ReleaseTrackEnabled     bool   `json:"release_track_enabled"`
 	ReleaseTrackIntervalSec int    `json:"release_track_interval_sec"`
+}
+
+type ArgoCDConfig struct {
+	Enabled             bool   `json:"enabled"`
+	BaseURL             string `json:"base_url"`
+	InsecureSkipVerify  bool   `json:"insecure_skip_verify"`
+	AuthMode            string `json:"auth_mode"`
+	Token               string `json:"token"`
+	Username            string `json:"username"`
+	Password            string `json:"password"`
+	TimeoutSec          int    `json:"request_timeout_sec"`
+	StartupCheckEnabled bool   `json:"startup_check_enabled"`
+	SyncEnabled         bool   `json:"sync_enabled"`
+	SyncIntervalSec     int    `json:"sync_interval_sec"`
+}
+
+// GitOpsConfig 描述平台在 ArgoCD CD 模式下操作声明式仓库所需的最小配置。
+//
+// 设计目标是让 gos 只承担“受控修改 + 提交推送”的职责：
+// 1. local_root 是本地工作目录根路径，平台会在其中维护 Git 仓库副本；
+// 2. default_branch 表示默认提交分支，若 ArgoCD Application 使用 HEAD，则回退到这里；
+// 3. username/password 或 token 用于 clone / pull / push；
+// 4. author_name / author_email 作为平台提交 Git 变更时的固定身份。
+type GitOpsConfig struct {
+	Enabled           bool   `json:"enabled"`
+	LocalRoot         string `json:"local_root"`
+	DefaultBranch     string `json:"default_branch"`
+	Username          string `json:"username"`
+	Password          string `json:"password"`
+	Token             string `json:"token"`
+	AuthorName        string `json:"author_name"`
+	AuthorEmail       string `json:"author_email"`
+	CommandTimeoutSec int    `json:"command_timeout_sec"`
 }
 
 type AuthConfig struct {
@@ -117,6 +152,27 @@ func defaultConfig() Config {
 			AutoSyncIntervalSec:     300,
 			ReleaseTrackEnabled:     true,
 			ReleaseTrackIntervalSec: 10,
+		},
+		ArgoCD: ArgoCDConfig{
+			Enabled:             false,
+			BaseURL:             "https://127.0.0.1:30443",
+			InsecureSkipVerify:  true,
+			AuthMode:            "token",
+			Token:               "",
+			Username:            "admin",
+			Password:            "",
+			TimeoutSec:          30,
+			StartupCheckEnabled: false,
+			SyncEnabled:         false,
+			SyncIntervalSec:     300,
+		},
+		GitOps: GitOpsConfig{
+			Enabled:           false,
+			LocalRoot:         "data/gitops",
+			DefaultBranch:     "master",
+			AuthorName:        "gos-bot",
+			AuthorEmail:       "gos@example.com",
+			CommandTimeoutSec: 30,
 		},
 		Auth: AuthConfig{
 			SessionTTLHours:  24,
@@ -196,6 +252,66 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v, ok := intFromEnv("JENKINS_RELEASE_TRACK_INTERVAL_SEC"); ok {
 		cfg.Jenkins.ReleaseTrackIntervalSec = v
+	}
+	if v, ok := boolFromEnv("ARGOCD_ENABLED"); ok {
+		cfg.ArgoCD.Enabled = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ARGOCD_BASE_URL")); v != "" {
+		cfg.ArgoCD.BaseURL = v
+	}
+	if v, ok := boolFromEnv("ARGOCD_INSECURE_SKIP_VERIFY"); ok {
+		cfg.ArgoCD.InsecureSkipVerify = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ARGOCD_AUTH_MODE")); v != "" {
+		cfg.ArgoCD.AuthMode = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ARGOCD_TOKEN")); v != "" {
+		cfg.ArgoCD.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ARGOCD_USERNAME")); v != "" {
+		cfg.ArgoCD.Username = v
+	}
+	if v := strings.TrimSpace(os.Getenv("ARGOCD_PASSWORD")); v != "" {
+		cfg.ArgoCD.Password = v
+	}
+	if v, ok := intFromEnv("ARGOCD_REQUEST_TIMEOUT_SEC"); ok {
+		cfg.ArgoCD.TimeoutSec = v
+	}
+	if v, ok := boolFromEnv("ARGOCD_STARTUP_CHECK_ENABLED"); ok {
+		cfg.ArgoCD.StartupCheckEnabled = v
+	}
+	if v, ok := boolFromEnv("ARGOCD_SYNC_ENABLED"); ok {
+		cfg.ArgoCD.SyncEnabled = v
+	}
+	if v, ok := intFromEnv("ARGOCD_SYNC_INTERVAL_SEC"); ok {
+		cfg.ArgoCD.SyncIntervalSec = v
+	}
+	if v, ok := boolFromEnv("GITOPS_ENABLED"); ok {
+		cfg.GitOps.Enabled = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_LOCAL_ROOT")); v != "" {
+		cfg.GitOps.LocalRoot = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_DEFAULT_BRANCH")); v != "" {
+		cfg.GitOps.DefaultBranch = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_USERNAME")); v != "" {
+		cfg.GitOps.Username = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_PASSWORD")); v != "" {
+		cfg.GitOps.Password = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_TOKEN")); v != "" {
+		cfg.GitOps.Token = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_AUTHOR_NAME")); v != "" {
+		cfg.GitOps.AuthorName = v
+	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_AUTHOR_EMAIL")); v != "" {
+		cfg.GitOps.AuthorEmail = v
+	}
+	if v, ok := intFromEnv("GITOPS_COMMAND_TIMEOUT_SEC"); ok {
+		cfg.GitOps.CommandTimeoutSec = v
 	}
 	if v, ok := intFromEnv("AUTH_SESSION_TTL_HOURS"); ok {
 		cfg.Auth.SessionTTLHours = v
@@ -284,6 +400,44 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Jenkins.ReleaseTrackIntervalSec = 10
 	}
 
+	cfg.ArgoCD.BaseURL = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.BaseURL))
+	cfg.ArgoCD.AuthMode = strings.ToLower(strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.AuthMode)))
+	cfg.ArgoCD.Token = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Token))
+	cfg.ArgoCD.Username = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Username))
+	cfg.ArgoCD.Password = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Password))
+	if cfg.ArgoCD.AuthMode == "" {
+		cfg.ArgoCD.AuthMode = "token"
+	}
+	if cfg.ArgoCD.TimeoutSec <= 0 {
+		cfg.ArgoCD.TimeoutSec = 30
+	}
+	if cfg.ArgoCD.SyncIntervalSec <= 0 {
+		cfg.ArgoCD.SyncIntervalSec = 300
+	}
+
+	cfg.GitOps.LocalRoot = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.LocalRoot))
+	cfg.GitOps.DefaultBranch = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.DefaultBranch))
+	cfg.GitOps.Username = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Username))
+	cfg.GitOps.Password = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Password))
+	cfg.GitOps.Token = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Token))
+	cfg.GitOps.AuthorName = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorName))
+	cfg.GitOps.AuthorEmail = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorEmail))
+	if cfg.GitOps.LocalRoot == "" {
+		cfg.GitOps.LocalRoot = "data/gitops"
+	}
+	if cfg.GitOps.DefaultBranch == "" {
+		cfg.GitOps.DefaultBranch = "master"
+	}
+	if cfg.GitOps.AuthorName == "" {
+		cfg.GitOps.AuthorName = "gos-bot"
+	}
+	if cfg.GitOps.AuthorEmail == "" {
+		cfg.GitOps.AuthorEmail = "gos@example.com"
+	}
+	if cfg.GitOps.CommandTimeoutSec <= 0 {
+		cfg.GitOps.CommandTimeoutSec = 30
+	}
+
 	if cfg.Auth.SessionTTLHours <= 0 {
 		cfg.Auth.SessionTTLHours = 24
 	}
@@ -321,6 +475,34 @@ func validateConfig(cfg Config) error {
 		}
 		if (cfg.Jenkins.Username == "") != (cfg.Jenkins.APIToken == "") {
 			return errors.New("jenkins.username and jenkins.api_token must be set together")
+		}
+	}
+	if cfg.ArgoCD.Enabled {
+		if cfg.ArgoCD.BaseURL == "" {
+			return errors.New("argocd.base_url is required when argocd.enabled=true")
+		}
+		switch cfg.ArgoCD.AuthMode {
+		case "token":
+			if cfg.ArgoCD.Token == "" {
+				return errors.New("argocd.token is required when argocd.auth_mode=token")
+			}
+		case "password", "basic", "session":
+			if cfg.ArgoCD.Username == "" || cfg.ArgoCD.Password == "" {
+				return fmt.Errorf("argocd.username and argocd.password are required when argocd.auth_mode=%s", cfg.ArgoCD.AuthMode)
+			}
+		default:
+			return fmt.Errorf("unsupported argocd.auth_mode %q", cfg.ArgoCD.AuthMode)
+		}
+	}
+	if cfg.GitOps.Enabled {
+		if cfg.GitOps.LocalRoot == "" {
+			return errors.New("gitops.local_root is required when gitops.enabled=true")
+		}
+		if cfg.GitOps.DefaultBranch == "" {
+			return errors.New("gitops.default_branch is required when gitops.enabled=true")
+		}
+		if cfg.GitOps.AuthorName == "" || cfg.GitOps.AuthorEmail == "" {
+			return errors.New("gitops.author_name and gitops.author_email are required when gitops.enabled=true")
 		}
 	}
 

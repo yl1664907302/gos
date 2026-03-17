@@ -12,7 +12,7 @@ import {
   listPipelines,
   previewJenkinsRawPipelineConfigXML,
   syncJenkinsPipelines,
-  syncJenkinsPipelineParamDefs,
+  syncJenkinsExecutorParamDefs,
   updateJenkinsRawPipeline,
 } from '../../api/pipeline'
 import { useResizableColumns } from '../../composables/useResizableColumns'
@@ -237,7 +237,7 @@ async function handleManualSync() {
       )
     }
     if (authStore.hasPermission('pipeline.manage') || authStore.hasPermission('pipeline_param.manage')) {
-      const paramResult = await syncJenkinsPipelineParamDefs()
+      const paramResult = await syncJenkinsExecutorParamDefs()
       summaries.push(
         `参数 ${paramResult.data.total} 条（新增 ${paramResult.data.created} / 更新 ${paramResult.data.updated} / 失效 ${paramResult.data.inactivated} / 跳过 ${paramResult.data.skipped}）`,
       )

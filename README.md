@@ -23,7 +23,7 @@ GOS 不是 Jenkins 的替代品，而是 Jenkins 上层的发布治理层：
 ### Jenkins 管理
 
 - Jenkins 管线自动同步 / 手动同步
-- Jenkins 管线参数同步
+- Jenkins 执行器参数同步
 - 管线列表展示
 - 原始脚本查看
 - 原始链接跳转
@@ -75,7 +75,7 @@ flowchart LR
 | 模块 | 当前能力 |
 | --- | --- |
 | 应用管理 | 我的应用、管线绑定、标准字库 |
-| 组件管理 | Jenkins 管线列表、管线参数 |
+| 组件管理 | Jenkins 管线列表、执行器参数 |
 | 发布管理 | 发布单、发布模板、日志与进度 |
 | 系统管理 | 用户管理、权限授权 |
 
@@ -158,7 +158,7 @@ npm run dev
 - 登录页：`/login`
 - 我的应用：`/applications`
 - Jenkins 管线列表：`/components/jenkins`
-- 管线参数：`/components/pipeline-params`
+- 执行器参数：`/components/executor-params`
 - 发布单：`/releases`
 - 发布模板：`/release-templates`
 - 用户管理：`/system/users`
@@ -170,7 +170,7 @@ npm run dev
 
 - `application`
 - `pipeline`
-- `pipeline_param_def`
+- `executor_param_def`
 - `platform_param_dict`
 - `app_pipeline_binding`
 - `binding_param_rule`

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { ExclamationCircleOutlined, PlusOutlined, SafetyCertificateOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
@@ -43,7 +43,6 @@ const filters = reactive({
   param_key: '',
   name: '',
   status: '' as '' | PlatformParamStatus,
-  builtin: '' as '' | 'true' | 'false',
   page: 1,
   pageSize: 20,
 })
@@ -55,7 +54,6 @@ const formState = reactive<FormState>({
   description: '',
   param_type: 'string',
   required: false,
-  builtin: false,
   status: 1,
 })
 
@@ -65,7 +63,6 @@ const initialColumns: TableColumnsType<PlatformParamDict> = [
   { title: '字段说明', dataIndex: 'description', key: 'description', width: 260, ellipsis: true },
   { title: '字段类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
   { title: '默认必填', dataIndex: 'required', key: 'required', width: 110 },
-  { title: '内置字段', dataIndex: 'builtin', key: 'builtin', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 110 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
   { title: '操作', key: 'actions', width: 220, fixed: 'right' },
@@ -82,11 +79,6 @@ const typeOptions = [
 const statusOptions = [
   { label: '启用', value: 1 },
   { label: '停用', value: 0 },
-] as const
-
-const builtinOptions = [
-  { label: '是', value: 'true' },
-  { label: '否', value: 'false' },
 ] as const
 
 const modalTitle = computed(() => (modalMode.value === 'create' ? '新增标准字段' : '编辑标准字段'))
@@ -110,13 +102,6 @@ function boolText(value: boolean) {
   return value ? '是' : '否'
 }
 
-function parseBuiltinFilter() {
-  if (filters.builtin === '') {
-    return undefined
-  }
-  return filters.builtin === 'true'
-}
-
 function normalizeParamKey(value: string) {
   return value.trim().toLowerCase()
 }
@@ -128,7 +113,6 @@ function resetFormState() {
   formState.description = ''
   formState.param_type = 'string'
   formState.required = false
-  formState.builtin = false
   formState.status = 1
 }
 
@@ -139,7 +123,6 @@ function toPayload(): PlatformParamDictPayload {
     description: formState.description.trim(),
     param_type: formState.param_type,
     required: formState.required,
-    builtin: formState.builtin,
     status: formState.status,
   }
 }
@@ -151,7 +134,6 @@ async function loadPlatformParams() {
       param_key: filters.param_key.trim() || undefined,
       name: filters.name.trim() || undefined,
       status: filters.status === '' ? undefined : filters.status,
-      builtin: parseBuiltinFilter(),
       page: filters.page,
       page_size: filters.pageSize,
     })
@@ -175,7 +157,6 @@ function handleReset() {
   filters.param_key = ''
   filters.name = ''
   filters.status = ''
-  filters.builtin = ''
   filters.page = 1
   filters.pageSize = 20
   void loadPlatformParams()
@@ -205,7 +186,6 @@ async function openEditModal(record: PlatformParamDict) {
     formState.description = item.description
     formState.param_type = item.param_type
     formState.required = item.required
-    formState.builtin = item.builtin
     formState.status = item.status
     modalVisible.value = true
   } catch (error) {
@@ -291,7 +271,7 @@ onMounted(() => {
     <div class="page-header-card page-header">
       <div>
         <h2 class="page-title">标准字库</h2>
-        <p class="page-subtitle">统一维护平台标准字段，为管线参数映射提供下拉数据源。</p>
+        <p class="page-subtitle">统一维护平台标准字段，为执行器参数映射提供下拉数据源。</p>
       </div>
       <a-button type="primary" @click="openCreateModal">
         <template #icon>
@@ -318,15 +298,6 @@ onMounted(() => {
             :options="statusOptions"
           />
         </a-form-item>
-        <a-form-item label="内置字段">
-          <a-select
-            v-model:value="filters.builtin"
-            class="filter-select"
-            allow-clear
-            placeholder="全部"
-            :options="builtinOptions"
-          />
-        </a-form-item>
         <a-form-item>
           <a-space>
             <a-button type="primary" @click="handleSearch">查询</a-button>
@@ -346,11 +317,16 @@ onMounted(() => {
         :scroll="{ x: 1540 }"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'required'">
-            {{ boolText(record.required) }}
+          <template v-if="column.key === 'param_key'">
+            <span class="param-key-cell">
+              <span>{{ record.param_key }}</span>
+              <a-tooltip v-if="record.builtin" title="系统内置字段">
+                <SafetyCertificateOutlined class="builtin-icon" />
+              </a-tooltip>
+            </span>
           </template>
-          <template v-else-if="column.key === 'builtin'">
-            {{ boolText(record.builtin) }}
+          <template v-else-if="column.key === 'required'">
+            {{ boolText(record.required) }}
           </template>
           <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ statusText(record.status) }}</a-tag>
@@ -361,18 +337,20 @@ onMounted(() => {
           <template v-else-if="column.key === 'actions'">
             <a-space>
               <a-button type="link" size="small" @click="openDetailDrawer(record)">查看</a-button>
-              <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
-              <a-popconfirm
-                title="确认删除当前标准字段吗？"
-                ok-text="删除"
-                cancel-text="取消"
-                @confirm="handleDelete(record)"
-              >
-                <template #icon>
-                  <ExclamationCircleOutlined class="danger-icon" />
-                </template>
-                <a-button type="link" size="small" danger :loading="deletingID === record.id">删除</a-button>
-              </a-popconfirm>
+              <template v-if="!record.builtin">
+                <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+                <a-popconfirm
+                  title="确认删除当前标准字段吗？"
+                  ok-text="删除"
+                  cancel-text="取消"
+                  @confirm="handleDelete(record)"
+                >
+                  <template #icon>
+                    <ExclamationCircleOutlined class="danger-icon" />
+                  </template>
+                  <a-button type="link" size="small" danger :loading="deletingID === record.id">删除</a-button>
+                </a-popconfirm>
+              </template>
             </a-space>
           </template>
         </template>
@@ -403,6 +381,14 @@ onMounted(() => {
       @cancel="closeModal"
     >
       <a-form ref="formRef" :model="formState" layout="vertical">
+        <a-alert
+          v-if="modalMode === 'create'"
+          type="info"
+          show-icon
+          class="modal-alert"
+          message="平台手动新增的标准字段默认都是非内置字段。"
+        />
+
         <a-form-item
           label="标准 Key"
           name="param_key"
@@ -447,10 +433,6 @@ onMounted(() => {
           <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
         </a-form-item>
 
-        <a-form-item label="内置字段" name="builtin">
-          <a-switch v-model:checked="formState.builtin" checked-children="是" un-checked-children="否" />
-        </a-form-item>
-
         <a-form-item label="状态" name="status" :rules="[{ required: true, message: '请选择状态' }]">
           <a-select v-model:value="formState.status" :options="statusOptions" />
         </a-form-item>
@@ -461,12 +443,18 @@ onMounted(() => {
       <a-skeleton v-if="detailLoading" active :paragraph="{ rows: 8 }" />
       <a-descriptions v-else-if="detailData" :column="1" bordered>
         <a-descriptions-item label="字段 ID">{{ detailData.id }}</a-descriptions-item>
-        <a-descriptions-item label="标准 Key">{{ detailData.param_key }}</a-descriptions-item>
+        <a-descriptions-item label="标准 Key">
+          <span class="param-key-cell">
+            <span>{{ detailData.param_key }}</span>
+            <a-tooltip v-if="detailData.builtin" title="系统内置字段">
+              <SafetyCertificateOutlined class="builtin-icon" />
+            </a-tooltip>
+          </span>
+        </a-descriptions-item>
         <a-descriptions-item label="字段名称">{{ detailData.name }}</a-descriptions-item>
         <a-descriptions-item label="字段说明">{{ detailData.description || '-' }}</a-descriptions-item>
         <a-descriptions-item label="字段类型">{{ detailData.param_type }}</a-descriptions-item>
         <a-descriptions-item label="默认必填">{{ boolText(detailData.required) }}</a-descriptions-item>
-        <a-descriptions-item label="内置字段">{{ boolText(detailData.builtin) }}</a-descriptions-item>
         <a-descriptions-item label="状态">{{ statusText(detailData.status) }}</a-descriptions-item>
         <a-descriptions-item label="创建时间">{{ formatTime(detailData.created_at) }}</a-descriptions-item>
         <a-descriptions-item label="更新时间">{{ formatTime(detailData.updated_at) }}</a-descriptions-item>
@@ -499,6 +487,20 @@ onMounted(() => {
 
 .danger-icon {
   color: #ff4d4f;
+}
+
+.param-key-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.builtin-icon {
+  color: #1677ff;
+}
+
+.modal-alert {
+  margin-bottom: var(--space-4);
 }
 
 .pagination-area {

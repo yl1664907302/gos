@@ -18,7 +18,6 @@ type PipelineBindingManager struct {
 
 type CreatePipelineBindingInput struct {
 	BindingType domain.BindingType
-	Name        string
 	Provider    domain.Provider
 	PipelineID  string
 	ExternalRef string
@@ -58,7 +57,6 @@ func (uc *PipelineBindingManager) Create(ctx context.Context, applicationID stri
 	if !status.Valid() {
 		return domain.PipelineBinding{}, ErrInvalidStatus
 	}
-
 	provider, pipelineID, externalRef, err := normalizeBindingTarget(
 		input.BindingType,
 		input.Provider,
@@ -82,12 +80,9 @@ func (uc *PipelineBindingManager) Create(ctx context.Context, applicationID stri
 		}
 	}
 
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		name, err = uc.defaultBindingName(ctx, provider, pipelineID, externalRef)
-		if err != nil {
-			return domain.PipelineBinding{}, err
-		}
+	name, err := uc.defaultBindingName(ctx, provider, pipelineID, externalRef)
+	if err != nil {
+		return domain.PipelineBinding{}, err
 	}
 	if name == "" {
 		name = string(input.BindingType)
@@ -167,6 +162,9 @@ func (uc *PipelineBindingManager) Update(ctx context.Context, id string, input d
 	if err != nil {
 		return domain.PipelineBinding{}, err
 	}
+	if _, err := uc.appRepo.GetByID(ctx, existing.ApplicationID); err != nil {
+		return domain.PipelineBinding{}, err
+	}
 
 	bindingType := existing.BindingType
 	if bindingType == "" {
@@ -201,7 +199,6 @@ func (uc *PipelineBindingManager) Update(ctx context.Context, id string, input d
 	if strings.TrimSpace(externalRefInput) == "" {
 		externalRefInput = existing.ExternalRef
 	}
-
 	provider, pipelineID, externalRef, err := normalizeBindingTarget(
 		bindingType,
 		providerInput,
@@ -217,15 +214,9 @@ func (uc *PipelineBindingManager) Update(ctx context.Context, id string, input d
 		}
 	}
 
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		name = strings.TrimSpace(existing.Name)
-	}
-	if name == "" {
-		name, err = uc.defaultBindingName(ctx, provider, pipelineID, externalRef)
-		if err != nil {
-			return domain.PipelineBinding{}, err
-		}
+	name, err := uc.defaultBindingName(ctx, provider, pipelineID, externalRef)
+	if err != nil {
+		return domain.PipelineBinding{}, err
 	}
 	if name == "" {
 		name = string(bindingType)
@@ -290,7 +281,7 @@ func normalizeBindingTarget(
 
 	case domain.BindingTypeCD:
 		if provider == "" {
-			provider = domain.ProviderArgoCD
+			provider = domain.ProviderJenkins
 		}
 		if !provider.Valid() {
 			return "", "", "", ErrInvalidProvider
@@ -306,19 +297,28 @@ func normalizeBindingTarget(
 			}
 			return provider, pipelineID, "", nil
 		case domain.ProviderArgoCD:
-			if pipelineID != "" {
-				return "", "", "", fmt.Errorf("%w: cd argocd binding does not support pipeline_id", ErrInvalidInput)
-			}
-			if externalRef == "" {
-				return "", "", "", fmt.Errorf("%w: cd argocd binding requires external_ref", ErrInvalidInput)
-			}
-			return provider, "", externalRef, nil
+			return "", "", "", fmt.Errorf("%w: cd argocd has moved to release template configuration", ErrInvalidInput)
 		default:
 			return "", "", "", ErrInvalidProvider
 		}
 	default:
 		return "", "", "", ErrInvalidBindingType
 	}
+}
+
+func shouldAutoFillArgoCDExternalRef(bindingType domain.BindingType, provider domain.Provider) bool {
+	if bindingType != domain.BindingTypeCD {
+		return false
+	}
+	return provider == "" || provider == domain.ProviderArgoCD
+}
+
+func deriveArgoCDExternalRef(app appdomain.Application) (string, error) {
+	appKey := strings.TrimSpace(app.Key)
+	if appKey == "" {
+		return "", fmt.Errorf("%w: application app_key is required when cd provider is argocd", ErrInvalidInput)
+	}
+	return "apps/" + appKey, nil
 }
 
 func (uc *PipelineBindingManager) defaultBindingName(
@@ -344,7 +344,14 @@ func (uc *PipelineBindingManager) defaultBindingName(
 		}
 		return strings.TrimSpace(pipelineID), nil
 	case domain.ProviderArgoCD:
-		return strings.TrimSpace(externalRef), nil
+		value := strings.Trim(strings.TrimSpace(externalRef), "/")
+		if value == "" {
+			return "", nil
+		}
+		if idx := strings.LastIndex(value, "/"); idx >= 0 && idx < len(value)-1 {
+			value = value[idx+1:]
+		}
+		return value, nil
 	default:
 		if ref := strings.TrimSpace(externalRef); ref != "" {
 			return ref, nil

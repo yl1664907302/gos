@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"gos/internal/application/usecase"
+	pipelinedomain "gos/internal/domain/pipeline"
 	releasedomain "gos/internal/domain/release"
 	userdomain "gos/internal/domain/user"
 )
@@ -41,6 +42,7 @@ type CreateReleaseTemplateRequest struct {
 	ApplicationID string   `json:"application_id"`
 	CIBindingID   string   `json:"ci_binding_id"`
 	CDBindingID   string   `json:"cd_binding_id"`
+	CDProvider    string   `json:"cd_provider"`
 	Status        string   `json:"status"`
 	Remark        string   `json:"remark"`
 	CIParamDefIDs []string `json:"ci_param_def_ids"`
@@ -51,6 +53,7 @@ type UpdateReleaseTemplateRequest struct {
 	Name          string   `json:"name"`
 	CIBindingID   string   `json:"ci_binding_id"`
 	CDBindingID   string   `json:"cd_binding_id"`
+	CDProvider    string   `json:"cd_provider"`
 	Status        string   `json:"status"`
 	Remark        string   `json:"remark"`
 	CIParamDefIDs []string `json:"ci_param_def_ids"`
@@ -78,7 +81,7 @@ type ReleaseTemplateParamResponse struct {
 	TemplateBindingID  string    `json:"template_binding_id"`
 	PipelineScope      string    `json:"pipeline_scope"`
 	BindingID          string    `json:"binding_id"`
-	PipelineParamDefID string    `json:"pipeline_param_def_id"`
+	ExecutorParamDefID string    `json:"executor_param_def_id"`
 	ParamKey           string    `json:"param_key"`
 	ParamName          string    `json:"param_name"`
 	ExecutorParamName  string    `json:"executor_param_name"`
@@ -132,6 +135,7 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		ApplicationID: req.ApplicationID,
 		CIBindingID:   req.CIBindingID,
 		CDBindingID:   req.CDBindingID,
+		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
 		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
@@ -213,6 +217,7 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		Name:          req.Name,
 		CIBindingID:   req.CIBindingID,
 		CDBindingID:   req.CDBindingID,
+		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
 		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
@@ -375,7 +380,7 @@ func toReleaseTemplateParamResponse(item releasedomain.ReleaseTemplateParam) Rel
 		TemplateBindingID:  item.TemplateBindingID,
 		PipelineScope:      string(item.PipelineScope),
 		BindingID:          item.BindingID,
-		PipelineParamDefID: item.PipelineParamDefID,
+		ExecutorParamDefID: item.ExecutorParamDefID,
 		ParamKey:           item.ParamKey,
 		ParamName:          item.ParamName,
 		ExecutorParamName:  item.ExecutorParamName,

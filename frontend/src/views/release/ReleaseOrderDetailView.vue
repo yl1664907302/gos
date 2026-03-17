@@ -42,7 +42,8 @@ const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const AUTO_REFRESH_INTERVAL_MS = 5000
-const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 15000
+// Keep pipeline stages in sync with the main release polling cadence so progress feels responsive.
+const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 5000
 
 type ScopeLogState = {
   text: string
@@ -218,6 +219,7 @@ const stageSections = computed(() =>
       execution,
       stages: stageGroupsByScope.value[scope],
       isJenkins: execution?.provider === 'jenkins',
+      isArgoCD: execution?.provider === 'argocd',
     }
   }),
 )
@@ -1039,13 +1041,20 @@ onBeforeUnmount(() => {
           </div>
 
           <a-alert
-            v-if="!section.isJenkins"
+            v-if="section.isArgoCD"
+            class="pipeline-stage-alert"
+            type="info"
+            show-icon
+            message="当前阶段来自 ArgoCD 执行链路，展示的是 GitOps 写回 / Sync / 健康检查的聚合进度。"
+          />
+          <a-alert
+            v-else-if="!section.isJenkins"
             class="pipeline-stage-alert"
             type="info"
             show-icon
             :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，部署进度视图待接入。`"
           />
-          <a-empty v-else-if="section.stages.length === 0" description="暂无阶段数据" />
+          <a-empty v-if="section.stages.length === 0" description="暂无阶段数据" />
           <a-table
             v-else
             row-key="id"
@@ -1071,12 +1080,18 @@ onBeforeUnmount(() => {
                 {{ formatTime(record.finished_at) }}
               </template>
               <template v-else-if="column.key === 'actions'">
-                <a-button type="link" size="small" @click="openStageLogDrawer(record)">
+                <a-button
+                  v-if="section.isJenkins"
+                  type="link"
+                  size="small"
+                  @click="openStageLogDrawer(record)"
+                >
                   <template #icon>
                     <EyeOutlined />
                   </template>
                   查看日志
                 </a-button>
+                <span v-else>-</span>
               </template>
             </template>
           </a-table>
@@ -1107,7 +1122,9 @@ onBeforeUnmount(() => {
         class="log-alert"
         type="info"
         show-icon
-        :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`"
+        :message="section.execution?.provider === 'argocd'
+          ? `${scopeLabel(section.scope)} 当前使用 ArgoCD，当前版本先展示执行进度；事件流/日志视图将在后续版本补齐。`
+          : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`"
       />
       <template v-else>
         <a-alert v-if="section.state.error" class="log-alert" type="warning" show-icon :message="section.state.error" />

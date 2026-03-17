@@ -7,15 +7,15 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApplicationByID, listApplications } from '../../api/application'
 import {
-  getPipelineParamDefByID,
-  listApplicationPipelineParamDefs,
+  getExecutorParamDefByID,
+  listApplicationExecutorParamDefs,
   listPipelineBindings,
-  updatePipelineParamDef,
+  updateExecutorParamDef,
 } from '../../api/pipeline'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import type { Application } from '../../types/application'
-import type { BindingType, PipelineBinding, PipelineParamDef } from '../../types/pipeline'
+import type { BindingType, PipelineBinding, ExecutorParamDef } from '../../types/pipeline'
 import type { PlatformParamDict } from '../../types/platform-param'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
@@ -49,7 +49,7 @@ const applicationsLoading = ref(false)
 const mappingOptionsLoading = ref(false)
 const mappingSubmitting = ref(false)
 
-const dataSource = ref<PipelineParamDef[]>([])
+const dataSource = ref<ExecutorParamDef[]>([])
 const total = ref(0)
 const applicationOptions = ref<ApplicationOption[]>([])
 const selectedApplication = ref<Application | null>(null)
@@ -58,7 +58,7 @@ const routeBindingHint = ref<RouteBindingHint | null>(null)
 
 const detailVisible = ref(false)
 const detailLoading = ref(false)
-const detailData = ref<PipelineParamDef | null>(null)
+const detailData = ref<ExecutorParamDef | null>(null)
 
 const mappingVisible = ref(false)
 const mappingFormRef = ref<FormInstance>()
@@ -81,8 +81,8 @@ const mappingForm = reactive<MappingFormState>({
   param_key: undefined,
 })
 
-const initialColumns: TableColumnsType<PipelineParamDef> = [
-  { title: '所属管线', dataIndex: 'pipeline_name', key: 'pipeline_name', width: 220 },
+const initialColumns: TableColumnsType<ExecutorParamDef> = [
+  { title: '所属执行器', dataIndex: 'pipeline_name', key: 'pipeline_name', width: 220 },
   { title: '真实参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
   { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
   { title: '参数类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
@@ -104,7 +104,7 @@ const pageSubtitle = computed(() => {
     return '请选择应用后查看其已绑定 Jenkins 管线的真实参数。'
   }
   if (selectedPipelineLabel.value !== '-') {
-    return `当前应用：${selectedApplication.value.name}（${selectedApplication.value.key}） · 所属管线：${selectedPipelineLabel.value}`
+    return `当前应用：${selectedApplication.value.name}（${selectedApplication.value.key}） · 所属执行器：${selectedPipelineLabel.value}`
   }
   return `当前应用：${selectedApplication.value.name}（${selectedApplication.value.key}）`
 })
@@ -123,7 +123,7 @@ const emptyDescription = computed(() => {
   if (!filters.application_id) {
     return '请先选择应用'
   }
-  return '当前应用暂无可展示的 Jenkins 管线参数'
+  return '当前应用暂无可展示的 Jenkins 执行器参数'
 })
 
 function formatTime(value: string) {
@@ -157,7 +157,7 @@ function syncRouteQuery() {
     nextQuery.binding_type = filters.binding_type
   }
   routeBindingHint.value = null
-  void router.replace({ path: '/components/pipeline-params', query: nextQuery })
+  void router.replace({ path: '/components/executor-params', query: nextQuery })
 }
 
 function applyRouteQuery() {
@@ -265,11 +265,11 @@ async function loadSelectedBinding() {
     selectedBinding.value = response.data[0] ?? null
   } catch (error) {
     selectedBinding.value = null
-    message.error(extractHTTPErrorMessage(error, '所属管线信息加载失败'))
+    message.error(extractHTTPErrorMessage(error, '所属执行器信息加载失败'))
   }
 }
 
-async function loadPipelineParams() {
+async function loadExecutorParams() {
   if (!filters.application_id) {
     dataSource.value = []
     total.value = 0
@@ -281,7 +281,7 @@ async function loadPipelineParams() {
   await loadSelectedBinding()
   loading.value = true
   try {
-    const response = await listApplicationPipelineParamDefs(filters.application_id, {
+    const response = await listApplicationExecutorParamDefs(filters.application_id, {
       binding_type: filters.binding_type,
       param_key: filters.param_key.trim() || undefined,
       status: filters.status || undefined,
@@ -297,7 +297,7 @@ async function loadPipelineParams() {
   } catch (error) {
     dataSource.value = []
     total.value = 0
-    message.error(extractHTTPErrorMessage(error, '管线参数加载失败'))
+    message.error(extractHTTPErrorMessage(error, '执行器参数加载失败'))
   } finally {
     loading.value = false
   }
@@ -306,7 +306,7 @@ async function loadPipelineParams() {
 function handleSearch() {
   filters.page = 1
   syncRouteQuery()
-  void loadPipelineParams()
+  void loadExecutorParams()
 }
 
 function handleReset() {
@@ -323,13 +323,13 @@ function handleReset() {
     total.value = 0
     return
   }
-  void loadPipelineParams()
+  void loadExecutorParams()
 }
 
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
-  void loadPipelineParams()
+  void loadExecutorParams()
 }
 
 function handleApplicationChange(value: string) {
@@ -338,7 +338,7 @@ function handleApplicationChange(value: string) {
   selectedApplication.value = null
   selectedBinding.value = null
   syncRouteQuery()
-  void loadPipelineParams()
+  void loadExecutorParams()
 }
 
 function handleBindingTypeChange(value: BindingType) {
@@ -349,15 +349,15 @@ function handleBindingTypeChange(value: BindingType) {
   if (!filters.application_id) {
     return
   }
-  void loadPipelineParams()
+  void loadExecutorParams()
 }
 
-async function openDetailDrawer(record: PipelineParamDef) {
+async function openDetailDrawer(record: ExecutorParamDef) {
   detailVisible.value = true
   detailLoading.value = true
   detailData.value = null
   try {
-    const response = await getPipelineParamDefByID(record.id)
+    const response = await getExecutorParamDefByID(record.id)
     detailData.value = response.data
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '参数详情加载失败'))
@@ -372,10 +372,10 @@ function closeDetailDrawer() {
   detailData.value = null
 }
 
-async function openMappingModal(record: PipelineParamDef) {
+async function openMappingModal(record: ExecutorParamDef) {
   mappingSubmitting.value = false
   try {
-    const response = await getPipelineParamDefByID(record.id)
+    const response = await getExecutorParamDefByID(record.id)
     const item = response.data
     mappingForm.id = item.id
     mappingForm.executor_param_name = item.executor_param_name
@@ -398,12 +398,12 @@ async function submitMapping() {
   await mappingFormRef.value?.validate()
   mappingSubmitting.value = true
   try {
-    await updatePipelineParamDef(mappingForm.id, {
+    await updateExecutorParamDef(mappingForm.id, {
       param_key: String(mappingForm.param_key || '').trim(),
     })
     message.success('平台标准参数映射更新成功')
     closeMappingModal()
-    await loadPipelineParams()
+    await loadExecutorParams()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '平台标准参数映射更新失败'))
   } finally {
@@ -416,7 +416,7 @@ onMounted(async () => {
   await loadApplicationsForSelect()
   if (filters.application_id) {
     await ensureSelectedApplication()
-    await loadPipelineParams()
+    await loadExecutorParams()
   }
 })
 </script>
@@ -425,7 +425,7 @@ onMounted(async () => {
   <div class="page-wrapper">
     <div class="page-header-card page-header">
       <div>
-        <h2 class="page-title">管线参数</h2>
+        <h2 class="page-title">执行器参数</h2>
         <p class="page-subtitle">{{ pageSubtitle }}</p>
       </div>
       <a-button
@@ -604,11 +604,11 @@ onMounted(async () => {
       </a-form>
     </a-modal>
 
-    <a-drawer :open="detailVisible" title="管线参数详情" width="720" @close="closeDetailDrawer">
+    <a-drawer :open="detailVisible" title="执行器参数详情" width="720" @close="closeDetailDrawer">
       <a-skeleton v-if="detailLoading" active :paragraph="{ rows: 10 }" />
       <a-descriptions v-else-if="detailData" :column="1" bordered>
         <a-descriptions-item label="参数 ID">{{ detailData.id }}</a-descriptions-item>
-        <a-descriptions-item label="所属管线">
+        <a-descriptions-item label="所属执行器">
           {{ selectedPipelineLabel !== '-' ? selectedPipelineLabel : detailData.pipeline_id }}
         </a-descriptions-item>
         <a-descriptions-item label="管线 ID">{{ detailData.pipeline_id }}</a-descriptions-item>

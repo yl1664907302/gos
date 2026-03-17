@@ -32,5 +32,27 @@
     "auto_sync_interval_sec": 300,
     "release_track_enabled": true,
     "release_track_interval_sec": 10
+  },
+  "argocd": {
+    "enabled": false,
+    "base_url": "https://argocd.internal.company",
+    "insecure_skip_verify": false,
+    "auth_mode": "token",
+    "token": "${ARGOCD_TOKEN}",
+    "startup_check_enabled": true,
+    "sync_enabled": true,
+    "sync_interval_sec": 300,
+    "request_timeout_sec": 30
+  },
+  "gitops": {
+    "enabled": false,
+    "local_root": "/data/gitops",
+    "default_branch": "master",
+    "username": "gitops_bot",
+    "password": "${GITOPS_PASSWORD}",
+    "token": "",
+    "author_name": "gos-bot",
+    "author_email": "gos@example.com",
+    "command_timeout_sec": 30
   }
 }

@@ -172,7 +172,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	template_binding_id VARCHAR(64) NOT NULL DEFAULT '',
 	pipeline_scope VARCHAR(20) NOT NULL DEFAULT '',
 	binding_id VARCHAR(64) NOT NULL DEFAULT '',
-	pipeline_param_def_id VARCHAR(64) NOT NULL,
+	executor_param_def_id VARCHAR(64) NOT NULL,
 	param_key VARCHAR(100) NOT NULL,
 	param_name VARCHAR(100) NOT NULL DEFAULT '',
 	executor_param_name VARCHAR(100) NOT NULL DEFAULT '',
@@ -180,7 +180,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	sort_no INT NOT NULL DEFAULT 0,
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
-	UNIQUE KEY uk_release_template_param_unique (template_id, pipeline_param_def_id),
+	UNIQUE KEY uk_release_template_param_unique (template_id, executor_param_def_id),
 	KEY idx_release_template_param_template_sort (template_id, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		}, nil
@@ -318,7 +318,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	template_binding_id TEXT NOT NULL DEFAULT '',
 	pipeline_scope TEXT NOT NULL DEFAULT '',
 	binding_id TEXT NOT NULL DEFAULT '',
-	pipeline_param_def_id TEXT NOT NULL,
+	executor_param_def_id TEXT NOT NULL,
 	param_key TEXT NOT NULL,
 	param_name TEXT NOT NULL DEFAULT '',
 	executor_param_name TEXT NOT NULL DEFAULT '',
@@ -326,7 +326,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	sort_no INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
-	UNIQUE(template_id, pipeline_param_def_id)
+	UNIQUE(template_id, executor_param_def_id)
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_template_param_template_sort ON release_template_param (template_id, sort_no);`,
 		}, nil
@@ -339,7 +339,28 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 	switch r.dbDriver {
 	case "mysql":
-		exists, err := r.mysqlColumnExists(ctx, "release_order", "son_service")
+		// `release_template_param` 历史上使用的是 `pipeline_param_def_id`。
+		// 现在主模型已经升级为 `executor_param_def_id`，这里在启动阶段做一次平滑迁移。
+		exists, err := r.mysqlColumnExists(ctx, "release_template_param", "pipeline_param_def_id")
+		if err != nil {
+			return err
+		}
+		if exists {
+			newExists, newErr := r.mysqlColumnExists(ctx, "release_template_param", "executor_param_def_id")
+			if newErr != nil {
+				return newErr
+			}
+			if !newExists {
+				if _, err = r.db.ExecContext(
+					ctx,
+					`ALTER TABLE release_template_param CHANGE COLUMN pipeline_param_def_id executor_param_def_id VARCHAR(64) NOT NULL;`,
+				); err != nil {
+					return err
+				}
+			}
+		}
+
+		exists, err = r.mysqlColumnExists(ctx, "release_order", "son_service")
 		if err != nil {
 			return err
 		}
@@ -441,7 +462,22 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 		)
 		return err
 	case "sqlite":
-		columns, err := r.sqliteTableColumns(ctx, "release_order")
+		columns, err := r.sqliteTableColumns(ctx, "release_template_param")
+		if err != nil {
+			return err
+		}
+		if _, ok := columns["pipeline_param_def_id"]; ok {
+			if _, hasNew := columns["executor_param_def_id"]; !hasNew {
+				if _, err = r.db.ExecContext(
+					ctx,
+					`ALTER TABLE release_template_param RENAME COLUMN pipeline_param_def_id TO executor_param_def_id;`,
+				); err != nil {
+					return err
+				}
+			}
+		}
+
+		columns, err = r.sqliteTableColumns(ctx, "release_order")
 		if err != nil {
 			return err
 		}
@@ -1441,7 +1477,7 @@ func (r *ReleaseRepository) insertTemplateParams(
 ) error {
 	const insertParam = `
 INSERT INTO release_template_param (
-	id, template_id, template_binding_id, pipeline_scope, binding_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+	id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	for _, item := range params {
@@ -1453,7 +1489,7 @@ INSERT INTO release_template_param (
 			item.TemplateBindingID,
 			string(item.PipelineScope),
 			item.BindingID,
-			item.PipelineParamDefID,
+			item.ExecutorParamDefID,
 			item.ParamKey,
 			item.ParamName,
 			item.ExecutorParamName,
@@ -1503,7 +1539,7 @@ func (r *ReleaseRepository) listTemplateParams(
 	templateID string,
 ) ([]domain.ReleaseTemplateParam, error) {
 	const q = `
-SELECT id, template_id, template_binding_id, pipeline_scope, binding_id, pipeline_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+SELECT id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
 FROM release_template_param
 WHERE template_id = ?
 ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
@@ -1833,7 +1869,7 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 		&item.TemplateBindingID,
 		&pipelineScope,
 		&item.BindingID,
-		&item.PipelineParamDefID,
+		&item.ExecutorParamDefID,
 		&item.ParamKey,
 		&item.ParamName,
 		&item.ExecutorParamName,

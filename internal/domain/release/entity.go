@@ -320,12 +320,14 @@ type ReleaseTemplateBinding struct {
 }
 
 type ReleaseTemplateParam struct {
-	ID                 string
-	TemplateID         string
-	TemplateBindingID  string
-	PipelineScope      PipelineScope
-	BindingID          string
-	PipelineParamDefID string
+	ID                string
+	TemplateID        string
+	TemplateBindingID string
+	PipelineScope     PipelineScope
+	BindingID         string
+	// ExecutorParamDefID 关联统一的执行器参数定义。
+	// 这里不再使用 pipeline_param_def 的命名，是为了让发布模板同时兼容 Jenkins 与 ArgoCD。
+	ExecutorParamDefID string
 	ParamKey           string
 	ParamName          string
 	ExecutorParamName  string

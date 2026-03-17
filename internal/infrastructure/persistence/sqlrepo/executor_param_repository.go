@@ -8,22 +8,34 @@ import (
 	"strings"
 	"time"
 
-	domain "gos/internal/domain/pipelineparam"
+	domain "gos/internal/domain/executorparam"
 )
 
-type PipelineParamRepository struct {
+type ExecutorParamRepository struct {
 	db       *sql.DB
 	dbDriver string
 }
 
-func NewPipelineParamRepository(db *sql.DB, dbDriver string) *PipelineParamRepository {
-	return &PipelineParamRepository{
+// NewExecutorParamRepository 统一承接“执行器参数定义”的持久化。
+//
+// 这里虽然是一次命名升级，但必须兼容线上已存在的旧表 `pipeline_param_def`。
+// 因此仓储初始化阶段会主动做表名迁移，保证旧数据无需手工导出导入。
+func NewExecutorParamRepository(db *sql.DB, dbDriver string) *ExecutorParamRepository {
+	return &ExecutorParamRepository{
 		db:       db,
 		dbDriver: strings.ToLower(strings.TrimSpace(dbDriver)),
 	}
 }
 
-func (r *PipelineParamRepository) InitSchema(ctx context.Context) error {
+func (r *ExecutorParamRepository) InitSchema(ctx context.Context) error {
+	// 兼容旧版本表名：
+	// 如果数据库里还是 `pipeline_param_def`，必须先迁移到新表名，
+	// 否则后续 `CREATE TABLE IF NOT EXISTS executor_param_def` 会先建空表，
+	// 导致旧数据仍留在老表里但新代码读不到。
+	if err := r.renameLegacyTable(ctx, "pipeline_param_def", "executor_param_def"); err != nil {
+		return err
+	}
+
 	statements, err := r.schemaStatements()
 	if err != nil {
 		return err
@@ -36,11 +48,11 @@ func (r *PipelineParamRepository) InitSchema(ctx context.Context) error {
 	return r.migrateSchema(ctx)
 }
 
-func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
+func (r *ExecutorParamRepository) schemaStatements() ([]string, error) {
 	switch r.dbDriver {
 	case "mysql":
 		return []string{
-			`CREATE TABLE IF NOT EXISTS pipeline_param_def (
+			`CREATE TABLE IF NOT EXISTS executor_param_def (
 	id VARCHAR(64) PRIMARY KEY,
 	pipeline_id VARCHAR(64) NOT NULL,
 	executor_type VARCHAR(50) NOT NULL,
@@ -67,7 +79,7 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 		}, nil
 	case "sqlite":
 		return []string{
-			`CREATE TABLE IF NOT EXISTS pipeline_param_def (
+			`CREATE TABLE IF NOT EXISTS executor_param_def (
 	id TEXT PRIMARY KEY,
 	pipeline_id TEXT NOT NULL,
 	executor_type TEXT NOT NULL,
@@ -88,16 +100,16 @@ func (r *PipelineParamRepository) schemaStatements() ([]string, error) {
 	updated_at INTEGER NOT NULL,
 	UNIQUE(pipeline_id, executor_type, executor_param_name)
 );`,
-			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_pipeline_sort ON pipeline_param_def (pipeline_id, sort_no);`,
-			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_param_key ON pipeline_param_def (param_key);`,
-			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_status ON pipeline_param_def (status);`,
+			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_pipeline_sort ON executor_param_def (pipeline_id, sort_no);`,
+			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_param_key ON executor_param_def (param_key);`,
+			`CREATE INDEX IF NOT EXISTS idx_pipeline_param_status ON executor_param_def (status);`,
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported db driver: %s", r.dbDriver)
 	}
 }
 
-func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
+func (r *ExecutorParamRepository) migrateSchema(ctx context.Context) error {
 	switch r.dbDriver {
 	case "mysql":
 		type columnDef struct {
@@ -107,15 +119,15 @@ func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
 		additions := []columnDef{
 			{
 				name: "single_select",
-				ddl:  `ALTER TABLE pipeline_param_def ADD COLUMN single_select TINYINT(1) NOT NULL DEFAULT 0 AFTER param_type;`,
+				ddl:  `ALTER TABLE executor_param_def ADD COLUMN single_select TINYINT(1) NOT NULL DEFAULT 0 AFTER param_type;`,
 			},
 			{
 				name: "status",
-				ddl:  `ALTER TABLE pipeline_param_def ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' AFTER source_from;`,
+				ddl:  `ALTER TABLE executor_param_def ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active' AFTER source_from;`,
 			},
 		}
 		for _, item := range additions {
-			exists, err := r.mysqlColumnExists(ctx, "pipeline_param_def", item.name)
+			exists, err := r.mysqlColumnExists(ctx, "executor_param_def", item.name)
 			if err != nil {
 				return err
 			}
@@ -128,14 +140,14 @@ func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
 		}
 		return nil
 	case "sqlite":
-		columns, err := r.sqliteTableColumns(ctx, "pipeline_param_def")
+		columns, err := r.sqliteTableColumns(ctx, "executor_param_def")
 		if err != nil {
 			return err
 		}
 		if _, ok := columns["single_select"]; !ok {
 			if _, err = r.db.ExecContext(
 				ctx,
-				`ALTER TABLE pipeline_param_def ADD COLUMN single_select INTEGER NOT NULL DEFAULT 0;`,
+				`ALTER TABLE executor_param_def ADD COLUMN single_select INTEGER NOT NULL DEFAULT 0;`,
 			); err != nil {
 				return err
 			}
@@ -143,7 +155,7 @@ func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
 		if _, ok := columns["status"]; !ok {
 			if _, err = r.db.ExecContext(
 				ctx,
-				`ALTER TABLE pipeline_param_def ADD COLUMN status TEXT NOT NULL DEFAULT 'active';`,
+				`ALTER TABLE executor_param_def ADD COLUMN status TEXT NOT NULL DEFAULT 'active';`,
 			); err != nil {
 				return err
 			}
@@ -154,7 +166,60 @@ func (r *PipelineParamRepository) migrateSchema(ctx context.Context) error {
 	}
 }
 
-func (r *PipelineParamRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {
+func (r *ExecutorParamRepository) renameLegacyTable(ctx context.Context, legacyTable, targetTable string) error {
+	targetExists, err := r.tableExists(ctx, targetTable)
+	if err != nil {
+		return err
+	}
+	if targetExists {
+		return nil
+	}
+
+	legacyExists, err := r.tableExists(ctx, legacyTable)
+	if err != nil {
+		return err
+	}
+	if !legacyExists {
+		return nil
+	}
+
+	switch r.dbDriver {
+	case "mysql":
+		_, err = r.db.ExecContext(ctx, fmt.Sprintf("RENAME TABLE %s TO %s;", legacyTable, targetTable))
+		return err
+	case "sqlite":
+		_, err = r.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", legacyTable, targetTable))
+		return err
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+}
+
+func (r *ExecutorParamRepository) tableExists(ctx context.Context, table string) (bool, error) {
+	switch r.dbDriver {
+	case "mysql":
+		const q = `
+SELECT COUNT(1)
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?;`
+		var count int
+		if err := r.db.QueryRowContext(ctx, q, table).Scan(&count); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	case "sqlite":
+		const q = `SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?;`
+		var count int
+		if err := r.db.QueryRowContext(ctx, q, table).Scan(&count); err != nil {
+			return false, err
+		}
+		return count > 0, nil
+	default:
+		return false, fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+}
+
+func (r *ExecutorParamRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {
 	const q = `
 SELECT COUNT(1)
 FROM INFORMATION_SCHEMA.COLUMNS
@@ -167,7 +232,7 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?;`
 	return count > 0, nil
 }
 
-func (r *PipelineParamRepository) sqliteTableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
+func (r *ExecutorParamRepository) sqliteTableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
 	q := fmt.Sprintf("PRAGMA table_info(%q);", table)
 	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
@@ -196,16 +261,16 @@ func (r *PipelineParamRepository) sqliteTableColumns(ctx context.Context, table 
 	return columns, nil
 }
 
-func (r *PipelineParamRepository) Upsert(ctx context.Context, items []domain.PipelineParamDef) (int, int, error) {
+func (r *ExecutorParamRepository) Upsert(ctx context.Context, items []domain.ExecutorParamDef) (int, int, error) {
 	if r.dbDriver == "mysql" {
 		return r.upsertMySQL(ctx, items)
 	}
 
 	const (
-		updateByKey = `UPDATE pipeline_param_def
+		updateByKey = `UPDATE executor_param_def
 SET param_type = ?, single_select = ?, required = ?, default_value = ?, description = ?, visible = ?, editable = ?, source_from = ?, status = ?, raw_meta = ?, sort_no = ?, updated_at = ?
 WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
-		insert = `INSERT INTO pipeline_param_def (
+		insert = `INSERT INTO executor_param_def (
 	id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	)
@@ -300,7 +365,7 @@ WHERE pipeline_id = ? AND executor_type = ? AND executor_param_name = ?;`
 	return created, updated, nil
 }
 
-func (r *PipelineParamRepository) upsertMySQL(ctx context.Context, items []domain.PipelineParamDef) (int, int, error) {
+func (r *ExecutorParamRepository) upsertMySQL(ctx context.Context, items []domain.ExecutorParamDef) (int, int, error) {
 	if len(items) == 0 {
 		return 0, 0, nil
 	}
@@ -313,7 +378,7 @@ func (r *PipelineParamRepository) upsertMySQL(ctx context.Context, items []domai
 	created := 0
 	updated := 0
 	for _, item := range items {
-		if _, ok := existingKeys[pipelineParamUniqueKey(item.PipelineID, item.ExecutorType, item.ExecutorParamName)]; ok {
+		if _, ok := existingKeys[executorParamUniqueKey(item.PipelineID, item.ExecutorType, item.ExecutorParamName)]; ok {
 			updated++
 			continue
 		}
@@ -345,13 +410,13 @@ func (r *PipelineParamRepository) upsertMySQL(ctx context.Context, items []domai
 	return created, updated, nil
 }
 
-func (r *PipelineParamRepository) mysqlBatchUpsert(ctx context.Context, tx *sql.Tx, items []domain.PipelineParamDef) error {
+func (r *ExecutorParamRepository) mysqlBatchUpsert(ctx context.Context, tx *sql.Tx, items []domain.ExecutorParamDef) error {
 	if len(items) == 0 {
 		return nil
 	}
 
 	var builder strings.Builder
-	builder.WriteString(`INSERT INTO pipeline_param_def (
+	builder.WriteString(`INSERT INTO executor_param_def (
 id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
 ) VALUES `)
 
@@ -401,7 +466,7 @@ updated_at = VALUES(updated_at)`)
 	return err
 }
 
-func (r *PipelineParamRepository) mysqlExistingParamKeys(ctx context.Context, items []domain.PipelineParamDef) (map[string]struct{}, error) {
+func (r *ExecutorParamRepository) mysqlExistingParamKeys(ctx context.Context, items []domain.ExecutorParamDef) (map[string]struct{}, error) {
 	pipelineIDs := make([]string, 0, len(items))
 	seenPipelineIDs := make(map[string]struct{}, len(items))
 	for _, item := range items {
@@ -422,7 +487,7 @@ func (r *PipelineParamRepository) mysqlExistingParamKeys(ctx context.Context, it
 
 		placeholders := strings.TrimRight(strings.Repeat("?,", end-start), ",")
 		query := fmt.Sprintf(`SELECT pipeline_id, executor_type, executor_param_name
-FROM pipeline_param_def
+FROM executor_param_def
 WHERE executor_type = ? AND pipeline_id IN (%s)`, placeholders)
 
 		args := make([]any, 0, end-start+1)
@@ -446,7 +511,7 @@ WHERE executor_type = ? AND pipeline_id IN (%s)`, placeholders)
 				_ = rows.Close()
 				return nil, err
 			}
-			result[pipelineParamUniqueKey(pipelineID, domain.ExecutorType(executorType), executorParamName)] = struct{}{}
+			result[executorParamUniqueKey(pipelineID, domain.ExecutorType(executorType), executorParamName)] = struct{}{}
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -458,11 +523,11 @@ WHERE executor_type = ? AND pipeline_id IN (%s)`, placeholders)
 	return result, nil
 }
 
-func pipelineParamUniqueKey(pipelineID string, executorType domain.ExecutorType, executorParamName string) string {
+func executorParamUniqueKey(pipelineID string, executorType domain.ExecutorType, executorParamName string) string {
 	return pipelineID + "\x00" + string(executorType) + "\x00" + executorParamName
 }
 
-func (r *PipelineParamRepository) MarkMissingInactive(
+func (r *ExecutorParamRepository) MarkMissingInactive(
 	ctx context.Context,
 	executorType domain.ExecutorType,
 	keepIDs []string,
@@ -472,7 +537,7 @@ func (r *PipelineParamRepository) MarkMissingInactive(
 		return 0, fmt.Errorf("invalid executor type: %s", executorType)
 	}
 
-	query := `UPDATE pipeline_param_def
+	query := `UPDATE executor_param_def
 SET status = ?, updated_at = ?
 WHERE executor_type = ? AND source_from = ? AND status <> ?`
 	args := []any{
@@ -509,7 +574,7 @@ WHERE executor_type = ? AND source_from = ? AND status <> ?`
 	return int(affected), nil
 }
 
-func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter domain.ListFilter) ([]domain.PipelineParamDef, int64, error) {
+func (r *ExecutorParamRepository) ListByPipeline(ctx context.Context, filter domain.ListFilter) ([]domain.ExecutorParamDef, int64, error) {
 	where := []string{"pipeline_id = ?"}
 	args := []any{filter.PipelineID}
 
@@ -534,7 +599,7 @@ func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter dom
 		args = append(args, string(filter.Status))
 	}
 
-	countQuery := "SELECT COUNT(1) FROM pipeline_param_def WHERE " + strings.Join(where, " AND ")
+	countQuery := "SELECT COUNT(1) FROM executor_param_def WHERE " + strings.Join(where, " AND ")
 	var total int64
 	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -542,7 +607,7 @@ func (r *PipelineParamRepository) ListByPipeline(ctx context.Context, filter dom
 
 	listQuery := `
 SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
-	FROM pipeline_param_def
+	FROM executor_param_def
 WHERE ` + strings.Join(where, " AND ") + `
 ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 
@@ -553,9 +618,9 @@ ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 	}
 	defer rows.Close()
 
-	items := make([]domain.PipelineParamDef, 0)
+	items := make([]domain.ExecutorParamDef, 0)
 	for rows.Next() {
-		item, scanErr := scanPipelineParam(rows)
+		item, scanErr := scanExecutorParam(rows)
 		if scanErr != nil {
 			return nil, 0, scanErr
 		}
@@ -567,45 +632,45 @@ ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 	return items, total, nil
 }
 
-func (r *PipelineParamRepository) GetByID(ctx context.Context, id string) (domain.PipelineParamDef, error) {
+func (r *ExecutorParamRepository) GetByID(ctx context.Context, id string) (domain.ExecutorParamDef, error) {
 	const q = `
 SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
-FROM pipeline_param_def
+FROM executor_param_def
 WHERE id = ?;`
 
 	row := r.db.QueryRowContext(ctx, q, id)
-	item, err := scanPipelineParam(row)
+	item, err := scanExecutorParam(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.PipelineParamDef{}, domain.ErrNotFound
+			return domain.ExecutorParamDef{}, domain.ErrNotFound
 		}
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 	return item, nil
 }
 
-func (r *PipelineParamRepository) UpdateParamKey(ctx context.Context, id string, paramKey string, updatedAt time.Time) (domain.PipelineParamDef, error) {
+func (r *ExecutorParamRepository) UpdateParamKey(ctx context.Context, id string, paramKey string, updatedAt time.Time) (domain.ExecutorParamDef, error) {
 	const q = `
-UPDATE pipeline_param_def
+UPDATE executor_param_def
 SET param_key = ?, updated_at = ?
 WHERE id = ?;`
 
 	res, err := r.db.ExecContext(ctx, q, paramKey, updatedAt.UTC().UnixNano(), id)
 	if err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 	if affected == 0 {
-		return domain.PipelineParamDef{}, domain.ErrNotFound
+		return domain.ExecutorParamDef{}, domain.ErrNotFound
 	}
 	return r.GetByID(ctx, id)
 }
 
-func (r *PipelineParamRepository) CountByParamKey(ctx context.Context, paramKey string) (int64, error) {
-	const q = `SELECT COUNT(1) FROM pipeline_param_def WHERE param_key = ?;`
+func (r *ExecutorParamRepository) CountByParamKey(ctx context.Context, paramKey string) (int64, error) {
+	const q = `SELECT COUNT(1) FROM executor_param_def WHERE param_key = ?;`
 	var total int64
 	if err := r.db.QueryRowContext(ctx, q, paramKey).Scan(&total); err != nil {
 		return 0, err
@@ -613,9 +678,9 @@ func (r *PipelineParamRepository) CountByParamKey(ctx context.Context, paramKey 
 	return total, nil
 }
 
-func scanPipelineParam(s scanner) (domain.PipelineParamDef, error) {
+func scanExecutorParam(s scanner) (domain.ExecutorParamDef, error) {
 	var (
-		item         domain.PipelineParamDef
+		item         domain.ExecutorParamDef
 		executorType string
 		paramType    string
 		singleSelect int
@@ -649,7 +714,7 @@ func scanPipelineParam(s scanner) (domain.PipelineParamDef, error) {
 		&createdAt,
 		&updatedAt,
 	); err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 
 	item.ExecutorType = domain.ExecutorType(executorType)

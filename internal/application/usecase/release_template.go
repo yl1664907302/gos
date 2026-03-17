@@ -3,17 +3,20 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
+	appdomain "gos/internal/domain/application"
+	pipelineparamdomain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
-	pipelineparamdomain "gos/internal/domain/pipelineparam"
 	platformparamdomain "gos/internal/domain/platformparam"
 	releasedomain "gos/internal/domain/release"
 )
 
 type ReleaseTemplateManager struct {
 	repo         releasedomain.Repository
+	appRepo      appdomain.Repository
 	pipelineRepo pipelinedomain.Repository
 	paramRepo    pipelineparamdomain.Repository
 	platformRepo platformparamdomain.Repository
@@ -25,6 +28,7 @@ type CreateReleaseTemplateInput struct {
 	ApplicationID string
 	CIBindingID   string
 	CDBindingID   string
+	CDProvider    pipelinedomain.Provider
 	Status        releasedomain.TemplateStatus
 	Remark        string
 	CIParamDefIDs []string
@@ -35,6 +39,7 @@ type UpdateReleaseTemplateInput struct {
 	Name          string
 	CIBindingID   string
 	CDBindingID   string
+	CDProvider    pipelinedomain.Provider
 	Status        releasedomain.TemplateStatus
 	Remark        string
 	CIParamDefIDs []string
@@ -52,12 +57,14 @@ type ListReleaseTemplateInput struct {
 
 func NewReleaseTemplateManager(
 	repo releasedomain.Repository,
+	appRepo appdomain.Repository,
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
 ) *ReleaseTemplateManager {
 	return &ReleaseTemplateManager{
 		repo:         repo,
+		appRepo:      appRepo,
 		pipelineRepo: pipelineRepo,
 		paramRepo:    paramRepo,
 		platformRepo: platformRepo,
@@ -90,6 +97,7 @@ func (uc *ReleaseTemplateManager) Create(
 		applicationID,
 		input.CIBindingID,
 		input.CDBindingID,
+		input.CDProvider,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
 	)
@@ -206,6 +214,7 @@ func (uc *ReleaseTemplateManager) Update(
 		current.ApplicationID,
 		input.CIBindingID,
 		input.CDBindingID,
+		input.CDProvider,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
 	)
@@ -259,6 +268,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	applicationID string,
 	ciBindingID string,
 	cdBindingID string,
+	cdProvider pipelinedomain.Provider,
 	ciParamDefIDs []string,
 	cdParamDefIDs []string,
 ) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, string, error) {
@@ -275,6 +285,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		applicationID,
 		releasedomain.PipelineScopeCI,
 		ciBindingID,
+		"",
 		ciParamDefIDs,
 		1,
 	)
@@ -291,6 +302,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		applicationID,
 		releasedomain.PipelineScopeCD,
 		cdBindingID,
+		cdProvider,
 		cdParamDefIDs,
 		2,
 	)
@@ -308,6 +320,9 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	if len(bindings) == 0 {
 		return nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
 	}
+	if err := uc.validateArgoCDTemplateImageVersion(ctx, bindings, params); err != nil {
+		return nil, nil, "", err
+	}
 	if appName == "" && len(bindings) > 0 {
 		appName = bindings[0].BindingName
 	}
@@ -319,11 +334,36 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 	applicationID string,
 	scope releasedomain.PipelineScope,
 	bindingID string,
+	desiredProvider pipelinedomain.Provider,
 	paramDefIDs []string,
 	sortNo int,
 ) (*releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, string, error) {
 	bindingID = strings.TrimSpace(bindingID)
 	if bindingID == "" {
+		if scope == releasedomain.PipelineScopeCD && desiredProvider == pipelinedomain.ProviderArgoCD {
+			if len(normalizeStringIDs(paramDefIDs)) > 0 {
+				return nil, nil, "", fmt.Errorf("%w: argocd cd 暂不支持额外执行器参数", ErrInvalidInput)
+			}
+			if uc.appRepo == nil {
+				return nil, nil, "", fmt.Errorf("%w: application repository is not configured", ErrInvalidInput)
+			}
+			app, err := uc.appRepo.GetByID(ctx, applicationID)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			// ArgoCD 模式下，CD 执行器不再依赖单独的“管线绑定”记录；
+			// 模板只要显式启用 CD 且未选择 Jenkins 绑定，就视为走 ArgoCD。
+			return &releasedomain.ReleaseTemplateBinding{
+				ID:            generateID("rtb"),
+				PipelineScope: scope,
+				BindingID:     "",
+				BindingName:   "ArgoCD",
+				Provider:      string(pipelinedomain.ProviderArgoCD),
+				PipelineID:    "",
+				Enabled:       true,
+				SortNo:        sortNo,
+			}, nil, app.Name, nil
+		}
 		if len(normalizeStringIDs(paramDefIDs)) > 0 {
 			return nil, nil, "", fmt.Errorf("%w: %s binding is required", ErrInvalidInput, strings.ToUpper(string(scope)))
 		}
@@ -381,7 +421,7 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 		if err != nil {
 			return nil, nil, "", err
 		}
-		if err := ensureActivePipelineParamDef(paramDef, "所选模板参数"); err != nil {
+		if err := ensureActiveExecutorParamDef(paramDef, "所选模板参数"); err != nil {
 			return nil, nil, "", err
 		}
 		if strings.TrimSpace(paramDef.PipelineID) != strings.TrimSpace(binding.PipelineID) {
@@ -403,7 +443,7 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 			TemplateBindingID:  templateBinding.ID,
 			PipelineScope:      scope,
 			BindingID:          binding.ID,
-			PipelineParamDefID: paramDef.ID,
+			ExecutorParamDefID: paramDef.ID,
 			ParamKey:           paramKey,
 			ParamName:          strings.TrimSpace(dict.Name),
 			ExecutorParamName:  strings.TrimSpace(paramDef.ExecutorParamName),
@@ -453,4 +493,118 @@ func summarizeTemplateBindings(bindings []releasedomain.ReleaseTemplateBinding) 
 		}
 	}
 	return strings.Join(scopeLabels, " + "), strings.Join(scopeTypes, "+")
+}
+
+func (uc *ReleaseTemplateManager) validateArgoCDTemplateImageVersion(
+	ctx context.Context,
+	bindings []releasedomain.ReleaseTemplateBinding,
+	params []releasedomain.ReleaseTemplateParam,
+) error {
+	var (
+		hasCIBinding bool
+		hasArgoCDCD  bool
+		hasEnvParam  bool
+		ciBinding    *releasedomain.ReleaseTemplateBinding
+	)
+	for _, item := range bindings {
+		if item.PipelineScope == releasedomain.PipelineScopeCI {
+			hasCIBinding = true
+			bindingCopy := item
+			ciBinding = &bindingCopy
+		}
+		if item.PipelineScope == releasedomain.PipelineScopeCD && strings.EqualFold(strings.TrimSpace(item.Provider), string(pipelinedomain.ProviderArgoCD)) {
+			hasArgoCDCD = true
+		}
+	}
+	if !hasArgoCDCD {
+		return nil
+	}
+	if !hasCIBinding || ciBinding == nil {
+		return fmt.Errorf("%w: cd 选择 argocd 时，必须同时启用 ci 执行单元", ErrInvalidInput)
+	}
+
+	builtinEnabled := true
+	enabledStatus := platformparamdomain.StatusEnabled
+	builtinDicts, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
+		Builtin:  &builtinEnabled,
+		Status:   &enabledStatus,
+		Page:     1,
+		PageSize: 500,
+	})
+	if err != nil {
+		return err
+	}
+	requiredBuiltinKeys := make(map[string]platformparamdomain.PlatformParamDict, len(builtinDicts))
+	for _, item := range builtinDicts {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		requiredBuiltinKeys[key] = item
+	}
+
+	ciMappedBuiltinKeys := make(map[string]struct{}, len(requiredBuiltinKeys))
+	if strings.TrimSpace(ciBinding.PipelineID) != "" {
+		defs, _, err := uc.paramRepo.ListByPipeline(ctx, pipelineparamdomain.ListFilter{
+			PipelineID: strings.TrimSpace(ciBinding.PipelineID),
+			Status:     pipelineparamdomain.StatusActive,
+			Page:       1,
+			PageSize:   500,
+		})
+		if err != nil {
+			return err
+		}
+		for _, item := range defs {
+			key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+			if key == "" {
+				continue
+			}
+			if _, ok := requiredBuiltinKeys[key]; ok {
+				ciMappedBuiltinKeys[key] = struct{}{}
+			}
+		}
+	}
+
+	ciSelectedBuiltinKeys := make(map[string]struct{}, len(requiredBuiltinKeys))
+	for _, item := range params {
+		if strings.EqualFold(strings.TrimSpace(item.ParamKey), "env") {
+			hasEnvParam = true
+		}
+		if item.PipelineScope != releasedomain.PipelineScopeCI {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if _, ok := requiredBuiltinKeys[key]; ok {
+			ciSelectedBuiltinKeys[key] = struct{}{}
+		}
+	}
+
+	missingMapped := make([]string, 0)
+	missingSelected := make([]string, 0)
+	for key, dict := range requiredBuiltinKeys {
+		label := strings.TrimSpace(dict.Name)
+		if label == "" {
+			label = key
+		} else {
+			label += " (" + key + ")"
+		}
+		if _, ok := ciMappedBuiltinKeys[key]; !ok {
+			missingMapped = append(missingMapped, label)
+		}
+		if _, ok := ciSelectedBuiltinKeys[key]; !ok {
+			missingSelected = append(missingSelected, label)
+		}
+	}
+	sort.Strings(missingMapped)
+	sort.Strings(missingSelected)
+	if len(missingMapped) > 0 {
+		return fmt.Errorf("%w: cd 选择 argocd 时，ci 绑定管线必须先映射这些内置字段：%s", ErrInvalidInput, strings.Join(missingMapped, "、"))
+	}
+	if len(missingSelected) > 0 {
+		return fmt.Errorf("%w: cd 选择 argocd 时，请在 ci 模板参数中勾选这些内置字段：%s", ErrInvalidInput, strings.Join(missingSelected, "、"))
+	}
+	if !hasEnvParam {
+		return fmt.Errorf("%w: cd 选择 argocd 时，模板参数必须包含 env", ErrInvalidInput)
+	}
+	return nil
 }

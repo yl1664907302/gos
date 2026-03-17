@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -30,16 +31,19 @@ type TrackReleaseExecutionOutput struct {
 type TrackReleaseExecution struct {
 	manager *ReleaseOrderManager
 	jenkins JenkinsReleaseStatusClient
+	argocd  ArgoCDReleaseExecutor
 	now     func() time.Time
 }
 
 func NewTrackReleaseExecution(
 	manager *ReleaseOrderManager,
 	jenkins JenkinsReleaseStatusClient,
+	argocd ArgoCDReleaseExecutor,
 ) *TrackReleaseExecution {
 	return &TrackReleaseExecution{
 		manager: manager,
 		jenkins: jenkins,
+		argocd:  argocd,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -47,7 +51,10 @@ func NewTrackReleaseExecution(
 }
 
 func (uc *TrackReleaseExecution) Execute(ctx context.Context) (TrackReleaseExecutionOutput, error) {
-	if uc == nil || uc.manager == nil || uc.jenkins == nil {
+	if uc == nil || uc.manager == nil {
+		return TrackReleaseExecutionOutput{}, nil
+	}
+	if uc.jenkins == nil && uc.argocd == nil {
 		return TrackReleaseExecutionOutput{}, nil
 	}
 
@@ -129,7 +136,12 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		return uc.finalizeOrder(ctx, order, executions)
 	}
 
-	if strings.ToLower(strings.TrimSpace(runningExecution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+	switch strings.ToLower(strings.TrimSpace(runningExecution.Provider)) {
+	case string(pipelinedomain.ProviderJenkins):
+		// continue below
+	case string(pipelinedomain.ProviderArgoCD):
+		return uc.syncArgoCDExecution(ctx, order, *runningExecution, executions)
+	default:
 		return uc.finalizeOrder(ctx, order, executions)
 	}
 
@@ -201,7 +213,7 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		}
 	}
 
-	if binding, bindingErr := uc.manager.pipelineRepo.GetBindingByID(ctx, runningExecution.BindingID); bindingErr == nil {
+	if binding, bindingErr := uc.manager.resolveExecutionBinding(ctx, order, *runningExecution); bindingErr == nil {
 		_, _ = uc.manager.refreshPipelineStages(ctx, order, *runningExecution, binding)
 	}
 
@@ -278,6 +290,117 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			return false, false, err
 		}
 		updated3, err := uc.failRemainingExecutions(ctx, order, executions, runningExecution.PipelineScope, "前置阶段失败，未继续执行")
+		if err != nil {
+			return false, false, err
+		}
+		return updated || updated2 || updated3, false, nil
+	default:
+		return false, false, nil
+	}
+}
+
+func (uc *TrackReleaseExecution) syncArgoCDExecution(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	runningExecution domain.ReleaseOrderExecution,
+	executions []domain.ReleaseOrderExecution,
+) (bool, bool, error) {
+	if uc.argocd == nil {
+		return false, false, fmt.Errorf("%w: argocd executor is not configured", ErrInvalidInput)
+	}
+
+	binding, err := uc.manager.resolveExecutionBinding(ctx, order, runningExecution)
+	if err != nil {
+		return false, false, err
+	}
+	if _, refreshErr := uc.manager.refreshPipelineStages(ctx, order, runningExecution, binding); refreshErr != nil {
+		// 阶段刷新失败不直接打断主状态同步，避免短暂接口抖动影响发布闭环。
+	}
+
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode))
+	if err != nil {
+		if errors.Is(err, ErrInvalidInput) {
+			updated, finishErr := uc.finishStep(
+				ctx,
+				order.ID,
+				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+				domain.StepStatusFailed,
+				"ArgoCD 绑定未配置可用的 GitOps 子目录或 Application 标识",
+			)
+			return updated, false, finishErr
+		}
+		if isResourceNotFoundError(err) {
+			if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
+				return false, true, nil
+			}
+			updated, finishErr := uc.finishStep(
+				ctx,
+				order.ID,
+				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+				domain.StepStatusFailed,
+				"ArgoCD Application 不存在，无法继续追踪部署状态",
+			)
+			return updated, false, finishErr
+		}
+		return false, false, err
+	}
+	if appName == "" || app == nil {
+		updated, finishErr := uc.finishStep(
+			ctx,
+			order.ID,
+			scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+			domain.StepStatusFailed,
+			"ArgoCD 绑定未配置可用的 GitOps 子目录或 Application 标识",
+		)
+		return updated, false, finishErr
+	}
+
+	syncStatus := strings.ToLower(strings.TrimSpace(app.GetSyncStatus()))
+	healthStatus := strings.ToLower(strings.TrimSpace(app.GetHealthStatus()))
+	operationPhase := strings.ToLower(strings.TrimSpace(app.GetOperationPhase()))
+
+	switch {
+	case (syncStatus == "synced" || syncStatus == "") && healthStatus == "healthy" && operationPhase != "running":
+		now := uc.now()
+		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:        domain.ExecutionStatusSuccess,
+			ExternalRunID: runningExecution.ExternalRunID,
+			StartedAt:     runningExecution.StartedAt,
+			FinishedAt:    &now,
+			UpdatedAt:     now,
+		})
+		updated1, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, fmt.Sprintf("ArgoCD 应用已同步，sync=%s，health=%s", firstNonEmpty(app.GetSyncStatus(), "Synced"), firstNonEmpty(app.GetHealthStatus(), "Healthy")))
+		if err != nil {
+			return false, false, err
+		}
+		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, "ArgoCD 部署完成")
+		if err != nil {
+			return false, false, err
+		}
+		updated3, err := uc.syncNextStepAfterExecution(ctx, order)
+		if err != nil {
+			return false, false, err
+		}
+		return updated1 || updated2 || updated3, false, nil
+	case operationPhase == "failed" || healthStatus == "degraded":
+		now := uc.now()
+		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:        domain.ExecutionStatusFailed,
+			ExternalRunID: runningExecution.ExternalRunID,
+			StartedAt:     runningExecution.StartedAt,
+			FinishedAt:    &now,
+			UpdatedAt:     now,
+		})
+		message := fmt.Sprintf("ArgoCD 同步失败，sync=%s，health=%s，phase=%s", firstNonEmpty(app.GetSyncStatus(), "Unknown"), firstNonEmpty(app.GetHealthStatus(), "Unknown"), firstNonEmpty(app.GetOperationPhase(), "Unknown"))
+		updated, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusFailed, message)
+		if err != nil {
+			return false, false, err
+		}
+		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusFailed, "ArgoCD 部署失败")
+		if err != nil {
+			return false, false, err
+		}
+		updated3, err := uc.failRemainingExecutions(ctx, order, executions, runningExecution.PipelineScope, "ArgoCD 部署失败，未继续执行后续阶段")
 		if err != nil {
 			return false, false, err
 		}

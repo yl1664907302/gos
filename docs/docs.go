@@ -279,6 +279,88 @@ const docTemplate = `{
                 }
             }
         },
+        "/applications/{id}/executor-param-defs": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "executor-param-defs"
+                ],
+                "summary": "List bound executor param definitions by application",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Application ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Binding type, default ci",
+                        "name": "binding_type",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Visible flag",
+                        "name": "visible",
+                        "in": "query"
+                    },
+                    {
+                        "type": "boolean",
+                        "description": "Editable flag",
+                        "name": "editable",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Mapped platform param key",
+                        "name": "param_key",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page size",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ExecutorParamDefListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/applications/{id}/pipeline-bindings": {
             "get": {
                 "produces": [
@@ -417,45 +499,44 @@ const docTemplate = `{
                 }
             }
         },
-        "/applications/{id}/pipeline-param-defs": {
+        "/argocd/applications": {
             "get": {
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
-                    "pipeline-param-defs"
+                    "argocd"
                 ],
-                "summary": "List bound Jenkins pipeline param definitions by application",
+                "summary": "List ArgoCD applications",
                 "parameters": [
                     {
                         "type": "string",
-                        "description": "Application ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "type": "string",
-                        "description": "Binding type, default ci",
-                        "name": "binding_type",
-                        "in": "query"
-                    },
-                    {
-                        "type": "boolean",
-                        "description": "Visible flag",
-                        "name": "visible",
-                        "in": "query"
-                    },
-                    {
-                        "type": "boolean",
-                        "description": "Editable flag",
-                        "name": "editable",
+                        "description": "Application name",
+                        "name": "app_name",
                         "in": "query"
                     },
                     {
                         "type": "string",
-                        "description": "Mapped platform param key",
-                        "name": "param_key",
+                        "description": "ArgoCD project",
+                        "name": "project",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Sync status",
+                        "name": "sync_status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Health status",
+                        "name": "health_status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Record status",
+                        "name": "status",
                         "in": "query"
                     },
                     {
@@ -475,7 +556,72 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/httpapi.PipelineParamDefListResponse"
+                            "$ref": "#/definitions/httpapi.ArgoCDApplicationListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/argocd/applications/sync": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "argocd"
+                ],
+                "summary": "Sync ArgoCD applications metadata",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ArgoCDApplicationSyncResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/argocd/applications/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "argocd"
+                ],
+                "summary": "Get ArgoCD application detail",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Application ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ArgoCDApplicationDataResponse"
                         }
                     },
                     "400": {
@@ -499,20 +645,168 @@ const docTemplate = `{
                 }
             }
         },
-        "/jenkins/pipeline-param-defs/sync": {
+        "/argocd/applications/{id}/original-link": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "argocd"
+                ],
+                "summary": "Get ArgoCD application original link",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Application ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ArgoCDOriginalLinkDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/executor-param-defs/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "executor-param-defs"
+                ],
+                "summary": "Get executor param definition by ID",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Executor param definition ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ExecutorParamDefDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "executor-param-defs"
+                ],
+                "summary": "Update executor param definition mapping",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Executor param definition ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Update executor param definition request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.UpdateExecutorParamDefRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ExecutorParamDefDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/jenkins/executor-param-defs/sync": {
             "post": {
                 "produces": [
                     "application/json"
                 ],
                 "tags": [
-                    "pipeline-param-defs"
+                    "executor-param-defs"
                 ],
-                "summary": "Sync pipeline param definitions from Jenkins",
+                "summary": "Sync executor param definitions from Jenkins",
                 "responses": {
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/httpapi.SyncPipelineParamDefsResponse"
+                            "$ref": "#/definitions/httpapi.SyncExecutorParamDefsResponse"
                         }
                     },
                     "500": {
@@ -695,108 +989,6 @@ const docTemplate = `{
                 }
             }
         },
-        "/pipeline-param-defs/{id}": {
-            "get": {
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "pipeline-param-defs"
-                ],
-                "summary": "Get pipeline param definition by ID",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Pipeline param definition ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.PipelineParamDefDataResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    }
-                }
-            },
-            "put": {
-                "consumes": [
-                    "application/json"
-                ],
-                "produces": [
-                    "application/json"
-                ],
-                "tags": [
-                    "pipeline-param-defs"
-                ],
-                "summary": "Update pipeline param definition mapping",
-                "parameters": [
-                    {
-                        "type": "string",
-                        "description": "Pipeline param definition ID",
-                        "name": "id",
-                        "in": "path",
-                        "required": true
-                    },
-                    {
-                        "description": "Update pipeline param definition request",
-                        "name": "request",
-                        "in": "body",
-                        "required": true,
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.UpdatePipelineParamDefRequest"
-                        }
-                    }
-                ],
-                "responses": {
-                    "200": {
-                        "description": "OK",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.PipelineParamDefDataResponse"
-                        }
-                    },
-                    "400": {
-                        "description": "Bad Request",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    },
-                    "404": {
-                        "description": "Not Found",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    },
-                    "500": {
-                        "description": "Internal Server Error",
-                        "schema": {
-                            "$ref": "#/definitions/httpapi.ErrorResponse"
-                        }
-                    }
-                }
-            }
-        },
         "/pipelines": {
             "get": {
                 "produces": [
@@ -912,9 +1104,9 @@ const docTemplate = `{
                     "application/json"
                 ],
                 "tags": [
-                    "pipeline-param-defs"
+                    "executor-param-defs"
                 ],
-                "summary": "List pipeline param definitions",
+                "summary": "List executor param definitions",
                 "parameters": [
                     {
                         "type": "string",
@@ -964,7 +1156,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/httpapi.PipelineParamDefListResponse"
+                            "$ref": "#/definitions/httpapi.ExecutorParamDefListResponse"
                         }
                     },
                     "400": {
@@ -1964,6 +2156,114 @@ const docTemplate = `{
                 }
             }
         },
+        "httpapi.ArgoCDApplicationDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/httpapi.ArgoCDApplicationResponse"
+                }
+            }
+        },
+        "httpapi.ArgoCDApplicationListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ArgoCDApplicationResponse"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "httpapi.ArgoCDApplicationResponse": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string"
+                },
+                "argocd_url": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "dest_namespace": {
+                    "type": "string"
+                },
+                "dest_server": {
+                    "type": "string"
+                },
+                "health_status": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "last_synced_at": {
+                    "type": "string"
+                },
+                "operation_phase": {
+                    "type": "string"
+                },
+                "project": {
+                    "type": "string"
+                },
+                "raw_meta": {
+                    "type": "string"
+                },
+                "repo_url": {
+                    "type": "string"
+                },
+                "source_path": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "sync_status": {
+                    "type": "string"
+                },
+                "target_revision": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.ArgoCDApplicationSyncResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/usecase.SyncArgoCDApplicationsOutput"
+                }
+            }
+        },
+        "httpapi.ArgoCDOriginalLinkDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "application": {
+                            "$ref": "#/definitions/httpapi.ArgoCDApplicationResponse"
+                        },
+                        "original_link": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "httpapi.CreateApplicationRequest": {
             "type": "object",
             "properties": {
@@ -2025,9 +2325,6 @@ const docTemplate = `{
         "httpapi.CreatePlatformParamDictRequest": {
             "type": "object",
             "properties": {
-                "builtin": {
-                    "type": "boolean"
-                },
                 "description": {
                     "type": "string"
                 },
@@ -2060,6 +2357,9 @@ const docTemplate = `{
                 "param_value": {
                     "type": "string"
                 },
+                "pipeline_scope": {
+                    "type": "string"
+                },
                 "value_source": {
                     "type": "string"
                 }
@@ -2069,9 +2369,6 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "application_id": {
-                    "type": "string"
-                },
-                "binding_id": {
                     "type": "string"
                 },
                 "env_code": {
@@ -2089,6 +2386,9 @@ const docTemplate = `{
                         "$ref": "#/definitions/httpapi.CreateReleaseOrderParamRequest"
                     }
                 },
+                "project_name": {
+                    "type": "string"
+                },
                 "remark": {
                     "type": "string"
                 },
@@ -2100,6 +2400,9 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/httpapi.CreateReleaseOrderStepRequest"
                     }
+                },
+                "template_id": {
+                    "type": "string"
                 },
                 "trigger_type": {
                     "type": "string"
@@ -2128,6 +2431,99 @@ const docTemplate = `{
             "properties": {
                 "error": {
                     "type": "string"
+                }
+            }
+        },
+        "httpapi.ExecutorParamDefDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/httpapi.ExecutorParamDefResponse"
+                }
+            }
+        },
+        "httpapi.ExecutorParamDefListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ExecutorParamDefResponse"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "httpapi.ExecutorParamDefResponse": {
+            "type": "object",
+            "properties": {
+                "can_edit": {
+                    "type": "boolean"
+                },
+                "can_view": {
+                    "type": "boolean"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "default_value": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "editable": {
+                    "type": "boolean"
+                },
+                "executor_param_name": {
+                    "type": "string"
+                },
+                "executor_type": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "param_key": {
+                    "type": "string"
+                },
+                "param_type": {
+                    "type": "string"
+                },
+                "pipeline_id": {
+                    "type": "string"
+                },
+                "raw_meta": {
+                    "type": "string"
+                },
+                "required": {
+                    "type": "boolean"
+                },
+                "single_select": {
+                    "type": "boolean"
+                },
+                "sort_no": {
+                    "type": "integer"
+                },
+                "source_from": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "visible": {
+                    "type": "boolean"
                 }
             }
         },
@@ -2239,96 +2635,6 @@ const docTemplate = `{
                 }
             }
         },
-        "httpapi.PipelineParamDefDataResponse": {
-            "type": "object",
-            "properties": {
-                "data": {
-                    "$ref": "#/definitions/httpapi.PipelineParamDefResponse"
-                }
-            }
-        },
-        "httpapi.PipelineParamDefListResponse": {
-            "type": "object",
-            "properties": {
-                "data": {
-                    "type": "array",
-                    "items": {
-                        "$ref": "#/definitions/httpapi.PipelineParamDefResponse"
-                    }
-                },
-                "page": {
-                    "type": "integer"
-                },
-                "page_size": {
-                    "type": "integer"
-                },
-                "total": {
-                    "type": "integer"
-                }
-            }
-        },
-        "httpapi.PipelineParamDefResponse": {
-            "type": "object",
-            "properties": {
-                "can_edit": {
-                    "type": "boolean"
-                },
-                "can_view": {
-                    "type": "boolean"
-                },
-                "created_at": {
-                    "type": "string"
-                },
-                "default_value": {
-                    "type": "string"
-                },
-                "description": {
-                    "type": "string"
-                },
-                "editable": {
-                    "type": "boolean"
-                },
-                "executor_param_name": {
-                    "type": "string"
-                },
-                "executor_type": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string"
-                },
-                "param_key": {
-                    "type": "string"
-                },
-                "param_type": {
-                    "type": "string"
-                },
-                "pipeline_id": {
-                    "type": "string"
-                },
-                "raw_meta": {
-                    "type": "string"
-                },
-                "required": {
-                    "type": "boolean"
-                },
-                "single_select": {
-                    "type": "boolean"
-                },
-                "sort_no": {
-                    "type": "integer"
-                },
-                "source_from": {
-                    "type": "string"
-                },
-                "updated_at": {
-                    "type": "string"
-                },
-                "visible": {
-                    "type": "boolean"
-                }
-            }
-        },
         "httpapi.PipelineRawScriptDataResponse": {
             "type": "object",
             "properties": {
@@ -2338,11 +2644,17 @@ const docTemplate = `{
                         "definition_class": {
                             "type": "string"
                         },
+                        "description": {
+                            "type": "string"
+                        },
                         "from_scm": {
                             "type": "boolean"
                         },
                         "pipeline": {
                             "$ref": "#/definitions/httpapi.PipelineResponse"
+                        },
+                        "sandbox": {
+                            "type": "boolean"
                         },
                         "script": {
                             "type": "string"
@@ -2503,6 +2815,9 @@ const docTemplate = `{
         "httpapi.ReleaseOrderParamResponse": {
             "type": "object",
             "properties": {
+                "binding_id": {
+                    "type": "string"
+                },
                 "created_at": {
                     "type": "string"
                 },
@@ -2516,6 +2831,9 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "param_value": {
+                    "type": "string"
+                },
+                "pipeline_scope": {
                     "type": "string"
                 },
                 "release_order_id": {
@@ -2541,6 +2859,9 @@ const docTemplate = `{
                 "created_at": {
                     "type": "string"
                 },
+                "creator_user_id": {
+                    "type": "string"
+                },
                 "env_code": {
                     "type": "string"
                 },
@@ -2562,6 +2883,9 @@ const docTemplate = `{
                 "pipeline_id": {
                     "type": "string"
                 },
+                "project_name": {
+                    "type": "string"
+                },
                 "remark": {
                     "type": "string"
                 },
@@ -2572,6 +2896,12 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "status": {
+                    "type": "string"
+                },
+                "template_id": {
+                    "type": "string"
+                },
+                "template_name": {
                     "type": "string"
                 },
                 "trigger_type": {
@@ -2618,6 +2948,9 @@ const docTemplate = `{
                 "created_at": {
                     "type": "string"
                 },
+                "execution_id": {
+                    "type": "string"
+                },
                 "finished_at": {
                     "type": "string"
                 },
@@ -2644,6 +2977,9 @@ const docTemplate = `{
                 },
                 "step_name": {
                     "type": "string"
+                },
+                "step_scope": {
+                    "type": "string"
                 }
             }
         },
@@ -2655,11 +2991,11 @@ const docTemplate = `{
                 }
             }
         },
-        "httpapi.SyncPipelineParamDefsResponse": {
+        "httpapi.SyncExecutorParamDefsResponse": {
             "type": "object",
             "properties": {
                 "data": {
-                    "$ref": "#/definitions/usecase.SyncPipelineParamDefsOutput"
+                    "$ref": "#/definitions/usecase.SyncExecutorParamDefsOutput"
                 }
             }
         },
@@ -2726,7 +3062,7 @@ const docTemplate = `{
                 }
             }
         },
-        "httpapi.UpdatePipelineParamDefRequest": {
+        "httpapi.UpdateExecutorParamDefRequest": {
             "type": "object",
             "properties": {
                 "param_key": {
@@ -2737,9 +3073,6 @@ const docTemplate = `{
         "httpapi.UpdatePlatformParamDictRequest": {
             "type": "object",
             "properties": {
-                "builtin": {
-                    "type": "boolean"
-                },
                 "description": {
                     "type": "string"
                 },
@@ -2782,10 +3115,30 @@ const docTemplate = `{
                 }
             }
         },
-        "usecase.SyncPipelineParamDefsOutput": {
+        "usecase.SyncArgoCDApplicationsOutput": {
             "type": "object",
             "properties": {
                 "created": {
+                    "type": "integer"
+                },
+                "inactivated": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                },
+                "updated": {
+                    "type": "integer"
+                }
+            }
+        },
+        "usecase.SyncExecutorParamDefsOutput": {
+            "type": "object",
+            "properties": {
+                "created": {
+                    "type": "integer"
+                },
+                "inactivated": {
                     "type": "integer"
                 },
                 "skipped": {
@@ -2803,6 +3156,9 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "created": {
+                    "type": "integer"
+                },
+                "inactivated": {
                     "type": "integer"
                 },
                 "skipped": {

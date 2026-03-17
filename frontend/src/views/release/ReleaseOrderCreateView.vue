@@ -6,10 +6,10 @@ import type { Rule } from 'ant-design-vue/es/form'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listApplications } from '../../api/application'
-import { listApplicationPipelineParamDefs } from '../../api/pipeline'
+import { listApplicationExecutorParamDefs } from '../../api/pipeline'
 import { createReleaseOrder, getReleaseTemplateByID, listAllReleaseTemplates } from '../../api/release'
 import { useAuthStore } from '../../stores/auth'
-import type { PipelineParamDef } from '../../types/pipeline'
+import type { ExecutorParamDef } from '../../types/pipeline'
 import type {
   CreateReleaseOrderParamPayload,
   ReleasePipelineScope,
@@ -39,7 +39,7 @@ interface CreateFormState {
 interface ScopeRuntimeState {
   loading: boolean
   error: string
-  param_defs: PipelineParamDef[]
+  param_defs: ExecutorParamDef[]
 }
 
 const route = useRoute()
@@ -137,7 +137,7 @@ const templateParamMetaByScope = computed<Record<ReleasePipelineScope, Record<st
     cd: {},
   }
   templateParams.value.forEach((item) => {
-    map[item.pipeline_scope][item.pipeline_param_def_id] = item
+    map[item.pipeline_scope][item.executor_param_def_id] = item
   })
   return map
 })
@@ -311,7 +311,7 @@ async function loadScopeParamDefs(scope: ReleasePipelineScope) {
 
   scopeStates[scope].loading = true
   try {
-    const response = await listApplicationPipelineParamDefs(formState.application_id, {
+    const response = await listApplicationExecutorParamDefs(formState.application_id, {
       binding_type: scope,
       status: 'active',
       page: 1,
@@ -320,7 +320,7 @@ async function loadScopeParamDefs(scope: ReleasePipelineScope) {
     const allowedIDs = new Set(
       templateParams.value
         .filter((item) => item.pipeline_scope === scope)
-        .map((item) => item.pipeline_param_def_id),
+        .map((item) => item.executor_param_def_id),
     )
     scopeStates[scope].param_defs = response.data.filter((item) => allowedIDs.has(item.id))
 
@@ -397,7 +397,7 @@ function toList() {
   void router.push('/releases')
 }
 
-function resolveTemplateParamLabel(scope: ReleasePipelineScope, item: PipelineParamDef) {
+function resolveTemplateParamLabel(scope: ReleasePipelineScope, item: ExecutorParamDef) {
   const meta = templateParamMetaByScope.value[scope][item.id]
   return meta?.param_name || item.param_key || item.executor_param_name || item.id
 }
@@ -477,7 +477,7 @@ function normalizeChoiceValues(raw: unknown): string[] {
   return []
 }
 
-function resolveChoiceMeta(item: PipelineParamDef): ChoiceMeta {
+function resolveChoiceMeta(item: ExecutorParamDef): ChoiceMeta {
   if (item.param_type !== 'choice') {
     return defaultChoiceMeta
   }
@@ -527,15 +527,15 @@ const choiceMetaMap = computed<Record<string, ChoiceMeta>>(() => {
   return map
 })
 
-function getChoiceMeta(item: PipelineParamDef) {
+function getChoiceMeta(item: ExecutorParamDef) {
   return choiceMetaMap.value[item.id] || defaultChoiceMeta
 }
 
-function useSelectForChoice(item: PipelineParamDef) {
+function useSelectForChoice(item: ExecutorParamDef) {
   return item.param_type === 'choice' && getChoiceMeta(item).options.length > 0
 }
 
-function isMultipleChoice(item: PipelineParamDef) {
+function isMultipleChoice(item: ExecutorParamDef) {
   return useSelectForChoice(item) && getChoiceMeta(item).multiple
 }
 
@@ -553,7 +553,7 @@ function splitByDelimiter(value: string, delimiter: string) {
   return splitChoiceText(text)
 }
 
-function getChoiceSingleValue(item: PipelineParamDef): string | undefined {
+function getChoiceSingleValue(item: ExecutorParamDef): string | undefined {
   const value = String(paramValues[item.id] || '').trim()
   if (!value) {
     return undefined
@@ -565,7 +565,7 @@ function getChoiceSingleValue(item: PipelineParamDef): string | undefined {
   return first || undefined
 }
 
-function getChoiceMultiValues(item: PipelineParamDef): string[] {
+function getChoiceMultiValues(item: ExecutorParamDef): string[] {
   const value = String(paramValues[item.id] || '').trim()
   if (!value) {
     return []
@@ -573,11 +573,11 @@ function getChoiceMultiValues(item: PipelineParamDef): string[] {
   return splitByDelimiter(value, getChoiceMeta(item).delimiter)
 }
 
-function handleChoiceSingleChange(item: PipelineParamDef, value: unknown) {
+function handleChoiceSingleChange(item: ExecutorParamDef, value: unknown) {
   paramValues[item.id] = String(value || '').trim()
 }
 
-function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
+function handleChoiceMultiChange(item: ExecutorParamDef, values: unknown) {
   const list = Array.isArray(values)
     ? values
         .map((value) => String(value || '').trim())
@@ -586,7 +586,7 @@ function handleChoiceMultiChange(item: PipelineParamDef, values: unknown) {
   paramValues[item.id] = list.join(getChoiceMeta(item).delimiter || ',')
 }
 
-function handleParamValueInput(item: PipelineParamDef, value: string) {
+function handleParamValueInput(item: ExecutorParamDef, value: string) {
   paramValues[item.id] = String(value || '')
 }
 
@@ -661,8 +661,11 @@ function scopeHint(scope: ReleasePipelineScope) {
   if (!binding) {
     return ''
   }
+  if (binding.provider === 'argocd') {
+    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会沿用 CI 中映射的 image_version 更新 GitOps 配置并触发同步。`
+  }
   if (binding.provider !== 'jenkins') {
-    return `${scope.toUpperCase()} 当前使用 ${binding.provider}，参数表单暂不开放。`
+    return `${scope.toUpperCase()} 当前使用 ${binding.provider}，当前版本暂不开放额外参数表单。`
   }
   return `${scope.toUpperCase()} 将基于模板配置的 Jenkins 参数生成发布表单。`
 }
@@ -781,7 +784,11 @@ onMounted(async () => {
           <a-spin :spinning="item.loading" tip="正在加载额外参数...">
             <a-empty
               v-if="!item.loading && item.params.length === 0"
-              :description="item.binding?.provider === 'jenkins' ? '当前执行单元未配置额外参数' : '当前执行单元暂无可填写的参数表单'"
+                :description="item.binding?.provider === 'jenkins'
+                ? '当前执行单元未配置额外参数'
+                : item.binding?.provider === 'argocd'
+                  ? '当前执行单元会沿用 CI 的 image_version 自动完成 GitOps 配置更新'
+                  : '当前执行单元暂无可填写的参数表单'"
             />
             <div v-else class="scope-param-form">
               <a-row v-for="rowIndex in Math.ceil(item.params.length / 2)" :key="`${item.scope}-row-${rowIndex}`" :gutter="16">

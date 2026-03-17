@@ -17,8 +17,10 @@ func NewRouter(
 	sessionResolver SessionUserResolver,
 	applicationHandler *ApplicationHandler,
 	pipelineHandler *PipelineHandler,
+	argocdHandler *ArgoCDHandler,
+	gitopsHandler *GitOpsHandler,
 	platformParamHandler *PlatformParamHandler,
-	pipelineParamHandler *PipelineParamHandler,
+	executorParamHandler *ExecutorParamHandler,
 	releaseOrderHandler *ReleaseOrderHandler,
 	releaseTemplateHandler *ReleaseTemplateHandler,
 ) *gin.Engine {
@@ -32,8 +34,10 @@ func NewRouter(
 	registerUserRoutes(router, userHandler)
 	registerApplicationRoutes(router, applicationHandler)
 	registerPipelineRoutes(router, pipelineHandler)
+	registerArgoCDRoutes(router, argocdHandler)
+	registerGitOpsRoutes(router, gitopsHandler)
 	registerPlatformParamRoutes(router, platformParamHandler)
-	registerPipelineParamRoutes(router, pipelineParamHandler)
+	registerExecutorParamRoutes(router, executorParamHandler)
 	registerReleaseOrderRoutes(router, releaseOrderHandler)
 	registerReleaseTemplateRoutes(router, releaseTemplateHandler)
 	return router
@@ -59,12 +63,26 @@ func registerPipelineRoutes(router gin.IRouter, pipelineHandler *PipelineHandler
 	pipelineHandler.RegisterRoutes(router)
 }
 
+func registerArgoCDRoutes(router gin.IRouter, argocdHandler *ArgoCDHandler) {
+	if argocdHandler == nil {
+		return
+	}
+	argocdHandler.RegisterRoutes(router)
+}
+
+func registerGitOpsRoutes(router gin.IRouter, gitopsHandler *GitOpsHandler) {
+	if gitopsHandler == nil {
+		return
+	}
+	gitopsHandler.RegisterRoutes(router)
+}
+
 func registerPlatformParamRoutes(router gin.IRouter, platformParamHandler *PlatformParamHandler) {
 	platformParamHandler.RegisterRoutes(router)
 }
 
-func registerPipelineParamRoutes(router gin.IRouter, pipelineParamHandler *PipelineParamHandler) {
-	pipelineParamHandler.RegisterRoutes(router)
+func registerExecutorParamRoutes(router gin.IRouter, executorParamHandler *ExecutorParamHandler) {
+	executorParamHandler.RegisterRoutes(router)
 }
 
 func registerReleaseOrderRoutes(router gin.IRouter, releaseOrderHandler *ReleaseOrderHandler) {

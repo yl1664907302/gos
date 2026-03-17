@@ -65,9 +65,124 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 	}
 	if r.dbDriver == "sqlite" {
 		_, err := r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_platform_param_status_updated_at ON platform_param_dict (status, updated_at);`)
-		return err
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+	return r.ensureBuiltinParams(ctx)
+}
+
+func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error {
+	now := time.Now().UTC()
+	items := []domain.PlatformParamDict{
+		{
+			ID:          "ppd-image-version",
+			ParamKey:    "image_version",
+			Name:        "镜像版本",
+			Description: "平台自动分配",
+			ParamType:   domain.ParamTypeString,
+			Required:    false,
+			Builtin:     true,
+			Status:      domain.StatusEnabled,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
+	}
+
+	// Builtin keys are platform-owned metadata. We keep them in sync on startup so the
+	// UI can rely on a stable, non-editable dictionary entry without manual intervention.
+	for _, item := range items {
+		if err := r.upsertBuiltinParam(ctx, item); err != nil {
+			return err
+		}
+	}
+	return r.normalizeBuiltinFlags(ctx, []string{"image_version"}, now)
+}
+
+func (r *PlatformParamRepository) upsertBuiltinParam(ctx context.Context, item domain.PlatformParamDict) error {
+	switch r.dbDriver {
+	case "mysql":
+		const q = `
+INSERT INTO platform_param_dict (
+	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+	name = VALUES(name),
+	description = VALUES(description),
+	param_type = VALUES(param_type),
+	required = VALUES(required),
+	builtin = VALUES(builtin),
+	status = VALUES(status),
+	updated_at = VALUES(updated_at);`
+		_, err := r.db.ExecContext(
+			ctx,
+			q,
+			item.ID,
+			item.ParamKey,
+			item.Name,
+			item.Description,
+			string(item.ParamType),
+			boolToInt(item.Required),
+			boolToInt(item.Builtin),
+			int(item.Status),
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		)
+		return err
+	case "sqlite":
+		const q = `
+INSERT INTO platform_param_dict (
+	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(param_key) DO UPDATE SET
+	name = excluded.name,
+	description = excluded.description,
+	param_type = excluded.param_type,
+	required = excluded.required,
+	builtin = excluded.builtin,
+	status = excluded.status,
+	updated_at = excluded.updated_at;`
+		_, err := r.db.ExecContext(
+			ctx,
+			q,
+			item.ID,
+			item.ParamKey,
+			item.Name,
+			item.Description,
+			string(item.ParamType),
+			boolToInt(item.Required),
+			boolToInt(item.Builtin),
+			int(item.Status),
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		)
+		return err
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+}
+
+func (r *PlatformParamRepository) normalizeBuiltinFlags(ctx context.Context, builtinKeys []string, now time.Time) error {
+	if len(builtinKeys) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, 0, len(builtinKeys))
+	args := make([]any, 0, len(builtinKeys)+1)
+	args = append(args, now.UTC().UnixNano())
+	for _, key := range builtinKeys {
+		placeholders = append(placeholders, "?")
+		args = append(args, key)
+	}
+
+	// Builtin ownership is decided by the platform seed list, not by historical UI data.
+	// This keeps old manually-created rows from staying "builtin" after we removed that input.
+	query := fmt.Sprintf(
+		`UPDATE platform_param_dict SET builtin = 0, updated_at = ? WHERE builtin <> 0 AND param_key NOT IN (%s);`,
+		strings.Join(placeholders, ", "),
+	)
+	_, err := r.db.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (r *PlatformParamRepository) Create(ctx context.Context, item domain.PlatformParamDict) error {

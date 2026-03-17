@@ -12,6 +12,8 @@ import (
 
 	"gos/internal/application/usecase"
 	"gos/internal/bootstrap"
+	argocdinfra "gos/internal/infrastructure/argocd"
+	gitopsinfra "gos/internal/infrastructure/gitops"
 	"gos/internal/infrastructure/jenkins"
 	"gos/internal/infrastructure/persistence/sqlrepo"
 	httpapi "gos/internal/interfaces/http"
@@ -31,6 +33,9 @@ func main() {
 	}
 	if err := bootstrap.CheckJenkinsConnection(cfg); err != nil {
 		log.Fatalf("check jenkins: %v", err)
+	}
+	if err := bootstrap.CheckArgoCDConnection(cfg); err != nil {
+		log.Fatalf("check argocd: %v", err)
 	}
 
 	db, err := bootstrap.OpenDatabase(cfg)
@@ -54,13 +59,17 @@ func main() {
 		log.Fatalf("init platform param schema: %v", err)
 	}
 
-	pipelineParamRepo := sqlrepo.NewPipelineParamRepository(db, cfg.Database.Driver)
-	if err := bootstrap.InitSchema(pipelineParamRepo); err != nil {
-		log.Fatalf("init pipeline param schema: %v", err)
+	executorParamRepo := sqlrepo.NewExecutorParamRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(executorParamRepo); err != nil {
+		log.Fatalf("init executor param schema: %v", err)
 	}
 	releaseRepo := sqlrepo.NewReleaseRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(releaseRepo); err != nil {
 		log.Fatalf("init release schema: %v", err)
+	}
+	argocdAppRepo := sqlrepo.NewArgoCDApplicationRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(argocdAppRepo); err != nil {
+		log.Fatalf("init argocd schema: %v", err)
 	}
 	userRepo := sqlrepo.NewUserRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(userRepo); err != nil {
@@ -73,8 +82,30 @@ func main() {
 		APIToken:   cfg.Jenkins.APIToken,
 		TimeoutSec: cfg.Jenkins.TimeoutSec,
 	})
+	argocdClient := argocdinfra.NewClient(argocdinfra.Config{
+		BaseURL:            cfg.ArgoCD.BaseURL,
+		InsecureSkipVerify: cfg.ArgoCD.InsecureSkipVerify,
+		AuthMode:           cfg.ArgoCD.AuthMode,
+		Token:              cfg.ArgoCD.Token,
+		Username:           cfg.ArgoCD.Username,
+		Password:           cfg.ArgoCD.Password,
+		TimeoutSec:         cfg.ArgoCD.TimeoutSec,
+	})
+	gitopsService := gitopsinfra.NewService(gitopsinfra.Config{
+		Enabled:           cfg.GitOps.Enabled,
+		LocalRoot:         cfg.GitOps.LocalRoot,
+		DefaultBranch:     cfg.GitOps.DefaultBranch,
+		Username:          cfg.GitOps.Username,
+		Password:          cfg.GitOps.Password,
+		Token:             cfg.GitOps.Token,
+		AuthorName:        cfg.GitOps.AuthorName,
+		AuthorEmail:       cfg.GitOps.AuthorEmail,
+		CommandTimeoutSec: cfg.GitOps.CommandTimeoutSec,
+	})
+	argocdUsecaseClient := argoCDUsecaseClient{client: argocdClient}
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
-	syncPipelineParamDefs := usecase.NewSyncPipelineParamDefs(pipelineParamRepo, jenkinsClient)
+	syncExecutorParamDefs := usecase.NewSyncExecutorParamDefs(executorParamRepo, jenkinsClient)
+	syncArgoCDApplications := usecase.NewSyncArgoCDApplications(argocdAppRepo, argocdUsecaseClient)
 	userManagement := usecase.NewUserManagement(userRepo)
 	authSessionManager := usecase.NewAuthSessionManager(
 		userRepo,
@@ -103,21 +134,39 @@ func main() {
 		syncPipelines,
 		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
 		usecase.NewPipelineBindingManager(pipelineRepo, repo),
-		usecase.NewJenkinsPipelineManager(pipelineRepo, jenkinsClient, syncPipelines, syncPipelineParamDefs),
+		usecase.NewJenkinsPipelineManager(pipelineRepo, jenkinsClient, syncPipelines, syncExecutorParamDefs),
+		authSessionManager,
+	)
+	argocdHandler := httpapi.NewArgoCDHandler(
+		syncArgoCDApplications,
+		usecase.NewQueryArgoCDApplications(argocdAppRepo, argocdUsecaseClient, cfg.ArgoCD.BaseURL),
+		authSessionManager,
+	)
+	gitopsHandler := httpapi.NewGitOpsHandler(
+		usecase.NewQueryGitOpsStatus(gitopsService),
+		usecase.NewQueryGitOpsBindingTargets(gitopsService),
 		authSessionManager,
 	)
 	platformParamHandler := httpapi.NewPlatformParamHandler(
-		usecase.NewPlatformParamDictManager(platformParamRepo, pipelineParamRepo),
+		usecase.NewPlatformParamDictManager(platformParamRepo, executorParamRepo),
 		authSessionManager,
 	)
-	pipelineParamHandler := httpapi.NewPipelineParamHandler(
-		usecase.NewPipelineParamDefManager(pipelineParamRepo, repo, pipelineRepo, platformParamRepo),
-		syncPipelineParamDefs,
+	executorParamHandler := httpapi.NewExecutorParamHandler(
+		usecase.NewExecutorParamDefManager(executorParamRepo, repo, pipelineRepo, platformParamRepo),
+		syncExecutorParamDefs,
 		authSessionManager,
 		authSessionManager,
 	)
-	releaseOrderManager := usecase.NewReleaseOrderManager(releaseRepo, repo, pipelineRepo, pipelineParamRepo, jenkinsClient)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, pipelineRepo, pipelineParamRepo, platformParamRepo)
+	releaseOrderManager := usecase.NewReleaseOrderManager(
+		releaseRepo,
+		repo,
+		pipelineRepo,
+		executorParamRepo,
+		jenkinsClient,
+		argocdUsecaseClient,
+		gitopsService,
+	)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,
@@ -132,6 +181,7 @@ func main() {
 	releaseTracker := usecase.NewTrackReleaseExecution(
 		releaseOrderManager,
 		jenkinsClient,
+		argocdUsecaseClient,
 	)
 
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
@@ -148,7 +198,7 @@ func main() {
 			pipelineResult.Skipped,
 		)
 
-		paramResult, err := syncPipelineParamDefs.Execute(ctx)
+		paramResult, err := syncExecutorParamDefs.Execute(ctx)
 		if err != nil {
 			return err
 		}
@@ -164,7 +214,23 @@ func main() {
 	})
 	defer syncTask.Stop()
 
-	releaseTrackTask := bootstrap.StartJenkinsReleaseTrackTask(cfg.Jenkins, func(ctx context.Context) error {
+	argocdSyncTask := bootstrap.StartArgoCDAutoSyncTask(cfg.ArgoCD, func(ctx context.Context) error {
+		result, err := syncArgoCDApplications.Execute(ctx)
+		if err != nil {
+			return err
+		}
+		log.Printf(
+			"argocd auto sync completed: total=%d created=%d updated=%d inactivated=%d",
+			result.Total,
+			result.Created,
+			result.Updated,
+			result.Inactivated,
+		)
+		return nil
+	})
+	defer argocdSyncTask.Stop()
+
+	releaseTrackTask := bootstrap.StartReleaseTrackTask(cfg.Jenkins, cfg.ArgoCD, func(ctx context.Context) error {
 		releaseResult, err := releaseTracker.Execute(ctx)
 		if err != nil {
 			return err
@@ -186,8 +252,10 @@ func main() {
 		authSessionManager,
 		handler,
 		pipelineHandler,
+		argocdHandler,
+		gitopsHandler,
 		platformParamHandler,
-		pipelineParamHandler,
+		executorParamHandler,
 		releaseOrderHandler,
 		releaseTemplateHandler,
 	)
@@ -206,11 +274,12 @@ func main() {
 		serverErr <- server.ListenAndServe()
 	}()
 	log.Printf(
-		"server listening on %s (env=%s db=%s jenkins_enabled=%t)",
+		"server listening on %s (env=%s db=%s jenkins_enabled=%t argocd_enabled=%t)",
 		cfg.Server.Addr,
 		cfg.Environment,
 		cfg.Database.Driver,
 		cfg.Jenkins.Enabled,
+		cfg.ArgoCD.Enabled,
 	)
 
 	stop := make(chan os.Signal, 1)
@@ -241,4 +310,51 @@ func main() {
 func contextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	return ctx, cancel
+}
+
+type argoCDUsecaseClient struct {
+	client *argocdinfra.Client
+}
+
+func (c argoCDUsecaseClient) Ping(ctx context.Context) error {
+	if c.client == nil {
+		return errors.New("argocd client is not configured")
+	}
+	return c.client.Ping(ctx)
+}
+
+func (c argoCDUsecaseClient) ListApplications(ctx context.Context) ([]usecase.ArgoCDApplicationSnapshot, error) {
+	if c.client == nil {
+		return nil, errors.New("argocd client is not configured")
+	}
+	items, err := c.client.ListApplications(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]usecase.ArgoCDApplicationSnapshot, 0, len(items))
+	for _, item := range items {
+		result = append(result, item)
+	}
+	return result, nil
+}
+
+func (c argoCDUsecaseClient) GetApplication(ctx context.Context, name string) (usecase.ArgoCDApplicationSnapshot, error) {
+	if c.client == nil {
+		return nil, errors.New("argocd client is not configured")
+	}
+	return c.client.GetApplication(ctx, name)
+}
+
+func (c argoCDUsecaseClient) SyncApplication(ctx context.Context, name string) error {
+	if c.client == nil {
+		return errors.New("argocd client is not configured")
+	}
+	return c.client.SyncApplication(ctx, name)
+}
+
+func (c argoCDUsecaseClient) BuildApplicationURL(name string) string {
+	if c.client == nil {
+		return ""
+	}
+	return c.client.BuildApplicationURL(name)
 }

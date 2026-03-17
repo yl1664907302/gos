@@ -7,12 +7,12 @@ import (
 	"time"
 
 	appdomain "gos/internal/domain/application"
+	domain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
-	domain "gos/internal/domain/pipelineparam"
 	platformparamdomain "gos/internal/domain/platformparam"
 )
 
-type PipelineParamDefManager struct {
+type ExecutorParamDefManager struct {
 	repo         domain.Repository
 	appRepo      appdomain.Repository
 	pipelineRepo pipelinedomain.Repository
@@ -20,13 +20,17 @@ type PipelineParamDefManager struct {
 	now          func() time.Time
 }
 
-func NewPipelineParamDefManager(
+// NewExecutorParamDefManager 负责“执行器参数定义”的查询与平台字段映射维护。
+//
+// 这里继续复用 pipelineRepo，是因为当前参数定义仍然依赖应用绑定到具体执行记录；
+// 但对上层业务来说，这里暴露的已经是更抽象的执行器参数模型，而不是某个 Jenkins 专属概念。
+func NewExecutorParamDefManager(
 	repo domain.Repository,
 	appRepo appdomain.Repository,
 	pipelineRepo pipelinedomain.Repository,
 	platformRepo platformparamdomain.Repository,
-) *PipelineParamDefManager {
-	return &PipelineParamDefManager{
+) *ExecutorParamDefManager {
+	return &ExecutorParamDefManager{
 		repo:         repo,
 		appRepo:      appRepo,
 		pipelineRepo: pipelineRepo,
@@ -37,7 +41,7 @@ func NewPipelineParamDefManager(
 	}
 }
 
-func (uc *PipelineParamDefManager) ListByPipeline(ctx context.Context, filter domain.ListFilter) ([]domain.PipelineParamDef, int64, error) {
+func (uc *ExecutorParamDefManager) ListByPipeline(ctx context.Context, filter domain.ListFilter) ([]domain.ExecutorParamDef, int64, error) {
 	const (
 		defaultPage     = 1
 		defaultPageSize = 20
@@ -74,12 +78,12 @@ func (uc *PipelineParamDefManager) ListByPipeline(ctx context.Context, filter do
 	return uc.repo.ListByPipeline(ctx, filter)
 }
 
-func (uc *PipelineParamDefManager) ListByApplication(
+func (uc *ExecutorParamDefManager) ListByApplication(
 	ctx context.Context,
 	applicationID string,
 	bindingType pipelinedomain.BindingType,
 	filter domain.ListFilter,
-) ([]domain.PipelineParamDef, int64, error) {
+) ([]domain.ExecutorParamDef, int64, error) {
 	applicationID = strings.TrimSpace(applicationID)
 	if applicationID == "" {
 		return nil, 0, ErrInvalidID
@@ -129,21 +133,21 @@ func (uc *PipelineParamDefManager) ListByApplication(
 	return uc.ListByPipeline(ctx, filter)
 }
 
-func (uc *PipelineParamDefManager) GetByID(ctx context.Context, id string) (domain.PipelineParamDef, error) {
+func (uc *ExecutorParamDefManager) GetByID(ctx context.Context, id string) (domain.ExecutorParamDef, error) {
 	if strings.TrimSpace(id) == "" {
-		return domain.PipelineParamDef{}, ErrInvalidID
+		return domain.ExecutorParamDef{}, ErrInvalidID
 	}
 	return uc.repo.GetByID(ctx, id)
 }
 
-func (uc *PipelineParamDefManager) UpdateParamKey(ctx context.Context, id string, paramKey string) (domain.PipelineParamDef, error) {
+func (uc *ExecutorParamDefManager) UpdateParamKey(ctx context.Context, id string, paramKey string) (domain.ExecutorParamDef, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return domain.PipelineParamDef{}, ErrInvalidID
+		return domain.ExecutorParamDef{}, ErrInvalidID
 	}
 
 	if _, err := uc.repo.GetByID(ctx, id); err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 
 	paramKey = strings.TrimSpace(paramKey)
@@ -153,15 +157,15 @@ func (uc *PipelineParamDefManager) UpdateParamKey(ctx context.Context, id string
 
 	normalized, err := normalizePlatformParamKey(paramKey)
 	if err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 
 	platformParam, err := uc.platformRepo.GetByParamKey(ctx, normalized)
 	if err != nil {
-		return domain.PipelineParamDef{}, err
+		return domain.ExecutorParamDef{}, err
 	}
 	if platformParam.Status != platformparamdomain.StatusEnabled {
-		return domain.PipelineParamDef{}, fmt.Errorf("%w: platform param dict is disabled", ErrInvalidInput)
+		return domain.ExecutorParamDef{}, fmt.Errorf("%w: platform param dict is disabled", ErrInvalidInput)
 	}
 
 	return uc.repo.UpdateParamKey(ctx, id, normalized, uc.now())

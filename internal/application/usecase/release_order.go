@@ -10,8 +10,8 @@ import (
 	"time"
 
 	appdomain "gos/internal/domain/application"
+	pipelineparamdomain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
-	pipelineparamdomain "gos/internal/domain/pipelineparam"
 	domain "gos/internal/domain/release"
 )
 
@@ -21,6 +21,8 @@ type ReleaseOrderManager struct {
 	pipelineRepo pipelinedomain.Repository
 	paramRepo    pipelineparamdomain.Repository
 	jenkins      JenkinsReleaseExecutor
+	argocd       ArgoCDReleaseExecutor
+	gitops       GitOpsReleaseService
 	now          func() time.Time
 }
 
@@ -79,12 +81,33 @@ type JenkinsReleaseExecutor interface {
 	GetBuildStageLog(ctx context.Context, buildURL string, stageKey string) (domain.ReleaseOrderPipelineStageLog, error)
 }
 
+type ArgoCDReleaseExecutor interface {
+	ListApplications(ctx context.Context) ([]ArgoCDApplicationSnapshot, error)
+	GetApplication(ctx context.Context, name string) (ArgoCDApplicationSnapshot, error)
+	SyncApplication(ctx context.Context, name string) error
+}
+
+// GitOpsReleaseService 只暴露 ArgoCD CD 模式下真正需要的最小能力：
+// 在本地工作目录里受控修改 kustomization.yaml，并以平台身份提交推送。
+type GitOpsReleaseService interface {
+	UpdateKustomizationImage(
+		ctx context.Context,
+		repoURL string,
+		sourcePath string,
+		branch string,
+		newTag string,
+		commitMessage string,
+	) (workspacePath string, manifestPath string, commitSHA string, previousTag string, changed bool, err error)
+}
+
 func NewReleaseOrderManager(
 	repo domain.Repository,
 	appRepo appdomain.Repository,
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
 	jenkins JenkinsReleaseExecutor,
+	argocd ArgoCDReleaseExecutor,
+	gitops GitOpsReleaseService,
 ) *ReleaseOrderManager {
 	return &ReleaseOrderManager{
 		repo:         repo,
@@ -92,6 +115,8 @@ func NewReleaseOrderManager(
 		pipelineRepo: pipelineRepo,
 		paramRepo:    paramRepo,
 		jenkins:      jenkins,
+		argocd:       argocd,
+		gitops:       gitops,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -193,11 +218,11 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 	if templateID != "" {
 		for _, item := range templateParams {
 			if uc.paramRepo != nil {
-				paramDef, err := uc.paramRepo.GetByID(ctx, item.PipelineParamDefID)
+				paramDef, err := uc.paramRepo.GetByID(ctx, item.ExecutorParamDefID)
 				if err != nil {
 					return err
 				}
-				if err := ensureActivePipelineParamDef(paramDef, item.ParamName); err != nil {
+				if err := ensureActiveExecutorParamDef(paramDef, item.ParamName); err != nil {
 					return err
 				}
 			}
@@ -357,6 +382,10 @@ func resolveReleaseOrderSummaryFields(params []CreateReleaseOrderParamInput) rel
 				result.GitRef = value
 			}
 		case "image_tag":
+			if result.ImageTag == "" {
+				result.ImageTag = value
+			}
+		case "image_version":
 			if result.ImageTag == "" {
 				result.ImageTag = value
 			}
@@ -565,8 +594,8 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
-	if uc.jenkins == nil {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: jenkins executor is not configured", ErrInvalidInput)
+	if uc.jenkins == nil && uc.argocd == nil && uc.gitops == nil {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
 	}
 
 	order, err := uc.repo.GetByID(ctx, id)
@@ -639,7 +668,12 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		if execution.Status != domain.ExecutionStatusPending {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+		switch strings.ToLower(strings.TrimSpace(execution.Provider)) {
+		case string(pipelinedomain.ProviderJenkins):
+			// Jenkins 执行继续走现有触发链路。
+		case string(pipelinedomain.ProviderArgoCD):
+			return uc.startArgoCDExecution(ctx, order, execution, orderParams)
+		default:
 			now := uc.now()
 			_, err := uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
 				Status:     domain.ExecutionStatusSkipped,
@@ -650,8 +684,8 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			if err != nil {
 				return err
 			}
-			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "trigger_pipeline"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非 Jenkins 执行器暂记为跳过")
-			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非 Jenkins 执行器暂记为跳过")
+			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "trigger_pipeline"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非受支持执行器暂记为跳过")
+			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非受支持执行器暂记为跳过")
 			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 已跳过")
 			continue
 		}

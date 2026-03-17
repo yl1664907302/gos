@@ -40,12 +40,17 @@ func (uc *ReleaseOrderManager) ListPipelineStagesView(
 	view := ReleaseOrderPipelineStageView{}
 	syncMessages := make([]string, 0)
 	for _, execution := range executions {
-		if strings.ToLower(strings.TrimSpace(execution.Provider)) != string(pipelinedomain.ProviderJenkins) {
+		provider := strings.ToLower(strings.TrimSpace(execution.Provider))
+		if provider != string(pipelinedomain.ProviderJenkins) && provider != string(pipelinedomain.ProviderArgoCD) {
 			continue
 		}
 		view.ShowModule = true
-		view.ExecutorType = strings.TrimSpace(execution.Provider)
-		binding, bindingErr := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
+		if view.ExecutorType == "" {
+			view.ExecutorType = strings.TrimSpace(execution.Provider)
+		} else if !strings.EqualFold(view.ExecutorType, execution.Provider) {
+			view.ExecutorType = "mixed"
+		}
+		binding, bindingErr := uc.resolveExecutionBinding(ctx, order, execution)
 		if bindingErr != nil {
 			continue
 		}
@@ -139,11 +144,15 @@ func (uc *ReleaseOrderManager) refreshPipelineStages(
 	execution domain.ReleaseOrderExecution,
 	binding pipelinedomain.PipelineBinding,
 ) (string, error) {
-	if binding.Provider != pipelinedomain.ProviderJenkins {
+	switch binding.Provider {
+	case pipelinedomain.ProviderJenkins:
+		if uc.jenkins == nil {
+			return "Jenkins 阶段同步未配置", fmt.Errorf("jenkins executor is not configured")
+		}
+	case pipelinedomain.ProviderArgoCD:
+		return uc.refreshArgoCDStages(ctx, order, execution, binding)
+	default:
 		return "", nil
-	}
-	if uc.jenkins == nil {
-		return "Jenkins 阶段同步未配置", fmt.Errorf("jenkins executor is not configured")
 	}
 
 	buildURL, message, err := uc.resolveBuildURLForPipelineStages(ctx, order, execution)
@@ -299,4 +308,137 @@ func trimPipelineStageError(err error) string {
 		return message[:180] + "..."
 	}
 	return message
+}
+
+func (uc *ReleaseOrderManager) refreshArgoCDStages(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
+	binding pipelinedomain.PipelineBinding,
+) (string, error) {
+	if uc.argocd == nil {
+		return "ArgoCD 阶段同步未配置", fmt.Errorf("argocd executor is not configured")
+	}
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode))
+	if err != nil {
+		if isResourceNotFoundError(err) {
+			return "ArgoCD Application 暂不可用，稍后自动重试", nil
+		}
+		if strings.TrimSpace(binding.ExternalRef) == "" {
+			return "ArgoCD 绑定未配置 GitOps 子目录", nil
+		}
+		return "ArgoCD 阶段同步失败：" + trimPipelineStageError(err), err
+	}
+	if appName == "" || app == nil {
+		return "ArgoCD 绑定未配置应用标识", nil
+	}
+
+	now := uc.now()
+	commitStatus := domain.PipelineStageStatusSuccess
+	if strings.TrimSpace(execution.ExternalRunID) == "" {
+		commitStatus = domain.PipelineStageStatusPending
+	}
+	syncStatus := mapArgoCDSyncStageStatus(app.GetSyncStatus(), app.GetOperationPhase())
+	healthStatus := mapArgoCDHealthStageStatus(app.GetHealthStatus(), app.GetOperationPhase())
+
+	persisted := []domain.ReleaseOrderPipelineStage{
+		{
+			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "gitops_commit"),
+			ReleaseOrderID: order.ID,
+			ExecutionID:    execution.ID,
+			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
+			ExecutorType:   strings.TrimSpace(execution.Provider),
+			StageKey:       "gitops_commit",
+			StageName:      "GitOps 写回",
+			Status:         commitStatus,
+			RawStatus:      strings.TrimSpace(execution.ExternalRunID),
+			SortNo:         1,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "argocd_sync"),
+			ReleaseOrderID: order.ID,
+			ExecutionID:    execution.ID,
+			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
+			ExecutorType:   strings.TrimSpace(execution.Provider),
+			StageKey:       "argocd_sync",
+			StageName:      "ArgoCD Sync",
+			Status:         syncStatus,
+			RawStatus:      firstNonEmpty(app.GetOperationPhase(), app.GetSyncStatus()),
+			SortNo:         2,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+		{
+			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "health_check"),
+			ReleaseOrderID: order.ID,
+			ExecutionID:    execution.ID,
+			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
+			ExecutorType:   strings.TrimSpace(execution.Provider),
+			StageKey:       "health_check",
+			StageName:      "健康检查",
+			Status:         healthStatus,
+			RawStatus:      strings.TrimSpace(app.GetHealthStatus()),
+			SortNo:         3,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	}
+
+	existing, err := uc.repo.ListPipelineStages(ctx, order.ID)
+	if err != nil {
+		return "", err
+	}
+	merged := make([]domain.ReleaseOrderPipelineStage, 0, len(existing)+len(persisted))
+	for _, item := range existing {
+		if strings.EqualFold(strings.TrimSpace(item.PipelineScope), string(execution.PipelineScope)) {
+			continue
+		}
+		merged = append(merged, item)
+	}
+	merged = append(merged, persisted...)
+
+	if err := uc.repo.ReplacePipelineStages(ctx, order.ID, merged); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+func mapArgoCDSyncStageStatus(syncStatus string, operationPhase string) domain.PipelineStageStatus {
+	switch strings.ToLower(strings.TrimSpace(operationPhase)) {
+	case "failed", "error":
+		return domain.PipelineStageStatusFailed
+	case "succeeded":
+		if strings.EqualFold(strings.TrimSpace(syncStatus), "synced") {
+			return domain.PipelineStageStatusSuccess
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(syncStatus)) {
+	case "synced":
+		return domain.PipelineStageStatusSuccess
+	case "outofsync":
+		return domain.PipelineStageStatusRunning
+	default:
+		if strings.EqualFold(strings.TrimSpace(operationPhase), "running") {
+			return domain.PipelineStageStatusRunning
+		}
+		return domain.PipelineStageStatusPending
+	}
+}
+
+func mapArgoCDHealthStageStatus(healthStatus string, operationPhase string) domain.PipelineStageStatus {
+	switch strings.ToLower(strings.TrimSpace(healthStatus)) {
+	case "healthy":
+		return domain.PipelineStageStatusSuccess
+	case "degraded", "missing":
+		return domain.PipelineStageStatusFailed
+	case "progressing":
+		return domain.PipelineStageStatusRunning
+	default:
+		if strings.EqualFold(strings.TrimSpace(operationPhase), "running") {
+			return domain.PipelineStageStatusRunning
+		}
+		return domain.PipelineStageStatusPending
+	}
 }

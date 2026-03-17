@@ -20,7 +20,7 @@ type JenkinsPipelineManager struct {
 	repo       domain.Repository
 	editor     JenkinsPipelineEditor
 	pipelineUC *SyncPipelines
-	paramUC    *SyncPipelineParamDefs
+	paramUC    *SyncExecutorParamDefs
 }
 
 type CreateJenkinsRawPipelineInput struct {
@@ -47,7 +47,7 @@ func NewJenkinsPipelineManager(
 	repo domain.Repository,
 	editor JenkinsPipelineEditor,
 	pipelineUC *SyncPipelines,
-	paramUC *SyncPipelineParamDefs,
+	paramUC *SyncExecutorParamDefs,
 ) *JenkinsPipelineManager {
 	return &JenkinsPipelineManager{
 		repo:       repo,

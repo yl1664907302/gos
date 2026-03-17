@@ -8,8 +8,10 @@ import ApplicationEditView from '../views/application/ApplicationEditView.vue'
 import ApplicationListView from '../views/application/ApplicationListView.vue'
 import ApplicationPipelineBindingView from '../views/application/ApplicationPipelineBindingView.vue'
 import PlatformParamDictView from '../views/application/PlatformParamDictView.vue'
+import ArgoCDManagementView from '../views/component/ArgoCDManagementView.vue'
+import GitOpsManagementView from '../views/component/GitOpsManagementView.vue'
 import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
-import PipelineParamManagementView from '../views/component/PipelineParamManagementView.vue'
+import ExecutorParamManagementView from '../views/component/ExecutorParamManagementView.vue'
 import ForbiddenView from '../views/exception/ForbiddenView.vue'
 import LoginView from '../views/login/LoginView.vue'
 import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
@@ -59,8 +61,14 @@ function resolveFirstAccessiblePath(authStore: ReturnType<typeof useAuthStore>) 
   if (authStore.hasPermission('component.view')) {
     return '/components/jenkins'
   }
+  if (authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage')) {
+    return '/components/argocd'
+  }
+  if (authStore.hasPermission('component.gitops.view')) {
+    return '/components/gitops'
+  }
   if (authStore.hasPermission('pipeline_param.manage')) {
-    return '/components/pipeline-params'
+    return '/components/executor-params'
   }
   if (authStore.hasPermission('system.user.manage')) {
     return '/system/users'
@@ -137,10 +145,22 @@ export const router = createRouter({
           meta: { title: '管线列表', permission: 'component.view' },
         },
         {
-          path: 'components/pipeline-params',
-          name: 'pipeline-param-management',
-          component: PipelineParamManagementView,
-          meta: { title: '管线参数', permission: 'pipeline_param.manage' },
+          path: 'components/argocd',
+          name: 'argocd-management',
+          component: ArgoCDManagementView,
+          meta: { title: 'ArgoCD管理', permission: ['component.argocd.view', 'component.argocd.manage'] },
+        },
+        {
+          path: 'components/gitops',
+          name: 'gitops-management',
+          component: GitOpsManagementView,
+          meta: { title: 'GitOps管理', permission: 'component.gitops.view' },
+        },
+        {
+          path: 'components/executor-params',
+          name: 'executor-param-management',
+          component: ExecutorParamManagementView,
+          meta: { title: '执行器参数', permission: 'pipeline_param.manage' },
         },
         {
           path: 'releases',

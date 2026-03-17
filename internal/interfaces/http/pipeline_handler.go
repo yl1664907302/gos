@@ -146,7 +146,6 @@ type PreviewRawPipelineConfigXMLRequest struct {
 
 type CreateBindingRequest struct {
 	BindingType string `json:"binding_type"`
-	Name        string `json:"name"`
 	Provider    string `json:"provider"`
 	PipelineID  string `json:"pipeline_id"`
 	ExternalRef string `json:"external_ref"`
@@ -155,7 +154,6 @@ type CreateBindingRequest struct {
 }
 
 type UpdateBindingRequest struct {
-	Name        string `json:"name"`
 	Provider    string `json:"provider"`
 	PipelineID  string `json:"pipeline_id"`
 	ExternalRef string `json:"external_ref"`
@@ -516,7 +514,6 @@ func (h *PipelineHandler) CreateBinding(c *gin.Context) {
 
 	item, err := h.binding.Create(c.Request.Context(), c.Param("id"), usecase.CreatePipelineBindingInput{
 		BindingType: domain.BindingType(strings.TrimSpace(req.BindingType)),
-		Name:        req.Name,
 		Provider:    domain.Provider(strings.TrimSpace(req.Provider)),
 		PipelineID:  req.PipelineID,
 		ExternalRef: req.ExternalRef,
@@ -660,7 +657,6 @@ func (h *PipelineHandler) UpdateBinding(c *gin.Context) {
 	}
 
 	item, err := h.binding.Update(c.Request.Context(), c.Param("id"), domain.BindingUpdateInput{
-		Name:        req.Name,
 		Provider:    domain.Provider(strings.TrimSpace(req.Provider)),
 		PipelineID:  req.PipelineID,
 		ExternalRef: req.ExternalRef,

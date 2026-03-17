@@ -7,20 +7,20 @@ import (
 	"strings"
 	"time"
 
-	domain "gos/internal/domain/pipelineparam"
+	domain "gos/internal/domain/executorparam"
 )
 
-type JenkinsPipelineParamClient interface {
+type JenkinsExecutorParamClient interface {
 	ListJobParamSets(ctx context.Context) ([]domain.JenkinsJobParamSet, error)
 }
 
-type SyncPipelineParamDefs struct {
+type SyncExecutorParamDefs struct {
 	repo    domain.Repository
-	jenkins JenkinsPipelineParamClient
+	jenkins JenkinsExecutorParamClient
 	now     func() time.Time
 }
 
-type SyncPipelineParamDefsOutput struct {
+type SyncExecutorParamDefsOutput struct {
 	Total       int `json:"total"`
 	Created     int `json:"created"`
 	Updated     int `json:"updated"`
@@ -28,8 +28,8 @@ type SyncPipelineParamDefsOutput struct {
 	Skipped     int `json:"skipped"`
 }
 
-func NewSyncPipelineParamDefs(repo domain.Repository, jenkins JenkinsPipelineParamClient) *SyncPipelineParamDefs {
-	return &SyncPipelineParamDefs{
+func NewSyncExecutorParamDefs(repo domain.Repository, jenkins JenkinsExecutorParamClient) *SyncExecutorParamDefs {
+	return &SyncExecutorParamDefs{
 		repo:    repo,
 		jenkins: jenkins,
 		now: func() time.Time {
@@ -38,14 +38,14 @@ func NewSyncPipelineParamDefs(repo domain.Repository, jenkins JenkinsPipelinePar
 	}
 }
 
-func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParamDefsOutput, error) {
+func (uc *SyncExecutorParamDefs) Execute(ctx context.Context) (SyncExecutorParamDefsOutput, error) {
 	jobSets, err := uc.jenkins.ListJobParamSets(ctx)
 	if err != nil {
-		return SyncPipelineParamDefsOutput{}, err
+		return SyncExecutorParamDefsOutput{}, err
 	}
 
 	now := uc.now()
-	items := make([]domain.PipelineParamDef, 0)
+	items := make([]domain.ExecutorParamDef, 0)
 	seen := make(map[string]struct{})
 	skipped := 0
 
@@ -81,8 +81,8 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 				sortNo = index + 1
 			}
 
-			items = append(items, domain.PipelineParamDef{
-				ID:                pipelineParamDefID(pipelineID, string(domain.ExecutorTypeJenkins), paramName),
+			items = append(items, domain.ExecutorParamDef{
+				ID:                executorParamDefID(pipelineID, string(domain.ExecutorTypeJenkins), paramName),
 				PipelineID:        pipelineID,
 				ExecutorType:      domain.ExecutorTypeJenkins,
 				ExecutorParamName: paramName,
@@ -106,7 +106,7 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 
 	created, updated, err := uc.repo.Upsert(ctx, items)
 	if err != nil {
-		return SyncPipelineParamDefsOutput{}, err
+		return SyncExecutorParamDefsOutput{}, err
 	}
 	keepIDs := make([]string, 0, len(items))
 	for _, item := range items {
@@ -114,10 +114,10 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 	}
 	inactivated, err := uc.repo.MarkMissingInactive(ctx, domain.ExecutorTypeJenkins, keepIDs, now)
 	if err != nil {
-		return SyncPipelineParamDefsOutput{}, err
+		return SyncExecutorParamDefsOutput{}, err
 	}
 
-	return SyncPipelineParamDefsOutput{
+	return SyncExecutorParamDefsOutput{
 		Total:       len(items),
 		Created:     created,
 		Updated:     updated,
@@ -126,7 +126,7 @@ func (uc *SyncPipelineParamDefs) Execute(ctx context.Context) (SyncPipelineParam
 	}, nil
 }
 
-func pipelineParamDefID(pipelineID, executorType, executorParamName string) string {
+func executorParamDefID(pipelineID, executorType, executorParamName string) string {
 	sum := sha1.Sum([]byte(pipelineID + ":" + executorType + ":" + executorParamName))
 	return "ppf-" + hex.EncodeToString(sum[:12])
 }

@@ -33,10 +33,8 @@ type FormMode = 'create' | 'edit'
 interface BindingFormState {
   id: string
   binding_type: BindingType
-  name: string
   provider: PipelineProvider
   pipeline_id: string
-  external_ref: string
   trigger_mode: TriggerMode
   status: PipelineStatus
 }
@@ -77,10 +75,8 @@ const filters = reactive({
 const formState = reactive<BindingFormState>({
   id: '',
   binding_type: 'ci',
-  name: '',
   provider: 'jenkins',
   pipeline_id: '',
-  external_ref: '',
   trigger_mode: 'manual',
   status: 'active',
 })
@@ -91,11 +87,7 @@ const canManageBinding = computed(() => authStore.hasPermission('pipeline.manage
 const canViewPipelineParams = computed(() => authStore.hasPermission('pipeline_param.manage'))
 const canCreateRelease = computed(() => authStore.hasApplicationPermission('release.create', applicationID.value))
 const existingBindingTypes = computed(() => new Set(dataSource.value.map((item) => item.binding_type)))
-const isCI = computed(() => formState.binding_type === 'ci')
-const isUsingJenkins = computed(
-  () => formState.binding_type === 'ci' || (formState.binding_type === 'cd' && formState.provider === 'jenkins'),
-)
-const isUsingArgoCD = computed(() => formState.binding_type === 'cd' && formState.provider === 'argocd')
+const isUsingJenkins = computed(() => true)
 const bindingTypeOptions = computed(() => [
   { label: 'ci', value: 'ci', disabled: formMode.value === 'create' && existingBindingTypes.value.has('ci') },
   { label: 'cd', value: 'cd', disabled: formMode.value === 'create' && existingBindingTypes.value.has('cd') },
@@ -107,11 +99,10 @@ const initialColumns: TableColumnsType<PipelineBinding> = [
   { title: '类型', dataIndex: 'binding_type', key: 'binding_type', width: 100 },
   { title: '提供方', dataIndex: 'provider', key: 'provider', width: 120 },
   { title: 'pipeline_id', dataIndex: 'pipeline_id', key: 'pipeline_id', width: 220 },
-  { title: 'external_ref', dataIndex: 'external_ref', key: 'external_ref', width: 200 },
   { title: '触发方式', dataIndex: 'trigger_mode', key: 'trigger_mode', width: 120 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 360, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 320, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
 
@@ -133,9 +124,9 @@ function goBack() {
   void router.push('/applications')
 }
 
-function toPipelineParams(record: PipelineBinding) {
+function toExecutorParams(record: PipelineBinding) {
   if (record.provider !== 'jenkins') {
-    message.info('仅 Jenkins 类型绑定支持查看管线参数')
+    message.info('仅 Jenkins 类型绑定支持查看执行器参数')
     return
   }
 
@@ -155,7 +146,7 @@ function toPipelineParams(record: PipelineBinding) {
   }
 
   void router.push({
-    path: '/components/pipeline-params',
+    path: '/components/executor-params',
     query,
   })
 }
@@ -307,18 +298,9 @@ function handleJenkinsPipelineSearch(value: string) {
 function normalizeFormByRule() {
   if (formState.binding_type === 'ci') {
     formState.provider = 'jenkins'
-    formState.external_ref = ''
     return
   }
-
-  if (formState.provider !== 'jenkins' && formState.provider !== 'argocd') {
-    formState.provider = 'argocd'
-  }
-  if (formState.provider === 'jenkins') {
-    formState.external_ref = ''
-  } else {
-    formState.pipeline_id = ''
-  }
+  formState.provider = 'jenkins'
 }
 
 watch(
@@ -344,10 +326,8 @@ watch(
 function resetFormState() {
   formState.id = ''
   formState.binding_type = 'ci'
-  formState.name = ''
   formState.provider = 'jenkins'
   formState.pipeline_id = ''
-  formState.external_ref = ''
   formState.trigger_mode = 'manual'
   formState.status = 'active'
   jenkinsPipelineKeyword.value = ''
@@ -365,13 +345,17 @@ function openCreateModal() {
   resetFormState()
   if (hasCI && !hasCD) {
     formState.binding_type = 'cd'
-    formState.provider = 'argocd'
+    formState.provider = 'jenkins'
   }
   formVisible.value = true
   void ensureJenkinsPipelines(true, jenkinsPipelineKeyword.value)
 }
 
 async function openEditModal(record: PipelineBinding) {
+  if (record.provider === 'argocd') {
+    message.warning('ArgoCD 已迁移到发布模板中配置，请删除该绑定后在发布模板里启用 ArgoCD。')
+    return
+  }
   formMode.value = 'edit'
   formSubmitting.value = false
   try {
@@ -379,10 +363,8 @@ async function openEditModal(record: PipelineBinding) {
     const item = response.data
     formState.id = item.id
     formState.binding_type = item.binding_type
-    formState.name = item.name || ''
     formState.provider = item.provider
     formState.pipeline_id = item.pipeline_id || ''
-    formState.external_ref = item.external_ref || ''
     formState.trigger_mode = item.trigger_mode
     formState.status = item.status
     normalizeFormByRule()
@@ -405,10 +387,8 @@ async function submitForm() {
   normalizeFormByRule()
 
   const payloadBase = {
-    name: formState.name.trim() || undefined,
     provider: formState.binding_type === 'ci' ? 'jenkins' : formState.provider,
     pipeline_id: isUsingJenkins.value ? formState.pipeline_id.trim() || undefined : undefined,
-    external_ref: isUsingArgoCD.value ? formState.external_ref.trim() || undefined : undefined,
     trigger_mode: formState.trigger_mode,
     status: formState.status,
   } as const
@@ -501,17 +481,6 @@ const pipelineFieldRules = [
   },
 ]
 
-const externalRefRules = [
-  {
-    validator: async (_rule: unknown, value: string) => {
-      if (isUsingArgoCD.value && !String(value || '').trim()) {
-        return Promise.reject(new Error('请输入 ArgoCD external_ref'))
-      }
-      return Promise.resolve()
-    },
-  },
-]
-
 onMounted(async () => {
   await Promise.all([loadApplication(), loadBindings(), loadTemplateAvailability()])
 })
@@ -560,10 +529,7 @@ onMounted(async () => {
             class="filter-select"
             allow-clear
             placeholder="全部"
-            :options="[
-              { label: 'jenkins', value: 'jenkins' },
-              { label: 'argocd', value: 'argocd' },
-            ]"
+            :options="[{ label: 'jenkins', value: 'jenkins' }]"
           />
         </a-form-item>
         <a-form-item label="状态">
@@ -612,9 +578,9 @@ onMounted(async () => {
                 type="link"
                 size="small"
                 :disabled="record.provider !== 'jenkins'"
-                @click="toPipelineParams(record)"
+                @click="toExecutorParams(record)"
               >
-                管线参数
+                执行器参数
               </a-button>
               <a-button type="link" size="small" :disabled="!canCreateReleaseForBinding(record.id)" @click="toCreateRelease(record)">
                 发布
@@ -669,22 +635,11 @@ onMounted(async () => {
           <a-select v-model:value="formState.binding_type" :disabled="formMode === 'edit'" :options="bindingTypeOptions" />
         </a-form-item>
 
-        <a-form-item label="管线名称" name="name">
-          <a-input v-model:value="formState.name" allow-clear placeholder="可选，不填则后端自动生成" />
-        </a-form-item>
-
         <a-form-item label="提供方" name="provider" :rules="[{ required: true, message: '请选择提供方' }]">
           <a-select
             v-model:value="formState.provider"
-            :disabled="isCI"
-            :options="
-              isCI
-                ? [{ label: 'jenkins', value: 'jenkins' }]
-                : [
-                    { label: 'jenkins', value: 'jenkins' },
-                    { label: 'argocd', value: 'argocd' },
-                  ]
-            "
+            disabled
+            :options="[{ label: 'jenkins', value: 'jenkins' }]"
           />
         </a-form-item>
 
@@ -699,15 +654,6 @@ onMounted(async () => {
             :options="jenkinsPipelineOptions"
             placeholder="请选择 Jenkins 管线"
             @search="handleJenkinsPipelineSearch"
-          />
-        </a-form-item>
-
-        <a-form-item label="ArgoCD external_ref" name="external_ref" :rules="externalRefRules">
-          <a-input
-            v-model:value="formState.external_ref"
-            :disabled="!isUsingArgoCD"
-            allow-clear
-            placeholder="如：argocd-application-name"
           />
         </a-form-item>
 
@@ -746,21 +692,20 @@ onMounted(async () => {
         <a-descriptions-item label="应用ID">{{ detailData.application_id }}</a-descriptions-item>
         <a-descriptions-item label="类型">{{ detailData.binding_type }}</a-descriptions-item>
         <a-descriptions-item label="提供方">{{ detailData.provider }}</a-descriptions-item>
-        <a-descriptions-item label="管线参数">
+        <a-descriptions-item label="执行器参数">
           <a-button
             type="link"
             class="detail-link-button"
             :disabled="detailData.provider !== 'jenkins'"
-            @click="toPipelineParams(detailData)"
+            @click="toExecutorParams(detailData)"
           >
             <template #icon>
               <LinkOutlined />
             </template>
-            查看管线参数
+            查看执行器参数
           </a-button>
         </a-descriptions-item>
         <a-descriptions-item label="pipeline_id">{{ detailData.pipeline_id || '-' }}</a-descriptions-item>
-        <a-descriptions-item label="external_ref">{{ detailData.external_ref || '-' }}</a-descriptions-item>
         <a-descriptions-item label="触发方式">{{ detailData.trigger_mode }}</a-descriptions-item>
         <a-descriptions-item label="状态">{{ detailData.status }}</a-descriptions-item>
         <a-descriptions-item label="创建时间">{{ formatTime(detailData.created_at) }}</a-descriptions-item>
@@ -804,6 +749,10 @@ onMounted(async () => {
 
 .detail-link-button {
   padding-inline: 0;
+}
+
+.gitops-hint-alert {
+  margin-bottom: 16px;
 }
 
 .pagination-area {

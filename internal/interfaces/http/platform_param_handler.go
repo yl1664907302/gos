@@ -39,7 +39,6 @@ type CreatePlatformParamDictRequest struct {
 	Description string `json:"description"`
 	ParamType   string `json:"param_type"`
 	Required    bool   `json:"required"`
-	Builtin     bool   `json:"builtin"`
 	Status      *int   `json:"status"`
 }
 
@@ -49,7 +48,6 @@ type UpdatePlatformParamDictRequest struct {
 	Description string `json:"description"`
 	ParamType   string `json:"param_type"`
 	Required    bool   `json:"required"`
-	Builtin     bool   `json:"builtin"`
 	Status      int    `json:"status"`
 }
 
@@ -104,7 +102,6 @@ func (h *PlatformParamHandler) Create(c *gin.Context) {
 		Description: req.Description,
 		ParamType:   domain.ParamType(strings.TrimSpace(req.ParamType)),
 		Required:    req.Required,
-		Builtin:     req.Builtin,
 		Status:      createPlatformParamStatus(req.Status),
 	})
 	if err != nil {
@@ -229,7 +226,6 @@ func (h *PlatformParamHandler) Update(c *gin.Context) {
 		Description: req.Description,
 		ParamType:   domain.ParamType(strings.TrimSpace(req.ParamType)),
 		Required:    req.Required,
-		Builtin:     req.Builtin,
 		Status:      domain.Status(req.Status),
 	})
 	if err != nil {

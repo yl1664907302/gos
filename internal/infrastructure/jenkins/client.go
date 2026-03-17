@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	pipelineparamdomain "gos/internal/domain/executorparam"
 	domain "gos/internal/domain/pipeline"
-	pipelineparamdomain "gos/internal/domain/pipelineparam"
 	releasedomain "gos/internal/domain/release"
 )
 
@@ -698,7 +698,7 @@ func parseJenkinsParamDefinition(raw json.RawMessage, sortNo int) (pipelineparam
 
 	return pipelineparamdomain.JenkinsParamSnapshot{
 		Name:         name,
-		ParamType:    inferPipelineParamType(className, choices, defaultValueAny, defaultValue),
+		ParamType:    inferExecutorParamType(className, choices, defaultValueAny, defaultValue),
 		SingleSelect: inferPipelineSingleSelect(name, className, typeName, fields, len(choices)),
 		Required:     false,
 		DefaultValue: defaultValue,
@@ -1123,7 +1123,7 @@ func readJSONBool(raw json.RawMessage) bool {
 	return false
 }
 
-func inferPipelineParamType(class string, choices []string, defaultValue any, defaultValueStr string) pipelineparamdomain.ParamType {
+func inferExecutorParamType(class string, choices []string, defaultValue any, defaultValueStr string) pipelineparamdomain.ParamType {
 	lowerClass := strings.ToLower(strings.TrimSpace(class))
 	switch {
 	case len(choices) > 0 ||

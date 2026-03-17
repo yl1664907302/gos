@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	pipelineparamdomain "gos/internal/domain/pipelineparam"
+	pipelineparamdomain "gos/internal/domain/executorparam"
 	domain "gos/internal/domain/platformparam"
 )
 
@@ -25,7 +25,6 @@ type CreatePlatformParamDictInput struct {
 	Description string
 	ParamType   domain.ParamType
 	Required    bool
-	Builtin     bool
 	Status      domain.Status
 }
 
@@ -65,10 +64,11 @@ func (uc *PlatformParamDictManager) Create(ctx context.Context, input CreatePlat
 		Description: strings.TrimSpace(input.Description),
 		ParamType:   input.ParamType,
 		Required:    input.Required,
-		Builtin:     input.Builtin,
-		Status:      status,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		// Manual entries are always non-builtin. Builtin keys are seeded by the platform.
+		Builtin:   false,
+		Status:    status,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	if err := uc.repo.Create(ctx, item); err != nil {
 		return domain.PlatformParamDict{}, err
@@ -117,6 +117,9 @@ func (uc *PlatformParamDictManager) Update(ctx context.Context, id string, input
 	if err != nil {
 		return domain.PlatformParamDict{}, err
 	}
+	if current.Builtin {
+		return domain.PlatformParamDict{}, ErrBuiltinProtected
+	}
 
 	paramKey, err := normalizePlatformParamKey(input.ParamKey)
 	if err != nil {
@@ -148,8 +151,9 @@ func (uc *PlatformParamDictManager) Update(ctx context.Context, id string, input
 		Description: strings.TrimSpace(input.Description),
 		ParamType:   input.ParamType,
 		Required:    input.Required,
-		Builtin:     input.Builtin,
-		Status:      input.Status,
+		// Builtin fields are not editable; manual fields remain non-builtin.
+		Builtin: false,
+		Status:  input.Status,
 	}
 	return uc.repo.Update(ctx, id, clean, uc.now())
 }

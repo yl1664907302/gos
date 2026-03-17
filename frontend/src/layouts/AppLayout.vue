@@ -29,11 +29,17 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/platform-param-dicts')) {
     return ['platform-param-dicts']
   }
-  if (route.path.startsWith('/components/pipeline-params')) {
-    return ['pipeline-param-management']
+  if (route.path.startsWith('/components/executor-params')) {
+    return ['executor-param-management']
   }
   if (route.path.startsWith('/components/jenkins')) {
     return ['jenkins-pipeline-list']
+  }
+  if (route.path.startsWith('/components/argocd')) {
+    return ['argocd-management']
+  }
+  if (route.path.startsWith('/components/gitops')) {
+    return ['gitops-management']
   }
   if (route.path.startsWith('/releases')) {
     return ['release-orders']
@@ -49,7 +55,10 @@ const activeMenuKey = computed(() => {
 
 const openMenuKeys = computed(() => {
   if (route.path.startsWith('/components/')) {
-    return ['component-management', 'jenkins-management-group']
+    if (route.path.startsWith('/components/jenkins') || route.path.startsWith('/components/executor-params')) {
+      return ['component-management', 'jenkins-management-group']
+    }
+    return ['component-management']
   }
   if (route.path.startsWith('/releases')) {
     return ['release-management']
@@ -82,6 +91,10 @@ const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
 const canManagePlatformParam = computed(() => authStore.hasPermission('platform_param.manage'))
 const canViewComponent = computed(() => authStore.hasPermission('component.view'))
 const canManagePipelineParam = computed(() => authStore.hasPermission('pipeline_param.manage'))
+const canViewArgoCD = computed(
+  () => authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage'),
+)
+const canViewGitOps = computed(() => authStore.hasPermission('component.gitops.view'))
 const canViewRelease = computed(() => authStore.hasPermission('release.view'))
 const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
@@ -94,7 +107,9 @@ const showApplicationMenu = computed(
     canViewPipeline.value ||
     canManagePlatformParam.value,
 )
-const showComponentMenu = computed(() => canViewComponent.value || canManagePipelineParam.value)
+const showComponentMenu = computed(
+  () => canViewComponent.value || canManagePipelineParam.value || canViewArgoCD.value || canViewGitOps.value,
+)
 const showReleaseMenu = computed(
   () => canViewRelease.value || authStore.hasPermission('release.create') || canManageReleaseTemplate.value,
 )
@@ -122,13 +137,21 @@ function goToJenkinsManagement() {
   void router.push('/components/jenkins')
 }
 
-function goToPipelineParamManagement() {
+function goToExecutorParamManagement() {
   const appID = String(route.params.id || route.query.application_id || '').trim()
   if (appID) {
-    void router.push(`/components/pipeline-params?application_id=${encodeURIComponent(appID)}&binding_type=ci`)
+    void router.push(`/components/executor-params?application_id=${encodeURIComponent(appID)}&binding_type=ci`)
     return
   }
-  void router.push('/components/pipeline-params')
+  void router.push('/components/executor-params')
+}
+
+function goToArgoCDManagement() {
+  void router.push('/components/argocd')
+}
+
+function goToGitOpsManagement() {
+  void router.push('/components/gitops')
 }
 
 function goToReleaseOrders() {
@@ -194,10 +217,17 @@ async function handleLogout() {
             <a-menu-item v-if="canViewComponent" key="jenkins-pipeline-list" @click="goToJenkinsManagement">
               管线列表
             </a-menu-item>
-            <a-menu-item v-if="canManagePipelineParam" key="pipeline-param-management" @click="goToPipelineParamManagement">
-              管线参数
+            <a-menu-item v-if="canManagePipelineParam" key="executor-param-management" @click="goToExecutorParamManagement">
+              执行器参数
             </a-menu-item>
           </a-sub-menu>
+
+          <a-menu-item v-if="canViewArgoCD" key="argocd-management" @click="goToArgoCDManagement">
+            ArgoCD管理
+          </a-menu-item>
+          <a-menu-item v-if="canViewGitOps" key="gitops-management" @click="goToGitOpsManagement">
+            GitOps管理
+          </a-menu-item>
         </a-sub-menu>
 
         <a-sub-menu v-if="showReleaseMenu" key="release-management">

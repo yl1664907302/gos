@@ -1,6 +1,6 @@
 import { http } from './http'
 import type {
-  ApplicationPipelineParamListParams,
+  ApplicationExecutorParamListParams,
   CreateJenkinsRawPipelinePayload,
   CreatePipelineBindingPayload,
   PipelineBindingDataResponse,
@@ -8,15 +8,15 @@ import type {
   PipelineBindingListResponse,
   PipelineConfigXMLDataResponse,
   PipelineDataResponse,
-  PipelineParamDefDataResponse,
-  PipelineParamDefListResponse,
+  ExecutorParamDefDataResponse,
+  ExecutorParamDefListResponse,
   PipelineOriginalLinkDataResponse,
   PipelineRawScriptDataResponse,
   PipelineListParams,
   PipelineListResponse,
   PipelineSyncResponse,
   UpdateJenkinsRawPipelinePayload,
-  UpdatePipelineParamDefPayload,
+  UpdateExecutorParamDefPayload,
   UpdatePipelineBindingPayload,
 } from '../types/pipeline'
 
@@ -74,8 +74,8 @@ export async function syncJenkinsPipelines(): Promise<PipelineSyncResponse> {
   return response.data
 }
 
-export async function syncJenkinsPipelineParamDefs(): Promise<PipelineSyncResponse> {
-  const response = await http.post<PipelineSyncResponse>('/jenkins/pipeline-param-defs/sync', undefined, {
+export async function syncJenkinsExecutorParamDefs(): Promise<PipelineSyncResponse> {
+  const response = await http.post<PipelineSyncResponse>('/jenkins/executor-param-defs/sync', undefined, {
     timeout: 120_000,
   })
   return response.data
@@ -120,26 +120,26 @@ export async function deletePipelineBinding(id: string): Promise<void> {
   await http.delete(`/pipeline-bindings/${id}`)
 }
 
-export async function listApplicationPipelineParamDefs(
+export async function listApplicationExecutorParamDefs(
   applicationID: string,
-  params: ApplicationPipelineParamListParams,
-): Promise<PipelineParamDefListResponse> {
-  const response = await http.get<PipelineParamDefListResponse>(
-    `/applications/${applicationID}/pipeline-param-defs`,
+  params: ApplicationExecutorParamListParams,
+): Promise<ExecutorParamDefListResponse> {
+  const response = await http.get<ExecutorParamDefListResponse>(
+    `/applications/${applicationID}/executor-param-defs`,
     { params },
   )
   return response.data
 }
 
-export async function getPipelineParamDefByID(id: string): Promise<PipelineParamDefDataResponse> {
-  const response = await http.get<PipelineParamDefDataResponse>(`/pipeline-param-defs/${id}`)
+export async function getExecutorParamDefByID(id: string): Promise<ExecutorParamDefDataResponse> {
+  const response = await http.get<ExecutorParamDefDataResponse>(`/executor-param-defs/${id}`)
   return response.data
 }
 
-export async function updatePipelineParamDef(
+export async function updateExecutorParamDef(
   id: string,
-  payload: UpdatePipelineParamDefPayload,
-): Promise<PipelineParamDefDataResponse> {
-  const response = await http.put<PipelineParamDefDataResponse>(`/pipeline-param-defs/${id}`, payload)
+  payload: UpdateExecutorParamDefPayload,
+): Promise<ExecutorParamDefDataResponse> {
+  const response = await http.put<ExecutorParamDefDataResponse>(`/executor-param-defs/${id}`, payload)
   return response.data
 }
