@@ -6,6 +6,7 @@ export interface GitOpsStatus {
   username: string
   author_name: string
   author_email: string
+  commit_message_template: string
   command_timeout_sec: number
   path_exists: boolean
   is_git_repo: boolean
@@ -17,4 +18,12 @@ export interface GitOpsStatus {
   head_commit_subject: string
   worktree_dirty: boolean
   status_summary: string[]
+}
+
+export interface GitOpsTemplateField {
+  param_key: string
+  name: string
+  description: string
+  builtin: boolean
+  required: boolean
 }

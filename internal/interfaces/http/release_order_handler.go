@@ -60,6 +60,7 @@ func NewReleaseOrderHandler(
 }
 
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
+	router.POST("/applications/:id/release-orders/rollback", h.CreateRollbackByApplication)
 	router.POST("/release-orders", h.Create)
 	router.GET("/release-orders", h.List)
 	router.GET("/release-orders/:id", h.GetByID)
@@ -68,6 +69,7 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
 
 	router.GET("/release-orders/:id/params", h.ListParams)
+	router.GET("/release-orders/:id/value-progress", h.ListValueProgress)
 	router.GET("/release-orders/:id/executions", h.ListExecutions)
 	router.GET("/release-orders/:id/steps", h.ListSteps)
 	router.GET("/release-orders/:id/pipeline-stages", h.ListPipelineStages)
@@ -117,6 +119,7 @@ type FinishReleaseOrderStepRequest struct {
 type ReleaseOrderResponse struct {
 	ID              string     `json:"id"`
 	OrderNo         string     `json:"order_no"`
+	PreviousOrderNo string     `json:"previous_order_no"`
 	ApplicationID   string     `json:"application_id"`
 	ApplicationName string     `json:"application_name"`
 	TemplateID      string     `json:"template_id"`
@@ -281,6 +284,40 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
+}
+
+// CreateRollbackByApplication godoc
+// @Summary      Create rollback release order by application
+// @Tags         release-orders
+// @Produce      json
+// @Param        id   path      string  true  "Application ID"
+// @Success      201  {object}  ReleaseOrderDataResponse
+// @Failure      400  {object}  ErrorResponse
+// @Failure      401  {object}  ErrorResponse
+// @Failure      404  {object}  ErrorResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /applications/{id}/release-orders/rollback [post]
+func (h *ReleaseOrderHandler) CreateRollbackByApplication(c *gin.Context) {
+	applicationID := strings.TrimSpace(c.Param("id"))
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", applicationID) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	order, err := h.manager.CreateRollbackByApplication(
+		c.Request.Context(),
+		applicationID,
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
 	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
 }
 
@@ -721,6 +758,7 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 	return ReleaseOrderResponse{
 		ID:              item.ID,
 		OrderNo:         item.OrderNo,
+		PreviousOrderNo: item.PreviousOrderNo,
 		ApplicationID:   item.ApplicationID,
 		ApplicationName: item.ApplicationName,
 		TemplateID:      item.TemplateID,

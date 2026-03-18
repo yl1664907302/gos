@@ -12,6 +12,7 @@ import (
 	appdomain "gos/internal/domain/application"
 	pipelineparamdomain "gos/internal/domain/executorparam"
 	pipelinedomain "gos/internal/domain/pipeline"
+	platformparamdomain "gos/internal/domain/platformparam"
 	domain "gos/internal/domain/release"
 )
 
@@ -20,6 +21,7 @@ type ReleaseOrderManager struct {
 	appRepo      appdomain.Repository
 	pipelineRepo pipelinedomain.Repository
 	paramRepo    pipelineparamdomain.Repository
+	platformRepo platformparamdomain.Repository
 	jenkins      JenkinsReleaseExecutor
 	argocd       ArgoCDReleaseExecutor
 	gitops       GitOpsReleaseService
@@ -27,18 +29,19 @@ type ReleaseOrderManager struct {
 }
 
 type CreateReleaseOrderInput struct {
-	ApplicationID string
-	TemplateID    string
-	EnvCode       string
-	SonService    string
-	GitRef        string
-	ImageTag      string
-	TriggerType   domain.TriggerType
-	Remark        string
-	CreatorUserID string
-	TriggeredBy   string
-	Params        []CreateReleaseOrderParamInput
-	Steps         []CreateReleaseOrderStepInput
+	ApplicationID   string
+	TemplateID      string
+	PreviousOrderNo string
+	EnvCode         string
+	SonService      string
+	GitRef          string
+	ImageTag        string
+	TriggerType     domain.TriggerType
+	Remark          string
+	CreatorUserID   string
+	TriggeredBy     string
+	Params          []CreateReleaseOrderParamInput
+	Steps           []CreateReleaseOrderStepInput
 }
 
 type CreateReleaseOrderParamInput struct {
@@ -98,6 +101,7 @@ type GitOpsReleaseService interface {
 		newTag string,
 		commitMessage string,
 	) (workspacePath string, manifestPath string, commitSHA string, previousTag string, changed bool, err error)
+	BuildCommitMessage(fields map[string]string) string
 }
 
 func NewReleaseOrderManager(
@@ -105,6 +109,7 @@ func NewReleaseOrderManager(
 	appRepo appdomain.Repository,
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
+	platformRepo platformparamdomain.Repository,
 	jenkins JenkinsReleaseExecutor,
 	argocd ArgoCDReleaseExecutor,
 	gitops GitOpsReleaseService,
@@ -114,6 +119,7 @@ func NewReleaseOrderManager(
 		appRepo:      appRepo,
 		pipelineRepo: pipelineRepo,
 		paramRepo:    paramRepo,
+		platformRepo: platformRepo,
 		jenkins:      jenkins,
 		argocd:       argocd,
 		gitops:       gitops,
@@ -164,6 +170,7 @@ func (uc *ReleaseOrderManager) Create(
 	order := domain.ReleaseOrder{
 		ID:              generateID("ro"),
 		OrderNo:         generateOrderNo(now),
+		PreviousOrderNo: strings.TrimSpace(input.PreviousOrderNo),
 		ApplicationID:   applicationID,
 		ApplicationName: app.Name,
 		TemplateID:      template.ID,
@@ -197,6 +204,59 @@ func (uc *ReleaseOrderManager) Create(
 		return domain.ReleaseOrder{}, err
 	}
 	return uc.repo.GetByID(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) CreateRollbackByApplication(
+	ctx context.Context,
+	applicationID string,
+	creatorUserID string,
+	triggeredBy string,
+) (domain.ReleaseOrder, error) {
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+	}
+
+	items, _, err := uc.repo.List(ctx, domain.ListFilter{
+		ApplicationID: applicationID,
+		Status:        domain.OrderStatusSuccess,
+		Page:          1,
+		PageSize:      1,
+	})
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if len(items) == 0 {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前应用暂无可回滚的成功发布单", ErrInvalidInput)
+	}
+
+	sourceOrder := items[0]
+	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+
+	params := make([]CreateReleaseOrderParamInput, 0, len(sourceParams))
+	for _, item := range sourceParams {
+		params = append(params, CreateReleaseOrderParamInput{
+			PipelineScope:     item.PipelineScope,
+			ParamKey:          strings.TrimSpace(item.ParamKey),
+			ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
+			ParamValue:        strings.TrimSpace(item.ParamValue),
+			ValueSource:       item.ValueSource,
+		})
+	}
+
+	return uc.Create(ctx, CreateReleaseOrderInput{
+		ApplicationID:   sourceOrder.ApplicationID,
+		TemplateID:      sourceOrder.TemplateID,
+		PreviousOrderNo: sourceOrder.OrderNo,
+		TriggerType:     domain.TriggerTypeManual,
+		Remark:          buildRollbackRemark(sourceOrder),
+		CreatorUserID:   strings.TrimSpace(creatorUserID),
+		TriggeredBy:     strings.TrimSpace(triggeredBy),
+		Params:          params,
+	})
 }
 
 func (uc *ReleaseOrderManager) validateCreateTemplateParams(
@@ -402,6 +462,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func buildRollbackRemark(source domain.ReleaseOrder) string {
+	orderNo := strings.TrimSpace(source.OrderNo)
+	if orderNo == "" {
+		return "回滚创建"
+	}
+	return fmt.Sprintf("回滚自发布单 %s", orderNo)
 }
 
 func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderInput) ([]domain.ReleaseOrder, int64, error) {

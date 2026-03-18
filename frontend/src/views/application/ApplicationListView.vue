@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { ExclamationCircleOutlined, PlusOutlined, RollbackOutlined } from '@ant-design/icons-vue'
+import { Modal, message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { deleteApplication, listApplications } from '../../api/application'
-import { listAllReleaseTemplates } from '../../api/release'
+import { createRollbackReleaseOrderByApplication, listAllReleaseTemplates } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useApplicationListStore } from '../../stores/application-list'
 import { useAuthStore } from '../../stores/auth'
@@ -19,6 +19,7 @@ const authStore = useAuthStore()
 
 const loading = ref(false)
 const deletingId = ref('')
+const rollingBackId = ref('')
 const dataSource = ref<Application[]>([])
 const total = ref(0)
 const loadingTemplateAvailability = ref(false)
@@ -33,7 +34,7 @@ const initialColumns: TableColumnsType<Application> = [
   { title: '负责人', dataIndex: 'owner', key: 'owner', width: 120 },
   { title: '仓库地址', dataIndex: 'repo_url', key: 'repo_url', ellipsis: true },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-  { title: '操作', key: 'actions', width: 360, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 430, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 520, hitArea: 10 })
 
@@ -45,6 +46,10 @@ function canReleaseApplication(applicationID: string) {
     templateApplicationIDs.value.has(String(applicationID || '').trim()) &&
     !loadingTemplateAvailability.value
   )
+}
+
+function canRollbackApplication(applicationID: string) {
+  return canReleaseApplication(applicationID)
 }
 
 async function loadApplications() {
@@ -123,6 +128,35 @@ function toRelease(id: string) {
     path: '/releases/new',
     query: { application_id: id },
   })
+}
+
+function openRollbackConfirm(record: Application) {
+  if (!canRollbackApplication(record.id)) {
+    return
+  }
+  Modal.confirm({
+    title: `确认回滚 ${record.name} 吗？`,
+    content: '系统会基于该应用最近一次成功发布的参数，重新创建一张回滚发布单。',
+    okText: '确认回滚',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    async onOk() {
+      await handleRollback(record)
+    },
+  })
+}
+
+async function handleRollback(record: Application) {
+  rollingBackId.value = record.id
+  try {
+    const response = await createRollbackReleaseOrderByApplication(record.id)
+    message.success(`已基于 ${response.data.previous_order_no || '最近一次成功发布'} 创建回滚单`)
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '回滚发布单创建失败'))
+  } finally {
+    rollingBackId.value = ''
+  }
 }
 
 async function handleDelete(id: string) {
@@ -211,7 +245,7 @@ onMounted(() => {
         :data-source="dataSource"
         :loading="loading"
         :pagination="false"
-        :scroll="{ x: 1380 }"
+        :scroll="{ x: 1500 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
@@ -247,6 +281,19 @@ onMounted(() => {
                 @click="toRelease(record.id)"
               >
                 发布
+              </a-button>
+              <a-button
+                type="link"
+                size="small"
+                danger
+                :disabled="!canRollbackApplication(record.id)"
+                :loading="rollingBackId === record.id"
+                @click="openRollbackConfirm(record)"
+              >
+                <template #icon>
+                  <RollbackOutlined />
+                </template>
+                回滚
               </a-button>
               <a-popconfirm
                 v-if="canManageApplication"

@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	yaml "gopkg.in/yaml.v2"
@@ -25,47 +27,51 @@ import (
 // 3. author_name / author_email 固定平台提交身份，方便审计；
 // 4. username/password 或 token 仅用于远端仓库认证注入。
 type Config struct {
-	Enabled           bool
-	LocalRoot         string
-	DefaultBranch     string
-	Username          string
-	Password          string
-	Token             string
-	AuthorName        string
-	AuthorEmail       string
-	CommandTimeoutSec int
+	Enabled               bool
+	LocalRoot             string
+	DefaultBranch         string
+	Username              string
+	Password              string
+	Token                 string
+	AuthorName            string
+	AuthorEmail           string
+	CommitMessageTemplate string
+	CommandTimeoutSec     int
 }
 
 type Service struct {
-	enabled           bool
-	localRoot         string
-	defaultBranch     string
-	username          string
-	password          string
-	token             string
-	authorName        string
-	authorEmail       string
-	commandTimeoutSec int
+	mu                    sync.RWMutex
+	enabled               bool
+	localRoot             string
+	defaultBranch         string
+	username              string
+	password              string
+	token                 string
+	authorName            string
+	authorEmail           string
+	commitMessageTemplate string
+	commandTimeoutSec     int
 }
 
 type Status struct {
-	Enabled           bool
-	LocalRoot         string
-	Mode              string
-	DefaultBranch     string
-	Username          string
-	AuthorName        string
-	AuthorEmail       string
-	CommandTimeoutSec int
-	PathExists        bool
-	IsGitRepo         bool
-	RemoteOrigin      string
-	RemoteReachable   bool
-	CurrentBranch     string
-	HeadCommit        string
-	HeadCommitSubject string
-	WorktreeDirty     bool
-	StatusSummary     []string
+	Enabled               bool
+	LocalRoot             string
+	Mode                  string
+	DefaultBranch         string
+	Username              string
+	AuthorName            string
+	AuthorEmail           string
+	CommitMessageTemplate string
+	CommandTimeoutSec     int
+	PathExists            bool
+	IsGitRepo             bool
+	RemoteOrigin          string
+	RemoteReachable       bool
+	CurrentBranch         string
+	HeadCommit            string
+	HeadCommitSubject     string
+	WorktreeDirty         bool
+	StatusSummary         []string
 }
 
 type BindingTarget struct {
@@ -76,22 +82,53 @@ type BindingTarget struct {
 	AvailableEnvironments []string
 }
 
+const defaultCommitMessageTemplate = "chore(release): {env} -> {image_version}"
+
+var commitTemplateTokenPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
+
 func NewService(cfg Config) *Service {
 	return &Service{
-		enabled:           cfg.Enabled,
-		localRoot:         strings.TrimSpace(cfg.LocalRoot),
-		defaultBranch:     strings.TrimSpace(cfg.DefaultBranch),
-		username:          strings.TrimSpace(cfg.Username),
-		password:          strings.TrimSpace(cfg.Password),
-		token:             strings.TrimSpace(cfg.Token),
-		authorName:        strings.TrimSpace(cfg.AuthorName),
-		authorEmail:       strings.TrimSpace(cfg.AuthorEmail),
-		commandTimeoutSec: cfg.CommandTimeoutSec,
+		enabled:               cfg.Enabled,
+		localRoot:             strings.TrimSpace(cfg.LocalRoot),
+		defaultBranch:         strings.TrimSpace(cfg.DefaultBranch),
+		username:              strings.TrimSpace(cfg.Username),
+		password:              strings.TrimSpace(cfg.Password),
+		token:                 strings.TrimSpace(cfg.Token),
+		authorName:            strings.TrimSpace(cfg.AuthorName),
+		authorEmail:           strings.TrimSpace(cfg.AuthorEmail),
+		commitMessageTemplate: NormalizeCommitMessageTemplate(cfg.CommitMessageTemplate),
+		commandTimeoutSec:     cfg.CommandTimeoutSec,
 	}
 }
 
 func (s *Service) Enabled() bool {
 	return s != nil && s.enabled && s.localRoot != ""
+}
+
+func DefaultCommitMessageTemplate() string {
+	return defaultCommitMessageTemplate
+}
+
+func NormalizeCommitMessageTemplate(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return defaultCommitMessageTemplate
+	}
+	return candidate
+}
+
+func (s *Service) currentCommitMessageTemplate() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return strings.TrimSpace(s.commitMessageTemplate)
+}
+
+func (s *Service) UpdateCommitMessageTemplate(template string) string {
+	normalized := NormalizeCommitMessageTemplate(template)
+	s.mu.Lock()
+	s.commitMessageTemplate = normalized
+	s.mu.Unlock()
+	return normalized
 }
 
 // GetStatus 返回 GitOps 工作目录的当前可见状态，供组件管理页展示。
@@ -102,14 +139,15 @@ func (s *Service) Enabled() bool {
 // 3. 远端可达性单独探测，方便定位是本地目录问题还是 Git 凭据/网络问题。
 func (s *Service) GetStatus(ctx context.Context) (Status, error) {
 	status := Status{
-		Enabled:           s.Enabled(),
-		LocalRoot:         strings.TrimSpace(s.localRoot),
-		Mode:              "workspace_root",
-		DefaultBranch:     strings.TrimSpace(s.defaultBranch),
-		Username:          strings.TrimSpace(s.username),
-		AuthorName:        strings.TrimSpace(s.authorName),
-		AuthorEmail:       strings.TrimSpace(s.authorEmail),
-		CommandTimeoutSec: s.commandTimeoutSec,
+		Enabled:               s.Enabled(),
+		LocalRoot:             strings.TrimSpace(s.localRoot),
+		Mode:                  "workspace_root",
+		DefaultBranch:         strings.TrimSpace(s.defaultBranch),
+		Username:              strings.TrimSpace(s.username),
+		AuthorName:            strings.TrimSpace(s.authorName),
+		AuthorEmail:           strings.TrimSpace(s.authorEmail),
+		CommitMessageTemplate: s.currentCommitMessageTemplate(),
+		CommandTimeoutSec:     s.commandTimeoutSec,
 	}
 	if !status.Enabled {
 		return status, nil
@@ -244,6 +282,24 @@ func (s *Service) ListBindingTargets(ctx context.Context) ([]BindingTarget, erro
 	return targets, nil
 }
 
+// BuildCommitMessage 使用配置模版渲染 GitOps 提交信息。
+//
+// 当前只支持轻量的占位符替换，而不引入完整模板引擎：
+// 1. 配置简单，便于在 JSON/env 中直接书写；
+// 2. 支持直接使用标准平台 Key 作为占位符，发布执行时再从流程参数中取值；
+// 3. 未识别的占位符会原样保留，便于快速发现模版配置问题；
+// 4. 若渲染结果为空，回退到默认模版，避免生成空提交说明。
+func (s *Service) BuildCommitMessage(fields map[string]string) string {
+	template := NormalizeCommitMessageTemplate(s.currentCommitMessageTemplate())
+	normalizedFields := normalizeCommitMessageFields(fields)
+	rendered := renderCommitMessageTemplate(template, normalizedFields)
+	rendered = strings.Join(strings.Fields(strings.TrimSpace(rendered)), " ")
+	if rendered == "" {
+		return strings.Join(strings.Fields(strings.TrimSpace(renderCommitMessageTemplate(defaultCommitMessageTemplate, normalizedFields))), " ")
+	}
+	return rendered
+}
+
 // UpdateKustomizationImage 只做一件事：更新某个 overlay 下 kustomization.yaml 的镜像 tag。
 //
 // 这里特意限制为“单镜像条目受控修改”：
@@ -277,7 +333,10 @@ func (s *Service) UpdateKustomizationImage(
 		return "", "", "", "", false, fmt.Errorf("image_version is required")
 	}
 	if commitMessage == "" {
-		commitMessage = "chore(gitops): update image version"
+		commitMessage = s.BuildCommitMessage(map[string]string{
+			"image_version": newTag,
+			"source_path":   sourcePath,
+		})
 	}
 
 	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
@@ -608,4 +667,33 @@ func mapSliceSet(items yaml.MapSlice, key string, value interface{}) yaml.MapSli
 		}
 	}
 	return append(items, yaml.MapItem{Key: key, Value: value})
+}
+
+func normalizeCommitMessageFields(fields map[string]string) map[string]string {
+	result := make(map[string]string, len(fields))
+	for key, value := range fields {
+		normalizedKey := strings.ToLower(strings.TrimSpace(key))
+		if normalizedKey == "" {
+			continue
+		}
+		result[normalizedKey] = strings.TrimSpace(value)
+	}
+	return result
+}
+
+func renderCommitMessageTemplate(template string, fields map[string]string) string {
+	return commitTemplateTokenPattern.ReplaceAllStringFunc(template, func(token string) string {
+		matches := commitTemplateTokenPattern.FindStringSubmatch(token)
+		if len(matches) != 2 {
+			return token
+		}
+		key := strings.ToLower(strings.TrimSpace(matches[1]))
+		if key == "" {
+			return token
+		}
+		if value, ok := fields[key]; ok {
+			return value
+		}
+		return token
+	})
 }

@@ -662,7 +662,7 @@ function scopeHint(scope: ReleasePipelineScope) {
     return ''
   }
   if (binding.provider === 'argocd') {
-    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会沿用 CI 中映射的 image_version 更新 GitOps 配置并触发同步。`
+    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会沿用 CI 中映射并勾选的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。`
   }
   if (binding.provider !== 'jenkins') {
     return `${scope.toUpperCase()} 当前使用 ${binding.provider}，当前版本暂不开放额外参数表单。`
@@ -787,7 +787,7 @@ onMounted(async () => {
                 :description="item.binding?.provider === 'jenkins'
                 ? '当前执行单元未配置额外参数'
                 : item.binding?.provider === 'argocd'
-                  ? '当前执行单元会沿用 CI 的 image_version 自动完成 GitOps 配置更新'
+                  ? '当前执行单元会沿用 CI 中映射并勾选的内置字段自动完成 GitOps 配置更新；其中 image_version 在 Jenkins CI 下默认取 BUILD_NUMBER'
                   : '当前执行单元暂无可填写的参数表单'"
             />
             <div v-else class="scope-param-form">

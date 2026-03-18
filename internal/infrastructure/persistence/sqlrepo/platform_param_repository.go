@@ -79,7 +79,7 @@ func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error
 			ID:          "ppd-image-version",
 			ParamKey:    "image_version",
 			Name:        "镜像版本",
-			Description: "平台自动分配",
+			Description: "平台自动分配；Jenkins CI 默认取本次构建号 BUILD_NUMBER",
 			ParamType:   domain.ParamTypeString,
 			Required:    false,
 			Builtin:     true,

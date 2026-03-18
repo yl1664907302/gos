@@ -1,67 +1,68 @@
 {
-  "environment": "local",
-  "server": {
-    "addr": ":8081",
-    "read_header_timeout_sec": 5,
-    "read_timeout_sec": 120,
-    "write_timeout_sec": 120,
-    "idle_timeout_sec": 60,
-    "shutdown_timeout_sec": 10
-  },
-  "database": {
-    "driver": "mysql",
-    "mysql_dsn": "root:JSgc_w29Sd@tcp(192.168.49.227:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
-    "sqlite_path": "data/demo.db",
-    "max_open_conns": 10,
-    "max_idle_conns": 5,
-    "conn_max_lifetime_sec": 1800,
-    "conn_max_idle_time_sec": 600,
-    "ping_timeout_sec": 5,
-    "startup_max_retries": 10,
-    "startup_retry_interval_sec": 2
-  },
-  "jenkins": {
-    "enabled": true,
-    "base_url": "http://192.168.1.208:8000/",
-    "username": "shuang",
-    "api_token": "112aabb50308085b4c9fddb1cf7660a6f2",
-    "timeout_sec": 5,
-    "startup_check_enabled": true,
-    "startup_max_retries": 5,
-    "startup_retry_interval_sec": 2,
-    "auto_sync_enabled": true,
-    "auto_sync_interval_sec": 5,
-    "release_track_enabled": true,
-    "release_track_interval_sec": 10
-  },
   "argocd": {
-    "enabled": true,
-    "base_url": "https://192.168.49.125:31607",
-    "insecure_skip_verify": true,
     "auth_mode": "token",
-    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhcmdvY2QiLCJzdWIiOiJnb3M6YXBpS2V5IiwibmJmIjoxNzczNzMzNjMxLCJpYXQiOjE3NzM3MzM2MzEsImp0aSI6Imdvcy1wbGF0Zm9ybSJ9.tz12hCH0FaDQyOr2qI49-PLUJqD5F0BhbVdK4xikjIY",
-    "username": "gos",
+    "base_url": "https://192.168.49.125:31607",
+    "enabled": true,
+    "insecure_skip_verify": true,
     "password": "yl1664907302..",
+    "request_timeout_sec": 30,
     "startup_check_enabled": true,
     "sync_enabled": true,
     "sync_interval_sec": 300,
-    "request_timeout_sec": 30
-  },
-  "gitops": {
-    "enabled": true,
-    "local_root": "/Users/lingyunxieqing/Desktop/deploy-manifests",
-    "default_branch": "master",
-    "username": "yeling",
-    "password": "yl1664907302..",
-    "token": "",
-    "author_name": "yeling",
-    "author_email": "yl10115658@gmail.com",
-    "command_timeout_sec": 30
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJhcmdvY2QiLCJzdWIiOiJnb3M6YXBpS2V5IiwibmJmIjoxNzczNzMzNjMxLCJpYXQiOjE3NzM3MzM2MzEsImp0aSI6Imdvcy1wbGF0Zm9ybSJ9.tz12hCH0FaDQyOr2qI49-PLUJqD5F0BhbVdK4xikjIY",
+    "username": "gos"
   },
   "auth": {
-    "session_ttl_hours": 24,
-    "admin_username": "admin",
     "admin_display_name": "Administrator",
-    "admin_password": "admin123"
+    "admin_password": "admin123",
+    "admin_username": "admin",
+    "session_ttl_hours": 24
+  },
+  "database": {
+    "conn_max_idle_time_sec": 600,
+    "conn_max_lifetime_sec": 1800,
+    "driver": "mysql",
+    "max_idle_conns": 5,
+    "max_open_conns": 10,
+    "mysql_dsn": "root:JSgc_w29Sd@tcp(192.168.49.227:3306)/deploy_platform?charset=utf8mb4\u0026parseTime=true\u0026loc=UTC",
+    "ping_timeout_sec": 5,
+    "sqlite_path": "data/demo.db",
+    "startup_max_retries": 10,
+    "startup_retry_interval_sec": 2
+  },
+  "environment": "local",
+  "gitops": {
+    "author_email": "yl10115658@gmail.com",
+    "author_name": "yeling",
+    "command_timeout_sec": 30,
+    "commit_message_template": "chore(release): {env} -\u003e {branch}-\u003e{image_version}",
+    "default_branch": "master",
+    "enabled": true,
+    "local_root": "/Users/lingyunxieqing/Desktop/deploy-manifests",
+    "password": "yl1664907302..",
+    "token": "",
+    "username": "yeling"
+  },
+  "jenkins": {
+    "api_token": "112aabb50308085b4c9fddb1cf7660a6f2",
+    "auto_sync_enabled": true,
+    "auto_sync_interval_sec": 5,
+    "base_url": "http://192.168.1.208:8000/",
+    "enabled": true,
+    "release_track_enabled": true,
+    "release_track_interval_sec": 10,
+    "startup_check_enabled": true,
+    "startup_max_retries": 5,
+    "startup_retry_interval_sec": 2,
+    "timeout_sec": 5,
+    "username": "shuang"
+  },
+  "server": {
+    "addr": ":8081",
+    "idle_timeout_sec": 60,
+    "read_header_timeout_sec": 5,
+    "read_timeout_sec": 120,
+    "shutdown_timeout_sec": 10,
+    "write_timeout_sec": 120
   }
 }

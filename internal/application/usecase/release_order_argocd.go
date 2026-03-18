@@ -26,6 +26,13 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	if err != nil {
 		return err
 	}
+	appKey := ""
+	if uc.appRepo != nil {
+		appRecord, appErr := uc.appRepo.GetByID(ctx, strings.TrimSpace(order.ApplicationID))
+		if appErr == nil {
+			appKey = strings.TrimSpace(appRecord.Key)
+		}
+	}
 	environment := uc.resolveArgoCDEnvironment(order, orderParams)
 	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, environment)
 	if err != nil {
@@ -42,6 +49,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	if imageVersion == "" {
 		return fmt.Errorf("%w: image_version is required when cd executor is argocd", ErrInvalidInput)
 	}
+	commitFields := buildGitOpsCommitMessageFields(order, orderParams, appKey, environment, imageVersion, sourcePath)
 
 	triggerCode := scopeStepCode(execution.PipelineScope, "trigger_pipeline")
 	runningCode := scopeStepCode(execution.PipelineScope, "pipeline_running")
@@ -55,7 +63,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		sourcePath,
 		strings.TrimSpace(app.GetTargetRevision()),
 		imageVersion,
-		fmt.Sprintf("chore(release): %s 发布 %s -> %s", order.OrderNo, appName, imageVersion),
+		uc.gitops.BuildCommitMessage(commitFields),
 	)
 	if err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "GitOps 仓库更新失败: "+err.Error())
@@ -197,6 +205,36 @@ func findReleaseParamValue(params []domain.ReleaseOrderParam, scope domain.Pipel
 
 func isArgoCDExecution(execution domain.ReleaseOrderExecution) bool {
 	return strings.EqualFold(strings.TrimSpace(execution.Provider), string(pipelinedomain.ProviderArgoCD))
+}
+
+func buildGitOpsCommitMessageFields(
+	order domain.ReleaseOrder,
+	params []domain.ReleaseOrderParam,
+	appKey string,
+	environment string,
+	imageVersion string,
+	sourcePath string,
+) map[string]string {
+	fields := map[string]string{
+		"order_no":      strings.TrimSpace(order.OrderNo),
+		"app_name":      strings.TrimSpace(order.ApplicationName),
+		"app_key":       strings.TrimSpace(appKey),
+		"env":           strings.TrimSpace(environment),
+		"image_version": strings.TrimSpace(imageVersion),
+		"source_path":   strings.TrimSpace(sourcePath),
+	}
+	for _, item := range params {
+		paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		paramValue := strings.TrimSpace(item.ParamValue)
+		if paramKey == "" || paramValue == "" {
+			continue
+		}
+		if _, exists := fields[paramKey]; exists && strings.TrimSpace(fields[paramKey]) != "" {
+			continue
+		}
+		fields[paramKey] = paramValue
+	}
+	return fields
 }
 
 // resolveArgoCDApplicationByRef 兼容两种 external_ref：

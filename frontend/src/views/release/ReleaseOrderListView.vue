@@ -69,6 +69,7 @@ const activeQuery = reactive({
 
 const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '发布单号', dataIndex: 'order_no', key: 'order_no', width: 220 },
+  { title: '上次发布单号', dataIndex: 'previous_order_no', key: 'previous_order_no', width: 220 },
   { title: '应用名称', dataIndex: 'application_name', key: 'application_name', width: 180 },
   { title: '环境', dataIndex: 'env_code', key: 'env_code', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
@@ -519,6 +520,15 @@ onBeforeUnmount(() => {
           </template>
           <template v-else-if="column.key === 'started_at'">
             {{ formatTime(record.started_at) }}
+          </template>
+          <template v-else-if="column.key === 'order_no'">
+            <a-space :size="6">
+              <span>{{ record.order_no }}</span>
+              <a-tag v-if="record.previous_order_no" color="red">回滚</a-tag>
+            </a-space>
+          </template>
+          <template v-else-if="column.key === 'previous_order_no'">
+            {{ record.previous_order_no || '-' }}
           </template>
           <template v-else-if="column.key === 'finished_at'">
             {{ formatTime(record.finished_at) }}

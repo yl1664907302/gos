@@ -94,7 +94,9 @@ const canManagePipelineParam = computed(() => authStore.hasPermission('pipeline_
 const canViewArgoCD = computed(
   () => authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage'),
 )
-const canViewGitOps = computed(() => authStore.hasPermission('component.gitops.view'))
+const canViewGitOps = computed(
+  () => authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage'),
+)
 const canViewRelease = computed(() => authStore.hasPermission('release.view'))
 const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))

@@ -64,7 +64,7 @@ function resolveFirstAccessiblePath(authStore: ReturnType<typeof useAuthStore>) 
   if (authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage')) {
     return '/components/argocd'
   }
-  if (authStore.hasPermission('component.gitops.view')) {
+  if (authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage')) {
     return '/components/gitops'
   }
   if (authStore.hasPermission('pipeline_param.manage')) {
@@ -154,7 +154,7 @@ export const router = createRouter({
           path: 'components/gitops',
           name: 'gitops-management',
           component: GitOpsManagementView,
-          meta: { title: 'GitOps管理', permission: 'component.gitops.view' },
+          meta: { title: 'GitOps管理', permission: ['component.gitops.view', 'component.gitops.manage'] },
         },
         {
           path: 'components/executor-params',

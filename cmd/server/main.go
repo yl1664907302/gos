@@ -13,6 +13,7 @@ import (
 	"gos/internal/application/usecase"
 	"gos/internal/bootstrap"
 	argocdinfra "gos/internal/infrastructure/argocd"
+	configstore "gos/internal/infrastructure/configstore"
 	gitopsinfra "gos/internal/infrastructure/gitops"
 	"gos/internal/infrastructure/jenkins"
 	"gos/internal/infrastructure/persistence/sqlrepo"
@@ -92,15 +93,16 @@ func main() {
 		TimeoutSec:         cfg.ArgoCD.TimeoutSec,
 	})
 	gitopsService := gitopsinfra.NewService(gitopsinfra.Config{
-		Enabled:           cfg.GitOps.Enabled,
-		LocalRoot:         cfg.GitOps.LocalRoot,
-		DefaultBranch:     cfg.GitOps.DefaultBranch,
-		Username:          cfg.GitOps.Username,
-		Password:          cfg.GitOps.Password,
-		Token:             cfg.GitOps.Token,
-		AuthorName:        cfg.GitOps.AuthorName,
-		AuthorEmail:       cfg.GitOps.AuthorEmail,
-		CommandTimeoutSec: cfg.GitOps.CommandTimeoutSec,
+		Enabled:               cfg.GitOps.Enabled,
+		LocalRoot:             cfg.GitOps.LocalRoot,
+		DefaultBranch:         cfg.GitOps.DefaultBranch,
+		Username:              cfg.GitOps.Username,
+		Password:              cfg.GitOps.Password,
+		Token:                 cfg.GitOps.Token,
+		AuthorName:            cfg.GitOps.AuthorName,
+		AuthorEmail:           cfg.GitOps.AuthorEmail,
+		CommitMessageTemplate: cfg.GitOps.CommitMessageTemplate,
+		CommandTimeoutSec:     cfg.GitOps.CommandTimeoutSec,
 	})
 	argocdUsecaseClient := argoCDUsecaseClient{client: argocdClient}
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
@@ -142,9 +144,16 @@ func main() {
 		usecase.NewQueryArgoCDApplications(argocdAppRepo, argocdUsecaseClient, cfg.ArgoCD.BaseURL),
 		authSessionManager,
 	)
+	gitopsStatusQuery := usecase.NewQueryGitOpsStatus(gitopsService)
 	gitopsHandler := httpapi.NewGitOpsHandler(
-		usecase.NewQueryGitOpsStatus(gitopsService),
+		gitopsStatusQuery,
 		usecase.NewQueryGitOpsBindingTargets(gitopsService),
+		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
+		usecase.NewUpdateGitOpsCommitTemplate(
+			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
+			gitopsService,
+			gitopsStatusQuery,
+		),
 		authSessionManager,
 	)
 	platformParamHandler := httpapi.NewPlatformParamHandler(
@@ -162,6 +171,7 @@ func main() {
 		repo,
 		pipelineRepo,
 		executorParamRepo,
+		platformParamRepo,
 		jenkinsClient,
 		argocdUsecaseClient,
 		gitopsService,

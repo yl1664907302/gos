@@ -76,17 +76,19 @@ type ArgoCDConfig struct {
 // 1. local_root 是本地工作目录根路径，平台会在其中维护 Git 仓库副本；
 // 2. default_branch 表示默认提交分支，若 ArgoCD Application 使用 HEAD，则回退到这里；
 // 3. username/password 或 token 用于 clone / pull / push；
-// 4. author_name / author_email 作为平台提交 Git 变更时的固定身份。
+// 4. author_name / author_email 作为平台提交 Git 变更时的固定身份；
+// 5. commit_message_template 用于统一 GitOps 提交信息模版格式，便于审计和排查。
 type GitOpsConfig struct {
-	Enabled           bool   `json:"enabled"`
-	LocalRoot         string `json:"local_root"`
-	DefaultBranch     string `json:"default_branch"`
-	Username          string `json:"username"`
-	Password          string `json:"password"`
-	Token             string `json:"token"`
-	AuthorName        string `json:"author_name"`
-	AuthorEmail       string `json:"author_email"`
-	CommandTimeoutSec int    `json:"command_timeout_sec"`
+	Enabled               bool   `json:"enabled"`
+	LocalRoot             string `json:"local_root"`
+	DefaultBranch         string `json:"default_branch"`
+	Username              string `json:"username"`
+	Password              string `json:"password"`
+	Token                 string `json:"token"`
+	AuthorName            string `json:"author_name"`
+	AuthorEmail           string `json:"author_email"`
+	CommitMessageTemplate string `json:"commit_message_template"`
+	CommandTimeoutSec     int    `json:"command_timeout_sec"`
 }
 
 type AuthConfig struct {
@@ -99,10 +101,7 @@ type AuthConfig struct {
 func LoadConfig() (Config, error) {
 	cfg := defaultConfig()
 
-	configPath := strings.TrimSpace(os.Getenv("APP_CONFIG_FILE"))
-	if configPath == "" {
-		configPath = "configs/config.local.json"
-	}
+	configPath := ResolveConfigPath()
 
 	if err := loadFromFile(configPath, &cfg); err != nil {
 		return Config{}, err
@@ -114,6 +113,14 @@ func LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func ResolveConfigPath() string {
+	configPath := strings.TrimSpace(os.Getenv("APP_CONFIG_FILE"))
+	if configPath == "" {
+		configPath = "configs/config.local.json"
+	}
+	return configPath
 }
 
 func defaultConfig() Config {
@@ -167,12 +174,13 @@ func defaultConfig() Config {
 			SyncIntervalSec:     300,
 		},
 		GitOps: GitOpsConfig{
-			Enabled:           false,
-			LocalRoot:         "data/gitops",
-			DefaultBranch:     "master",
-			AuthorName:        "gos-bot",
-			AuthorEmail:       "gos@example.com",
-			CommandTimeoutSec: 30,
+			Enabled:               false,
+			LocalRoot:             "data/gitops",
+			DefaultBranch:         "master",
+			AuthorName:            "gos-bot",
+			AuthorEmail:           "gos@example.com",
+			CommitMessageTemplate: "chore(release): {env} -> {image_version}",
+			CommandTimeoutSec:     30,
 		},
 		Auth: AuthConfig{
 			SessionTTLHours:  24,
@@ -310,6 +318,9 @@ func overrideFromEnv(cfg *Config) {
 	if v := strings.TrimSpace(os.Getenv("GITOPS_AUTHOR_EMAIL")); v != "" {
 		cfg.GitOps.AuthorEmail = v
 	}
+	if v := strings.TrimSpace(os.Getenv("GITOPS_COMMIT_MESSAGE_TEMPLATE")); v != "" {
+		cfg.GitOps.CommitMessageTemplate = v
+	}
 	if v, ok := intFromEnv("GITOPS_COMMAND_TIMEOUT_SEC"); ok {
 		cfg.GitOps.CommandTimeoutSec = v
 	}
@@ -422,6 +433,7 @@ func applyConfigDefaults(cfg *Config) {
 	cfg.GitOps.Token = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Token))
 	cfg.GitOps.AuthorName = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorName))
 	cfg.GitOps.AuthorEmail = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorEmail))
+	cfg.GitOps.CommitMessageTemplate = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.CommitMessageTemplate))
 	if cfg.GitOps.LocalRoot == "" {
 		cfg.GitOps.LocalRoot = "data/gitops"
 	}
@@ -433,6 +445,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.GitOps.AuthorEmail == "" {
 		cfg.GitOps.AuthorEmail = "gos@example.com"
+	}
+	if cfg.GitOps.CommitMessageTemplate == "" {
+		cfg.GitOps.CommitMessageTemplate = "chore(release): {env} -> {image_version}"
 	}
 	if cfg.GitOps.CommandTimeoutSec <= 0 {
 		cfg.GitOps.CommandTimeoutSec = 30

@@ -713,7 +713,7 @@ onMounted(async () => {
                 type="warning"
                 show-icon
                 message="当前未选择 CD 绑定管线，将按 ArgoCD 执行。"
-                description="发布执行时，平台会沿用 CI 中映射的 image_version 更新 GitOps 配置并触发同步。"
+                description="发布执行时，平台会沿用 CI 中映射并勾选的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。"
               />
               <a-alert
                 v-else-if="scopeStates.cd.enabled && selectedBinding('cd')"

@@ -2,6 +2,7 @@ export type ReleaseTriggerType = 'manual' | 'webhook' | 'schedule'
 export type ReleaseOrderStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 export type ReleaseStepStatus = 'pending' | 'running' | 'success' | 'failed'
 export type ReleasePipelineStageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
+export type ReleaseOrderValueProgressStatus = 'pending' | 'running' | 'resolved' | 'failed' | 'skipped'
 export type ReleaseValueSource = 'application' | 'environment' | 'release_input' | 'fixed'
 export type ReleaseTemplateStatus = 'active' | 'inactive'
 export type ReleasePipelineScope = 'ci' | 'cd'
@@ -10,6 +11,7 @@ export type ReleaseExecutionStatus = 'pending' | 'running' | 'success' | 'failed
 export interface ReleaseOrder {
   id: string
   order_no: string
+  previous_order_no: string
   application_id: string
   application_name: string
   template_id: string
@@ -42,6 +44,20 @@ export interface ReleaseOrderParam {
   param_value: string
   value_source: ReleaseValueSource
   created_at: string
+}
+
+export interface ReleaseOrderValueProgress {
+  pipeline_scope: ReleasePipelineScope
+  param_key: string
+  param_name: string
+  executor_param_name: string
+  required: boolean
+  status: ReleaseOrderValueProgressStatus
+  value: string
+  value_source: string
+  message: string
+  updated_at: string | null
+  sort_no: number
 }
 
 export interface ReleaseOrderStep {
@@ -116,6 +132,10 @@ export interface ReleaseOrderDataResponse {
 
 export interface ReleaseOrderParamListResponse {
   data: ReleaseOrderParam[]
+}
+
+export interface ReleaseOrderValueProgressListResponse {
+  data: ReleaseOrderValueProgress[]
 }
 
 export interface ReleaseOrderExecutionListResponse {

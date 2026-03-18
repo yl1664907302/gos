@@ -43,6 +43,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order (
 	id VARCHAR(64) PRIMARY KEY,
 	order_no VARCHAR(64) NOT NULL,
+	previous_order_no VARCHAR(64) NOT NULL DEFAULT '',
 	application_id VARCHAR(64) NOT NULL,
 	application_name VARCHAR(100) NOT NULL DEFAULT '',
 	template_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -190,6 +191,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 			`CREATE TABLE IF NOT EXISTS release_order (
 	id TEXT PRIMARY KEY,
 	order_no TEXT NOT NULL UNIQUE,
+	previous_order_no TEXT NOT NULL DEFAULT '',
 	application_id TEXT NOT NULL,
 	application_name TEXT NOT NULL DEFAULT '',
 	template_id TEXT NOT NULL DEFAULT '',
@@ -384,6 +386,18 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		exists, err = r.mysqlColumnExists(ctx, "release_order", "previous_order_no")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN previous_order_no VARCHAR(64) NOT NULL DEFAULT '' AFTER order_no;`,
+			); err != nil {
+				return err
+			}
+		}
 		exists, err = r.mysqlColumnExists(ctx, "release_order", "template_id")
 		if err != nil {
 			return err
@@ -493,6 +507,14 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			if _, err = r.db.ExecContext(
 				ctx,
 				`ALTER TABLE release_order ADD COLUMN creator_user_id TEXT NOT NULL DEFAULT '';`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["previous_order_no"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE release_order ADD COLUMN previous_order_no TEXT NOT NULL DEFAULT '';`,
 			); err != nil {
 				return err
 			}
@@ -620,15 +642,16 @@ func (r *ReleaseRepository) Create(
 
 	const insertOrder = `
 INSERT INTO release_order (
-	id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
+	id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
 	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
 		insertOrder,
 		order.ID,
 		order.OrderNo,
+		order.PreviousOrderNo,
 		order.ApplicationID,
 		order.ApplicationName,
 		order.TemplateID,
@@ -740,7 +763,7 @@ INSERT INTO release_order_step (
 
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
-SELECT id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
@@ -809,7 +832,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 
 	listQuery := `
-SELECT id, order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
@@ -1577,6 +1600,7 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	if err := s.Scan(
 		&item.ID,
 		&item.OrderNo,
+		&item.PreviousOrderNo,
 		&item.ApplicationID,
 		&item.ApplicationName,
 		&item.TemplateID,

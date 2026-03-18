@@ -53,6 +53,7 @@
     "token": "",
     "author_name": "gos-bot",
     "author_email": "gos@example.com",
+    "commit_message_template": "chore(release): {env} -> {image_version}",
     "command_timeout_sec": 30
   }
 }

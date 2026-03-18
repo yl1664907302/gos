@@ -153,6 +153,7 @@ func (s ValueSource) Valid() bool {
 type ReleaseOrder struct {
 	ID              string
 	OrderNo         string
+	PreviousOrderNo string
 	ApplicationID   string
 	ApplicationName string
 	TemplateID      string

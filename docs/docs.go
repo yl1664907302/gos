@@ -499,6 +499,58 @@ const docTemplate = `{
                 }
             }
         },
+        "/applications/{id}/release-orders/rollback": {
+            "post": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "Create rollback release order by application",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Application ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/argocd/applications": {
             "get": {
                 "produces": [
@@ -780,6 +832,144 @@ const docTemplate = `{
                     },
                     "404": {
                         "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/gitops/settings/commit-message-template": {
+            "put": {
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gitops"
+                ],
+                "summary": "Update GitOps commit message template",
+                "parameters": [
+                    {
+                        "description": "commit message template",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.UpdateGitOpsCommitTemplateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.GitOpsStatusDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/gitops/status": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gitops"
+                ],
+                "summary": "Get GitOps workspace status",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.GitOpsStatusDataResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/gitops/targets": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gitops"
+                ],
+                "summary": "List GitOps binding targets",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.GitOpsBindingTargetsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/gitops/template-fields": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "gitops"
+                ],
+                "summary": "List GitOps commit template fields",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.GitOpsTemplateFieldsResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
                         "schema": {
                             "$ref": "#/definitions/httpapi.ErrorResponse"
                         }
@@ -2084,6 +2274,43 @@ const docTemplate = `{
                     }
                 }
             }
+        },
+        "/release-orders/{id}/value-progress": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "release-orders"
+                ],
+                "summary": "List release order value progress",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ReleaseOrderValueProgressListResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    },
+                    "500": {
+                        "description": "Internal Server Error",
+                        "schema": {
+                            "$ref": "#/definitions/httpapi.ErrorResponse"
+                        }
+                    }
+                }
+            }
         }
     },
     "definitions": {
@@ -2303,9 +2530,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "external_ref": {
-                    "type": "string"
-                },
-                "name": {
                     "type": "string"
                 },
                 "pipeline_id": {
@@ -2535,6 +2759,36 @@ const docTemplate = `{
                 },
                 "status": {
                     "type": "string"
+                }
+            }
+        },
+        "httpapi.GitOpsBindingTargetsResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/usecase.QueryGitOpsBindingTargetOutput"
+                    }
+                }
+            }
+        },
+        "httpapi.GitOpsStatusDataResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "$ref": "#/definitions/usecase.QueryGitOpsStatusOutput"
+                }
+            }
+        },
+        "httpapi.GitOpsTemplateFieldsResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/usecase.QueryGitOpsTemplateFieldOutput"
+                    }
                 }
             }
         },
@@ -2883,6 +3137,9 @@ const docTemplate = `{
                 "pipeline_id": {
                     "type": "string"
                 },
+                "previous_order_no": {
+                    "type": "string"
+                },
                 "project_name": {
                     "type": "string"
                 },
@@ -2983,6 +3240,55 @@ const docTemplate = `{
                 }
             }
         },
+        "httpapi.ReleaseOrderValueProgressListResponse": {
+            "type": "object",
+            "properties": {
+                "data": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/httpapi.ReleaseOrderValueProgressResponse"
+                    }
+                }
+            }
+        },
+        "httpapi.ReleaseOrderValueProgressResponse": {
+            "type": "object",
+            "properties": {
+                "executor_param_name": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "param_key": {
+                    "type": "string"
+                },
+                "param_name": {
+                    "type": "string"
+                },
+                "pipeline_scope": {
+                    "type": "string"
+                },
+                "required": {
+                    "type": "boolean"
+                },
+                "sort_no": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "updated_at": {
+                    "type": "string"
+                },
+                "value": {
+                    "type": "string"
+                },
+                "value_source": {
+                    "type": "string"
+                }
+            }
+        },
         "httpapi.StartReleaseOrderStepRequest": {
             "type": "object",
             "properties": {
@@ -3045,9 +3351,6 @@ const docTemplate = `{
                 "external_ref": {
                     "type": "string"
                 },
-                "name": {
-                    "type": "string"
-                },
                 "pipeline_id": {
                     "type": "string"
                 },
@@ -3066,6 +3369,14 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "param_key": {
+                    "type": "string"
+                }
+            }
+        },
+        "httpapi.UpdateGitOpsCommitTemplateRequest": {
+            "type": "object",
+            "properties": {
+                "template": {
                     "type": "string"
                 }
             }
@@ -3112,6 +3423,114 @@ const docTemplate = `{
                             "type": "boolean"
                         }
                     }
+                }
+            }
+        },
+        "usecase.QueryGitOpsBindingTargetOutput": {
+            "type": "object",
+            "properties": {
+                "app_directory": {
+                    "type": "string"
+                },
+                "available_environments": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "display_name": {
+                    "type": "string"
+                },
+                "hierarchy_hint": {
+                    "type": "string"
+                },
+                "path": {
+                    "type": "string"
+                }
+            }
+        },
+        "usecase.QueryGitOpsStatusOutput": {
+            "type": "object",
+            "properties": {
+                "author_email": {
+                    "type": "string"
+                },
+                "author_name": {
+                    "type": "string"
+                },
+                "command_timeout_sec": {
+                    "type": "integer"
+                },
+                "commit_message_template": {
+                    "type": "string"
+                },
+                "current_branch": {
+                    "type": "string"
+                },
+                "default_branch": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "head_commit": {
+                    "type": "string"
+                },
+                "head_commit_short": {
+                    "type": "string"
+                },
+                "head_commit_subject": {
+                    "type": "string"
+                },
+                "is_git_repo": {
+                    "type": "boolean"
+                },
+                "local_root": {
+                    "type": "string"
+                },
+                "mode": {
+                    "type": "string"
+                },
+                "path_exists": {
+                    "type": "boolean"
+                },
+                "remote_origin": {
+                    "type": "string"
+                },
+                "remote_reachable": {
+                    "type": "boolean"
+                },
+                "status_summary": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "username": {
+                    "type": "string"
+                },
+                "worktree_dirty": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "usecase.QueryGitOpsTemplateFieldOutput": {
+            "type": "object",
+            "properties": {
+                "builtin": {
+                    "type": "boolean"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "param_key": {
+                    "type": "string"
+                },
+                "required": {
+                    "type": "boolean"
                 }
             }
         },

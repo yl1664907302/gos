@@ -142,8 +142,6 @@ definitions:
         type: string
       external_ref:
         type: string
-      name:
-        type: string
       pipeline_id:
         type: string
       provider:
@@ -293,6 +291,25 @@ definitions:
         type: string
       status:
         type: string
+    type: object
+  httpapi.GitOpsBindingTargetsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/usecase.QueryGitOpsBindingTargetOutput'
+        type: array
+    type: object
+  httpapi.GitOpsStatusDataResponse:
+    properties:
+      data:
+        $ref: '#/definitions/usecase.QueryGitOpsStatusOutput'
+    type: object
+  httpapi.GitOpsTemplateFieldsResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/usecase.QueryGitOpsTemplateFieldOutput'
+        type: array
     type: object
   httpapi.PipelineBindingDataResponse:
     properties:
@@ -519,6 +536,8 @@ definitions:
         type: string
       pipeline_id:
         type: string
+      previous_order_no:
+        type: string
       project_name:
         type: string
       remark:
@@ -584,6 +603,38 @@ definitions:
       step_scope:
         type: string
     type: object
+  httpapi.ReleaseOrderValueProgressListResponse:
+    properties:
+      data:
+        items:
+          $ref: '#/definitions/httpapi.ReleaseOrderValueProgressResponse'
+        type: array
+    type: object
+  httpapi.ReleaseOrderValueProgressResponse:
+    properties:
+      executor_param_name:
+        type: string
+      message:
+        type: string
+      param_key:
+        type: string
+      param_name:
+        type: string
+      pipeline_scope:
+        type: string
+      required:
+        type: boolean
+      sort_no:
+        type: integer
+      status:
+        type: string
+      updated_at:
+        type: string
+      value:
+        type: string
+      value_source:
+        type: string
+    type: object
   httpapi.StartReleaseOrderStepRequest:
     properties:
       message:
@@ -624,8 +675,6 @@ definitions:
     properties:
       external_ref:
         type: string
-      name:
-        type: string
       pipeline_id:
         type: string
       provider:
@@ -638,6 +687,11 @@ definitions:
   httpapi.UpdateExecutorParamDefRequest:
     properties:
       param_key:
+        type: string
+    type: object
+  httpapi.UpdateGitOpsCommitTemplateRequest:
+    properties:
+      template:
         type: string
     type: object
   httpapi.UpdatePlatformParamDictRequest:
@@ -668,6 +722,77 @@ definitions:
           verified:
             type: boolean
         type: object
+    type: object
+  usecase.QueryGitOpsBindingTargetOutput:
+    properties:
+      app_directory:
+        type: string
+      available_environments:
+        items:
+          type: string
+        type: array
+      display_name:
+        type: string
+      hierarchy_hint:
+        type: string
+      path:
+        type: string
+    type: object
+  usecase.QueryGitOpsStatusOutput:
+    properties:
+      author_email:
+        type: string
+      author_name:
+        type: string
+      command_timeout_sec:
+        type: integer
+      commit_message_template:
+        type: string
+      current_branch:
+        type: string
+      default_branch:
+        type: string
+      enabled:
+        type: boolean
+      head_commit:
+        type: string
+      head_commit_short:
+        type: string
+      head_commit_subject:
+        type: string
+      is_git_repo:
+        type: boolean
+      local_root:
+        type: string
+      mode:
+        type: string
+      path_exists:
+        type: boolean
+      remote_origin:
+        type: string
+      remote_reachable:
+        type: boolean
+      status_summary:
+        items:
+          type: string
+        type: array
+      username:
+        type: string
+      worktree_dirty:
+        type: boolean
+    type: object
+  usecase.QueryGitOpsTemplateFieldOutput:
+    properties:
+      builtin:
+        type: boolean
+      description:
+        type: string
+      name:
+        type: string
+      param_key:
+        type: string
+      required:
+        type: boolean
     type: object
   usecase.SyncArgoCDApplicationsOutput:
     properties:
@@ -1030,6 +1155,40 @@ paths:
       summary: Create pipeline binding for application
       tags:
       - pipeline-bindings
+  /applications/{id}/release-orders/rollback:
+    post:
+      parameters:
+      - description: Application ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/httpapi.ReleaseOrderDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Create rollback release order by application
+      tags:
+      - release-orders
   /argocd/applications:
     get:
       parameters:
@@ -1222,6 +1381,95 @@ paths:
       summary: Update executor param definition mapping
       tags:
       - executor-param-defs
+  /gitops/settings/commit-message-template:
+    put:
+      consumes:
+      - application/json
+      parameters:
+      - description: commit message template
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/httpapi.UpdateGitOpsCommitTemplateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.GitOpsStatusDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Update GitOps commit message template
+      tags:
+      - gitops
+  /gitops/status:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.GitOpsStatusDataResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: Get GitOps workspace status
+      tags:
+      - gitops
+  /gitops/targets:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.GitOpsBindingTargetsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List GitOps binding targets
+      tags:
+      - gitops
+  /gitops/template-fields:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.GitOpsTemplateFieldsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List GitOps commit template fields
+      tags:
+      - gitops
   /jenkins/executor-param-defs/sync:
     post:
       produces:
@@ -2065,6 +2313,30 @@ paths:
           schema:
             $ref: '#/definitions/httpapi.ErrorResponse'
       summary: Start release order step
+      tags:
+      - release-orders
+  /release-orders/{id}/value-progress:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpapi.ReleaseOrderValueProgressListResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/httpapi.ErrorResponse'
+      summary: List release order value progress
       tags:
       - release-orders
 schemes:

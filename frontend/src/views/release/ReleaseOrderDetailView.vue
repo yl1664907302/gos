@@ -19,6 +19,7 @@ import {
   getReleaseOrderPipelineStageLog,
   listReleaseOrderExecutions,
   listReleaseOrderParams,
+  listReleaseOrderValueProgress,
   listReleaseOrderPipelineStages,
   listReleaseOrderSteps,
 } from '../../api/release'
@@ -29,6 +30,8 @@ import type {
   ReleaseOrderExecution,
   ReleaseOrderLogStreamEvent,
   ReleaseOrderParam,
+  ReleaseOrderValueProgress,
+  ReleaseOrderValueProgressStatus,
   ReleaseOrderPipelineStage,
   ReleaseOrderStatus,
   ReleaseOrderStep,
@@ -86,6 +89,7 @@ const executeLocked = ref(false)
 
 const order = ref<ReleaseOrder | null>(null)
 const params = ref<ReleaseOrderParam[]>([])
+const valueProgress = ref<ReleaseOrderValueProgress[]>([])
 const steps = ref<ReleaseOrderStep[]>([])
 const executions = ref<ReleaseOrderExecution[]>([])
 const pipelineStages = ref<ReleaseOrderPipelineStage[]>([])
@@ -138,7 +142,8 @@ const detailItems = computed(() => {
     return []
   }
   return [
-    { label: '发布单号', value: order.value.order_no },
+    { key: 'order_no', label: '发布单号', value: order.value.order_no },
+    { key: 'previous_order_no', label: '上次发布单号', value: order.value.previous_order_no || '-' },
     { label: '应用名称', value: order.value.application_name || '-' },
     { label: '模板名称', value: order.value.template_name || '-' },
     { label: '模板 ID', value: order.value.template_id || '-' },
@@ -177,6 +182,24 @@ const paramGroups = computed(() => {
       title: `${scopeLabel(scope)} 参数快照`,
       items: map[scope],
     }))
+})
+
+const valueProgressGroups = computed(() => {
+  const map: Record<ReleasePipelineScope, ReleaseOrderValueProgress[]> = { ci: [], cd: [] }
+  valueProgress.value.forEach((item) => {
+    const scope = normalizeScope(item.pipeline_scope)
+    if (!scope) {
+      return
+    }
+    map[scope].push(item)
+  })
+  return visibleScopes.value
+    .map((scope) => ({
+      scope,
+      title: `${scopeLabel(scope)} 取值进度`,
+      items: map[scope].sort((a, b) => a.sort_no - b.sort_no),
+    }))
+    .filter((group) => group.items.length > 0)
 })
 
 const stepGroups = computed(() => {
@@ -265,6 +288,22 @@ const { columns: pipelineStageColumns } = useResizableColumns(pipelineStageIniti
   hitArea: 10,
 })
 
+const valueProgressInitialColumns: TableColumnsType<ReleaseOrderValueProgress> = [
+  { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
+  { title: '字段名称', dataIndex: 'param_name', key: 'param_name', width: 180 },
+  { title: '执行器参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
+  { title: '当前值', dataIndex: 'value', key: 'value', width: 260, ellipsis: true },
+  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
+  { title: '来源', dataIndex: 'value_source', key: 'value_source', width: 180 },
+  { title: '说明', dataIndex: 'message', key: 'message', width: 320, ellipsis: true },
+  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
+]
+const { columns: valueProgressColumns } = useResizableColumns(valueProgressInitialColumns, {
+  minWidth: 100,
+  maxWidth: 520,
+  hitArea: 10,
+})
+
 function normalizeScope(scope: string): ReleasePipelineScope | null {
   const value = String(scope || '').trim().toLowerCase()
   if (value === 'ci' || value === 'cd') {
@@ -324,6 +363,36 @@ function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | Re
       return '已跳过'
     default:
       return status
+  }
+}
+
+function valueProgressStatusColor(status: ReleaseOrderValueProgressStatus) {
+  switch (status) {
+    case 'resolved':
+      return 'green'
+    case 'running':
+      return 'blue'
+    case 'failed':
+      return 'red'
+    case 'skipped':
+      return 'default'
+    default:
+      return 'gold'
+  }
+}
+
+function valueProgressStatusText(status: ReleaseOrderValueProgressStatus) {
+  switch (status) {
+    case 'resolved':
+      return '已取值'
+    case 'running':
+      return '取值中'
+    case 'failed':
+      return '取值失败'
+    case 'skipped':
+      return '未取值'
+    default:
+      return '等待取值'
   }
 }
 
@@ -707,15 +776,17 @@ async function loadDetail(options?: { silent?: boolean }) {
   }
   try {
     const previousStatus = order.value?.status || ''
-    const [orderResp, executionsResp, paramsResp, stepsResp] = await Promise.all([
+    const [orderResp, executionsResp, paramsResp, valueProgressResp, stepsResp] = await Promise.all([
       getReleaseOrderByID(orderID.value),
       listReleaseOrderExecutions(orderID.value),
       canViewParamSnapshot.value ? listReleaseOrderParams(orderID.value) : Promise.resolve({ data: [] }),
+      canViewParamSnapshot.value ? listReleaseOrderValueProgress(orderID.value) : Promise.resolve({ data: [] }),
       listReleaseOrderSteps(orderID.value),
     ])
     order.value = orderResp.data
     executions.value = [...executionsResp.data].sort((a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope))
     params.value = paramsResp.data
+    valueProgress.value = valueProgressResp.data
     steps.value = stepsResp.data
 
     const now = Date.now()
@@ -949,8 +1020,16 @@ onBeforeUnmount(() => {
         </a-tag>
       </template>
       <a-descriptions :column="{ xs: 1, md: 2 }" bordered>
-        <a-descriptions-item v-for="item in detailItems" :key="item.label" :label="item.label">
-          {{ item.value }}
+        <a-descriptions-item v-for="item in detailItems" :key="item.key || item.label" :label="item.label">
+          <template v-if="item.key === 'order_no'">
+            <a-space :size="6">
+              <span>{{ item.value }}</span>
+              <a-tag v-if="order?.previous_order_no" color="red">回滚</a-tag>
+            </a-space>
+          </template>
+          <template v-else>
+            {{ item.value }}
+          </template>
         </a-descriptions-item>
       </a-descriptions>
 
@@ -995,6 +1074,44 @@ onBeforeUnmount(() => {
             </template>
             <template v-else-if="column.key === 'param_value'">
               {{ record.param_value || '-' }}
+            </template>
+          </template>
+        </a-table>
+      </a-card>
+
+      <a-card v-for="group in valueProgressGroups" :key="`value-${group.scope}`" class="detail-card" :title="group.title" :loading="loading" :bordered="true">
+        <a-alert
+          class="pipeline-stage-alert"
+          type="info"
+          show-icon
+          message="这里展示模板中已映射标准 Key 的实时取值情况。执行中的动态值会随详情页自动刷新。"
+        />
+        <a-table
+          row-key="rowKey"
+          :columns="valueProgressColumns"
+          :data-source="group.items.map((item) => ({ ...item, rowKey: `${item.pipeline_scope}-${item.param_key}-${item.executor_param_name}` }))"
+          :pagination="false"
+          :scroll="{ x: 1600 }"
+        >
+          <template #bodyCell="{ column, record }">
+            <template v-if="column.key === 'status'">
+              <a-tag :color="valueProgressStatusColor(record.status)" class="status-tag">
+                <LoadingOutlined v-if="record.status === 'running'" spin />
+                <span>{{ valueProgressStatusText(record.status) }}</span>
+              </a-tag>
+            </template>
+            <template v-else-if="column.key === 'value'">
+              {{ record.value || '-' }}
+            </template>
+            <template v-else-if="column.key === 'value_source'">
+              {{ record.value_source || '-' }}
+            </template>
+            <template v-else-if="column.key === 'updated_at'">
+              {{ formatTime(record.updated_at) }}
+            </template>
+            <template v-else-if="column.key === 'param_name'">
+              <span>{{ record.param_name || '-' }}</span>
+              <a-tag v-if="record.required" class="required-tag" color="red">必需</a-tag>
             </template>
           </template>
         </a-table>
@@ -1237,6 +1354,10 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.required-tag {
+  margin-left: 8px;
 }
 
 .log-alert,

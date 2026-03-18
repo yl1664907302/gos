@@ -8,6 +8,7 @@ import type {
   ReleaseOrderPipelineStageLogResponse,
   ReleaseOrderListResponse,
   ReleaseOrderParamListResponse,
+  ReleaseOrderValueProgressListResponse,
   ReleaseOrderStepListResponse,
   ReleaseTemplate,
   ReleaseTemplateDataResponse,
@@ -24,6 +25,13 @@ export async function listReleaseOrders(params: ReleaseOrderListParams): Promise
 
 export async function createReleaseOrder(payload: CreateReleaseOrderPayload): Promise<ReleaseOrderDataResponse> {
   const response = await http.post<ReleaseOrderDataResponse>('/release-orders', payload)
+  return response.data
+}
+
+export async function createRollbackReleaseOrderByApplication(applicationID: string): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/applications/${encodeURIComponent(String(applicationID || '').trim())}/release-orders/rollback`,
+  )
   return response.data
 }
 
@@ -44,6 +52,11 @@ export async function executeReleaseOrder(id: string): Promise<ReleaseOrderDataR
 
 export async function listReleaseOrderParams(id: string): Promise<ReleaseOrderParamListResponse> {
   const response = await http.get<ReleaseOrderParamListResponse>(`/release-orders/${id}/params`)
+  return response.data
+}
+
+export async function listReleaseOrderValueProgress(id: string): Promise<ReleaseOrderValueProgressListResponse> {
+  const response = await http.get<ReleaseOrderValueProgressListResponse>(`/release-orders/${id}/value-progress`)
   return response.data
 }
 
