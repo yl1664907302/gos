@@ -3,12 +3,12 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
 	appdomain "gos/internal/domain/application"
 	pipelineparamdomain "gos/internal/domain/executorparam"
+	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	releasedomain "gos/internal/domain/release"
@@ -20,7 +20,22 @@ type ReleaseTemplateManager struct {
 	pipelineRepo pipelinedomain.Repository
 	paramRepo    pipelineparamdomain.Repository
 	platformRepo platformparamdomain.Repository
+	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader
 	now          func() time.Time
+}
+
+type ReleaseTemplateGitOpsFieldCandidateReader interface {
+	ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error)
+}
+
+type ReleaseTemplateGitOpsRuleInput struct {
+	SourceParamKey   string
+	SourceFrom       releasedomain.GitOpsRuleSourceFrom
+	FilePathTemplate string
+	DocumentKind     string
+	DocumentName     string
+	TargetPath       string
+	ValueTemplate    string
 }
 
 type CreateReleaseTemplateInput struct {
@@ -33,6 +48,7 @@ type CreateReleaseTemplateInput struct {
 	Remark        string
 	CIParamDefIDs []string
 	CDParamDefIDs []string
+	GitOpsRules   []ReleaseTemplateGitOpsRuleInput
 }
 
 type UpdateReleaseTemplateInput struct {
@@ -44,6 +60,7 @@ type UpdateReleaseTemplateInput struct {
 	Remark        string
 	CIParamDefIDs []string
 	CDParamDefIDs []string
+	GitOpsRules   []ReleaseTemplateGitOpsRuleInput
 }
 
 type ListReleaseTemplateInput struct {
@@ -61,6 +78,7 @@ func NewReleaseTemplateManager(
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
+	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader,
 ) *ReleaseTemplateManager {
 	return &ReleaseTemplateManager{
 		repo:         repo,
@@ -68,6 +86,7 @@ func NewReleaseTemplateManager(
 		pipelineRepo: pipelineRepo,
 		paramRepo:    paramRepo,
 		platformRepo: platformRepo,
+		gitopsReader: gitopsReader,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -77,11 +96,11 @@ func NewReleaseTemplateManager(
 func (uc *ReleaseTemplateManager) Create(
 	ctx context.Context,
 	input CreateReleaseTemplateInput,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
 	name := strings.TrimSpace(input.Name)
 	applicationID := strings.TrimSpace(input.ApplicationID)
 	if name == "" || applicationID == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: name and application_id are required", ErrInvalidInput)
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, fmt.Errorf("%w: name and application_id are required", ErrInvalidInput)
 	}
 
 	status := input.Status
@@ -89,10 +108,10 @@ func (uc *ReleaseTemplateManager) Create(
 		status = releasedomain.TemplateStatusActive
 	}
 	if !status.Valid() {
-		return releasedomain.ReleaseTemplate{}, nil, nil, ErrInvalidStatus
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
 	}
 
-	templateBindings, params, appName, err := uc.buildTemplatePayload(
+	templateBindings, params, gitopsRules, appName, err := uc.buildTemplatePayload(
 		ctx,
 		applicationID,
 		input.CIBindingID,
@@ -100,9 +119,10 @@ func (uc *ReleaseTemplateManager) Create(
 		input.CDProvider,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
+		input.GitOpsRules,
 	)
 	if err != nil {
-		return releasedomain.ReleaseTemplate{}, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
 	now := uc.now()
@@ -131,9 +151,14 @@ func (uc *ReleaseTemplateManager) Create(
 		params[idx].CreatedAt = now
 		params[idx].UpdatedAt = now
 	}
+	for idx := range gitopsRules {
+		gitopsRules[idx].TemplateID = template.ID
+		gitopsRules[idx].CreatedAt = now
+		gitopsRules[idx].UpdatedAt = now
+	}
 
-	if err := uc.repo.CreateTemplate(ctx, template, templateBindings, params); err != nil {
-		return releasedomain.ReleaseTemplate{}, nil, nil, err
+	if err := uc.repo.CreateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 	return uc.repo.GetTemplateByID(ctx, template.ID)
 }
@@ -141,10 +166,10 @@ func (uc *ReleaseTemplateManager) Create(
 func (uc *ReleaseTemplateManager) GetByID(
 	ctx context.Context,
 	id string,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, ErrInvalidID
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidID
 	}
 	return uc.repo.GetTemplateByID(ctx, id)
 }
@@ -186,14 +211,14 @@ func (uc *ReleaseTemplateManager) Update(
 	ctx context.Context,
 	id string,
 	input UpdateReleaseTemplateInput,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, ErrInvalidID
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidID
 	}
-	current, _, _, err := uc.repo.GetTemplateByID(ctx, id)
+	current, _, _, _, err := uc.repo.GetTemplateByID(ctx, id)
 	if err != nil {
-		return releasedomain.ReleaseTemplate{}, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
 	name := strings.TrimSpace(input.Name)
@@ -206,10 +231,10 @@ func (uc *ReleaseTemplateManager) Update(
 		status = current.Status
 	}
 	if !status.Valid() {
-		return releasedomain.ReleaseTemplate{}, nil, nil, ErrInvalidStatus
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
 	}
 
-	templateBindings, params, appName, err := uc.buildTemplatePayload(
+	templateBindings, params, gitopsRules, appName, err := uc.buildTemplatePayload(
 		ctx,
 		current.ApplicationID,
 		input.CIBindingID,
@@ -217,9 +242,10 @@ func (uc *ReleaseTemplateManager) Update(
 		input.CDProvider,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
+		input.GitOpsRules,
 	)
 	if err != nil {
-		return releasedomain.ReleaseTemplate{}, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
 	now := uc.now()
@@ -248,9 +274,14 @@ func (uc *ReleaseTemplateManager) Update(
 		params[idx].CreatedAt = now
 		params[idx].UpdatedAt = now
 	}
+	for idx := range gitopsRules {
+		gitopsRules[idx].TemplateID = template.ID
+		gitopsRules[idx].CreatedAt = now
+		gitopsRules[idx].UpdatedAt = now
+	}
 
-	if err := uc.repo.UpdateTemplate(ctx, template, templateBindings, params); err != nil {
-		return releasedomain.ReleaseTemplate{}, nil, nil, err
+	if err := uc.repo.UpdateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 	return uc.repo.GetTemplateByID(ctx, template.ID)
 }
@@ -271,13 +302,14 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	cdProvider pipelinedomain.Provider,
 	ciParamDefIDs []string,
 	cdParamDefIDs []string,
-) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, string, error) {
+	gitopsRuleInputs []ReleaseTemplateGitOpsRuleInput,
+) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, string, error) {
 	bindings := make([]releasedomain.ReleaseTemplateBinding, 0, 2)
 	params := make([]releasedomain.ReleaseTemplateParam, 0)
 
 	appName := ""
 	if uc.pipelineRepo == nil {
-		return nil, nil, "", fmt.Errorf("%w: pipeline repository is not configured", ErrInvalidInput)
+		return nil, nil, nil, "", fmt.Errorf("%w: pipeline repository is not configured", ErrInvalidInput)
 	}
 
 	ciBinding, ciParams, appName, err := uc.buildTemplateScopePayload(
@@ -290,7 +322,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		1,
 	)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	if ciBinding != nil {
 		bindings = append(bindings, *ciBinding)
@@ -307,7 +339,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		2,
 	)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
 	}
 	if appName == "" {
 		appName = derivedAppName
@@ -318,15 +350,19 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	}
 
 	if len(bindings) == 0 {
-		return nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
+		return nil, nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
 	}
 	if err := uc.validateArgoCDTemplateImageVersion(ctx, bindings, params); err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, "", err
+	}
+	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsRuleInputs)
+	if err != nil {
+		return nil, nil, nil, "", err
 	}
 	if appName == "" && len(bindings) > 0 {
 		appName = bindings[0].BindingName
 	}
-	return bindings, params, appName, nil
+	return bindings, params, gitopsRules, appName, nil
 }
 
 func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
@@ -471,6 +507,179 @@ func normalizeStringIDs(values []string) []string {
 	return result
 }
 
+func (uc *ReleaseTemplateManager) buildGitOpsRules(
+	ctx context.Context,
+	applicationID string,
+	bindings []releasedomain.ReleaseTemplateBinding,
+	params []releasedomain.ReleaseTemplateParam,
+	inputs []ReleaseTemplateGitOpsRuleInput,
+) ([]releasedomain.ReleaseTemplateGitOpsRule, error) {
+	if !templateUsesArgoCD(bindings) {
+		if len(inputs) > 0 {
+			return nil, fmt.Errorf("%w: 仅当 cd 使用 argocd 时才可配置 gitops 替换规则", ErrInvalidInput)
+		}
+		return nil, nil
+	}
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	if uc.appRepo == nil {
+		return nil, fmt.Errorf("%w: application repository is not configured", ErrInvalidInput)
+	}
+	if uc.platformRepo == nil {
+		return nil, fmt.Errorf("%w: platform param repository is not configured", ErrInvalidInput)
+	}
+	if uc.gitopsReader == nil {
+		return nil, fmt.Errorf("%w: gitops manager is not configured", ErrInvalidInput)
+	}
+
+	app, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	appKey := strings.TrimSpace(app.Key)
+	if appKey == "" {
+		return nil, fmt.Errorf("%w: application key is required for argocd gitops rules", ErrInvalidInput)
+	}
+
+	candidates, err := uc.gitopsReader.ListFieldCandidates(ctx, appKey)
+	if err != nil {
+		return nil, err
+	}
+	candidateSet := make(map[string]gitopsdomain.FieldCandidate, len(candidates))
+	for _, item := range candidates {
+		candidateSet[buildGitOpsCandidateKey(item.FilePathTemplate, item.DocumentKind, item.DocumentName, item.TargetPath)] = item
+	}
+
+	builtinParams, err := uc.listBuiltinPlatformParamsForTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ciParams := make(map[string]releasedomain.ReleaseTemplateParam)
+	for _, item := range params {
+		if item.PipelineScope != releasedomain.PipelineScopeCI {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		ciParams[key] = item
+	}
+
+	result := make([]releasedomain.ReleaseTemplateGitOpsRule, 0, len(inputs))
+	seen := make(map[string]struct{}, len(inputs))
+	for idx, input := range inputs {
+		paramKey := strings.ToLower(strings.TrimSpace(input.SourceParamKey))
+		if paramKey == "" {
+			return nil, fmt.Errorf("%w: gitops 替换规则的 source_param_key 不能为空", ErrInvalidInput)
+		}
+
+		sourceFrom := input.SourceFrom
+		if sourceFrom == "" {
+			if _, ok := ciParams[paramKey]; ok {
+				sourceFrom = releasedomain.GitOpsRuleSourceCI
+			} else if _, ok := builtinParams[paramKey]; ok {
+				sourceFrom = releasedomain.GitOpsRuleSourceBuiltin
+			}
+		}
+		if !sourceFrom.Valid() {
+			return nil, fmt.Errorf("%w: gitops 替换规则的 source_from 无效", ErrInvalidInput)
+		}
+
+		var sourceName string
+		switch sourceFrom {
+		case releasedomain.GitOpsRuleSourceCI:
+			param, ok := ciParams[paramKey]
+			if !ok {
+				return nil, fmt.Errorf("%w: gitops 替换规则只能引用 ci 中已勾选的标准字段：%s", ErrInvalidInput, paramKey)
+			}
+			sourceName = firstNonEmpty(param.ParamName, paramKey)
+		case releasedomain.GitOpsRuleSourceBuiltin:
+			dict, ok := builtinParams[paramKey]
+			if !ok {
+				return nil, fmt.Errorf("%w: gitops 替换规则只能引用已启用的内置字段：%s", ErrInvalidInput, paramKey)
+			}
+			sourceName = firstNonEmpty(dict.Name, paramKey)
+		}
+
+		filePathTemplate := filepathSlash(strings.TrimSpace(input.FilePathTemplate))
+		documentKind := strings.TrimSpace(input.DocumentKind)
+		documentName := strings.TrimSpace(input.DocumentName)
+		targetPath := strings.TrimSpace(input.TargetPath)
+		if filePathTemplate == "" || documentKind == "" || targetPath == "" {
+			return nil, fmt.Errorf("%w: gitops 替换规则必须选择 YAML 字段目标", ErrInvalidInput)
+		}
+
+		candidateKey := buildGitOpsCandidateKey(filePathTemplate, documentKind, documentName, targetPath)
+		if _, ok := candidateSet[candidateKey]; !ok {
+			return nil, fmt.Errorf("%w: 选中的 YAML 字段目标不存在或已变更", ErrInvalidInput)
+		}
+		if _, exists := seen[candidateKey+"::"+paramKey]; exists {
+			return nil, fmt.Errorf("%w: gitops 替换规则存在重复项", ErrInvalidInput)
+		}
+		seen[candidateKey+"::"+paramKey] = struct{}{}
+
+		valueTemplate := strings.TrimSpace(input.ValueTemplate)
+		if valueTemplate == "" {
+			valueTemplate = "{" + paramKey + "}"
+		}
+
+		result = append(result, releasedomain.ReleaseTemplateGitOpsRule{
+			ID:               generateID("rtgr"),
+			PipelineScope:    releasedomain.PipelineScopeCD,
+			SourceParamKey:   paramKey,
+			SourceParamName:  sourceName,
+			SourceFrom:       sourceFrom,
+			FilePathTemplate: filePathTemplate,
+			DocumentKind:     documentKind,
+			DocumentName:     documentName,
+			TargetPath:       targetPath,
+			ValueTemplate:    valueTemplate,
+			SortNo:           idx + 1,
+		})
+	}
+	return result, nil
+}
+
+func (uc *ReleaseTemplateManager) listBuiltinPlatformParamsForTemplate(
+	ctx context.Context,
+) (map[string]platformparamdomain.PlatformParamDict, error) {
+	builtin := true
+	status := platformparamdomain.StatusEnabled
+	items, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
+		Builtin:  &builtin,
+		Status:   &status,
+		Page:     1,
+		PageSize: 500,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]platformparamdomain.PlatformParamDict, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		result[key] = item
+	}
+	return result, nil
+}
+
+func buildGitOpsCandidateKey(filePathTemplate string, documentKind string, documentName string, targetPath string) string {
+	return strings.Join([]string{
+		filepathSlash(strings.TrimSpace(filePathTemplate)),
+		strings.TrimSpace(documentKind),
+		strings.TrimSpace(documentName),
+		strings.TrimSpace(targetPath),
+	}, "::")
+}
+
+func filepathSlash(value string) string {
+	return strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+}
+
 func summarizeTemplateBindings(bindings []releasedomain.ReleaseTemplateBinding) (string, string) {
 	if len(bindings) == 0 {
 		return "-", ""
@@ -504,13 +713,10 @@ func (uc *ReleaseTemplateManager) validateArgoCDTemplateImageVersion(
 		hasCIBinding bool
 		hasArgoCDCD  bool
 		hasEnvParam  bool
-		ciBinding    *releasedomain.ReleaseTemplateBinding
 	)
 	for _, item := range bindings {
 		if item.PipelineScope == releasedomain.PipelineScopeCI {
 			hasCIBinding = true
-			bindingCopy := item
-			ciBinding = &bindingCopy
 		}
 		if item.PipelineScope == releasedomain.PipelineScopeCD && strings.EqualFold(strings.TrimSpace(item.Provider), string(pipelinedomain.ProviderArgoCD)) {
 			hasArgoCDCD = true
@@ -519,89 +725,13 @@ func (uc *ReleaseTemplateManager) validateArgoCDTemplateImageVersion(
 	if !hasArgoCDCD {
 		return nil
 	}
-	if !hasCIBinding || ciBinding == nil {
+	if !hasCIBinding {
 		return fmt.Errorf("%w: cd 选择 argocd 时，必须同时启用 ci 执行单元", ErrInvalidInput)
 	}
-
-	builtinEnabled := true
-	enabledStatus := platformparamdomain.StatusEnabled
-	builtinDicts, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
-		Builtin:  &builtinEnabled,
-		Status:   &enabledStatus,
-		Page:     1,
-		PageSize: 500,
-	})
-	if err != nil {
-		return err
-	}
-	requiredBuiltinKeys := make(map[string]platformparamdomain.PlatformParamDict, len(builtinDicts))
-	for _, item := range builtinDicts {
-		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
-		if key == "" {
-			continue
-		}
-		requiredBuiltinKeys[key] = item
-	}
-
-	ciMappedBuiltinKeys := make(map[string]struct{}, len(requiredBuiltinKeys))
-	if strings.TrimSpace(ciBinding.PipelineID) != "" {
-		defs, _, err := uc.paramRepo.ListByPipeline(ctx, pipelineparamdomain.ListFilter{
-			PipelineID: strings.TrimSpace(ciBinding.PipelineID),
-			Status:     pipelineparamdomain.StatusActive,
-			Page:       1,
-			PageSize:   500,
-		})
-		if err != nil {
-			return err
-		}
-		for _, item := range defs {
-			key := strings.ToLower(strings.TrimSpace(item.ParamKey))
-			if key == "" {
-				continue
-			}
-			if _, ok := requiredBuiltinKeys[key]; ok {
-				ciMappedBuiltinKeys[key] = struct{}{}
-			}
-		}
-	}
-
-	ciSelectedBuiltinKeys := make(map[string]struct{}, len(requiredBuiltinKeys))
 	for _, item := range params {
 		if strings.EqualFold(strings.TrimSpace(item.ParamKey), "env") {
 			hasEnvParam = true
 		}
-		if item.PipelineScope != releasedomain.PipelineScopeCI {
-			continue
-		}
-		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
-		if _, ok := requiredBuiltinKeys[key]; ok {
-			ciSelectedBuiltinKeys[key] = struct{}{}
-		}
-	}
-
-	missingMapped := make([]string, 0)
-	missingSelected := make([]string, 0)
-	for key, dict := range requiredBuiltinKeys {
-		label := strings.TrimSpace(dict.Name)
-		if label == "" {
-			label = key
-		} else {
-			label += " (" + key + ")"
-		}
-		if _, ok := ciMappedBuiltinKeys[key]; !ok {
-			missingMapped = append(missingMapped, label)
-		}
-		if _, ok := ciSelectedBuiltinKeys[key]; !ok {
-			missingSelected = append(missingSelected, label)
-		}
-	}
-	sort.Strings(missingMapped)
-	sort.Strings(missingSelected)
-	if len(missingMapped) > 0 {
-		return fmt.Errorf("%w: cd 选择 argocd 时，ci 绑定管线必须先映射这些内置字段：%s", ErrInvalidInput, strings.Join(missingMapped, "、"))
-	}
-	if len(missingSelected) > 0 {
-		return fmt.Errorf("%w: cd 选择 argocd 时，请在 ci 模板参数中勾选这些内置字段：%s", ErrInvalidInput, strings.Join(missingSelected, "、"))
 	}
 	if !hasEnvParam {
 		return fmt.Errorf("%w: cd 选择 argocd 时，模板参数必须包含 env", ErrInvalidInput)

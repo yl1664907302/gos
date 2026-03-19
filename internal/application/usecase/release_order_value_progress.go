@@ -58,7 +58,7 @@ func (uc *ReleaseOrderManager) ListValueProgress(
 		return []ReleaseOrderValueProgressItem{}, nil
 	}
 
-	_, templateBindings, templateParams, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
+	_, templateBindings, templateParams, _, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
 	if err != nil {
 		return nil, err
 	}

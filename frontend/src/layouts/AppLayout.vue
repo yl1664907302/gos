@@ -23,6 +23,9 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/system/permissions')) {
     return ['system-permissions']
   }
+  if (route.path.startsWith('/system/settings')) {
+    return ['system-settings']
+  }
   if (route.path.includes('/pipeline-bindings')) {
     return ['pipeline-bindings']
   }
@@ -97,7 +100,6 @@ const canViewArgoCD = computed(
 const canViewGitOps = computed(
   () => authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage'),
 )
-const canViewRelease = computed(() => authStore.hasPermission('release.view'))
 const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
 const canManagePermission = computed(() => authStore.hasPermission('system.permission.manage'))
@@ -112,9 +114,7 @@ const showApplicationMenu = computed(
 const showComponentMenu = computed(
   () => canViewComponent.value || canManagePipelineParam.value || canViewArgoCD.value || canViewGitOps.value,
 )
-const showReleaseMenu = computed(
-  () => canViewRelease.value || authStore.hasPermission('release.create') || canManageReleaseTemplate.value,
-)
+const showReleaseMenu = computed(() => true)
 const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value)
 
 function goToApplications() {
@@ -170,6 +170,10 @@ function goToSystemUsers() {
 
 function goToSystemPermissions() {
   void router.push('/system/permissions')
+}
+
+function goToSystemSettings() {
+  void router.push('/system/settings')
 }
 
 async function handleLogout() {
@@ -255,6 +259,9 @@ async function handleLogout() {
           </a-menu-item>
           <a-menu-item v-if="canManagePermission" key="system-permissions" @click="goToSystemPermissions">
             权限授权
+          </a-menu-item>
+          <a-menu-item v-if="canManagePermission" key="system-settings" @click="goToSystemSettings">
+            系统设置
           </a-menu-item>
         </a-sub-menu>
       </a-menu>

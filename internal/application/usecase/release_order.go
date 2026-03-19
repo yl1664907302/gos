@@ -11,6 +11,7 @@ import (
 
 	appdomain "gos/internal/domain/application"
 	pipelineparamdomain "gos/internal/domain/executorparam"
+	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	domain "gos/internal/domain/release"
@@ -101,7 +102,15 @@ type GitOpsReleaseService interface {
 		newTag string,
 		commitMessage string,
 	) (workspacePath string, manifestPath string, commitSHA string, previousTag string, changed bool, err error)
+	ApplyManifestRules(
+		ctx context.Context,
+		repoURL string,
+		branch string,
+		rules []gitopsdomain.ManifestRule,
+		commitMessage string,
+	) (workspacePath string, changedFiles []string, commitSHA string, changed bool, err error)
 	BuildCommitMessage(fields map[string]string) string
+	RenderTemplate(template string, fields map[string]string) string
 }
 
 func NewReleaseOrderManager(
@@ -138,6 +147,7 @@ func (uc *ReleaseOrderManager) Create(
 	if applicationID == "" || templateID == "" {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id and template_id are required", ErrInvalidInput)
 	}
+	input.EnvCode = strings.TrimSpace(input.EnvCode)
 
 	app, err := uc.appRepo.GetByID(ctx, applicationID)
 	if err != nil {
@@ -159,8 +169,15 @@ func (uc *ReleaseOrderManager) Create(
 	if err := uc.validateCreateTemplateParams(ctx, template.ID, templateBindings, templateParams, input.Params); err != nil {
 		return domain.ReleaseOrder{}, err
 	}
+	if err := validateArgoCDProjectNameSingleValue(templateBindings, input.Params); err != nil {
+		return domain.ReleaseOrder{}, err
+	}
 	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
 	summary := resolveReleaseOrderSummaryFields(input.Params)
+	envCode := firstNonEmpty(input.EnvCode, summary.EnvCode)
+	if envCode == "" {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: env_code is required", ErrInvalidInput)
+	}
 	primaryExecution, ok := pickPrimaryExecution(executions)
 	if !ok {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
@@ -177,7 +194,7 @@ func (uc *ReleaseOrderManager) Create(
 		TemplateName:    template.Name,
 		BindingID:       primaryExecution.BindingID,
 		PipelineID:      primaryExecution.PipelineID,
-		EnvCode:         summary.EnvCode,
+		EnvCode:         envCode,
 		SonService:      firstNonEmpty(summary.ProjectName, strings.TrimSpace(input.SonService)),
 		GitRef:          firstNonEmpty(summary.GitRef, strings.TrimSpace(input.GitRef)),
 		ImageTag:        firstNonEmpty(summary.ImageTag, strings.TrimSpace(input.ImageTag)),
@@ -251,6 +268,7 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 		ApplicationID:   sourceOrder.ApplicationID,
 		TemplateID:      sourceOrder.TemplateID,
 		PreviousOrderNo: sourceOrder.OrderNo,
+		EnvCode:         sourceOrder.EnvCode,
 		TriggerType:     domain.TriggerTypeManual,
 		Remark:          buildRollbackRemark(sourceOrder),
 		CreatorUserID:   strings.TrimSpace(creatorUserID),
@@ -388,6 +406,44 @@ func executorParamNameOrKey(executorParamName string, paramKey string) string {
 	return strings.TrimSpace(paramKey)
 }
 
+func validateArgoCDProjectNameSingleValue(
+	templateBindings []domain.ReleaseTemplateBinding,
+	params []CreateReleaseOrderParamInput,
+) error {
+	if !templateUsesArgoCD(templateBindings) {
+		return nil
+	}
+	for _, item := range params {
+		if !strings.EqualFold(strings.TrimSpace(item.ParamKey), "project_name") {
+			continue
+		}
+		if isMultiValueProjectName(item.ParamValue) {
+			return fmt.Errorf("%w: cd 选择 argocd 时，project_name 当前仅支持单值", ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
+func templateUsesArgoCD(bindings []domain.ReleaseTemplateBinding) bool {
+	for _, item := range bindings {
+		if item.PipelineScope != domain.PipelineScopeCD {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(item.Provider), string(pipelinedomain.ProviderArgoCD)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isMultiValueProjectName(value string) bool {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, ",") || strings.Contains(text, "，") || strings.Contains(text, "\n") || strings.Contains(text, "\r")
+}
+
 func (uc *ReleaseOrderManager) resolveTemplateForCreate(
 	ctx context.Context,
 	applicationID string,
@@ -397,7 +453,7 @@ func (uc *ReleaseOrderManager) resolveTemplateForCreate(
 	if templateID == "" {
 		return domain.ReleaseTemplate{}, nil, nil, fmt.Errorf("%w: template_id is required", ErrInvalidInput)
 	}
-	template, templateBindings, templateParams, err := uc.repo.GetTemplateByID(ctx, templateID)
+	template, templateBindings, templateParams, _, err := uc.repo.GetTemplateByID(ctx, templateID)
 	if err != nil {
 		return domain.ReleaseTemplate{}, nil, nil, err
 	}
@@ -429,7 +485,7 @@ func resolveReleaseOrderSummaryFields(params []CreateReleaseOrderParamInput) rel
 			continue
 		}
 		switch key {
-		case "env":
+		case "env", "env_code":
 			if result.EnvCode == "" {
 				result.EnvCode = value
 			}

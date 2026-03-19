@@ -337,3 +337,42 @@ type ReleaseTemplateParam struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
+
+type GitOpsRuleSourceFrom string
+
+const (
+	GitOpsRuleSourceCI      GitOpsRuleSourceFrom = "ci"
+	GitOpsRuleSourceBuiltin GitOpsRuleSourceFrom = "builtin"
+)
+
+func (s GitOpsRuleSourceFrom) Valid() bool {
+	switch s {
+	case GitOpsRuleSourceCI, GitOpsRuleSourceBuiltin:
+		return true
+	default:
+		return false
+	}
+}
+
+// ReleaseTemplateGitOpsRule 描述 CD=ArgoCD 时，标准平台 Key 与 YAML 字段之间的替换关系。
+//
+// 当前版本先把规则挂在“发布模板”上，而不是直接挂在应用上：
+// 1. 模板已经定义了本次发布采用的 CI/CD 结构；
+// 2. GitOps 字段替换与模板里的参数暴露方式强相关；
+// 3. 这样可以让不同模板在同一应用下拥有不同的 GitOps 写回策略。
+type ReleaseTemplateGitOpsRule struct {
+	ID               string
+	TemplateID       string
+	PipelineScope    PipelineScope
+	SourceParamKey   string
+	SourceParamName  string
+	SourceFrom       GitOpsRuleSourceFrom
+	FilePathTemplate string
+	DocumentKind     string
+	DocumentName     string
+	TargetPath       string
+	ValueTemplate    string
+	SortNo           int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}

@@ -143,6 +143,7 @@ const detailItems = computed(() => {
   }
   return [
     { key: 'order_no', label: '发布单号', value: order.value.order_no },
+    { key: 'created_at', label: '创建时间', value: formatTime(order.value.created_at) },
     { key: 'previous_order_no', label: '上次发布单号', value: order.value.previous_order_no || '-' },
     { label: '应用名称', value: order.value.application_name || '-' },
     { label: '模板名称', value: order.value.template_name || '-' },
@@ -154,7 +155,6 @@ const detailItems = computed(() => {
     { label: '备注', value: order.value.remark || '-' },
     { label: '开始时间', value: formatTime(order.value.started_at) },
     { label: '结束时间', value: formatTime(order.value.finished_at) },
-    { label: '创建时间', value: formatTime(order.value.created_at) },
     { label: '更新时间', value: formatTime(order.value.updated_at) },
   ]
 })

@@ -69,6 +69,7 @@ const activeQuery = reactive({
 
 const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '发布单号', dataIndex: 'order_no', key: 'order_no', width: 220 },
+  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 190 },
   { title: '上次发布单号', dataIndex: 'previous_order_no', key: 'previous_order_no', width: 220 },
   { title: '应用名称', dataIndex: 'application_name', key: 'application_name', width: 180 },
   { title: '环境', dataIndex: 'env_code', key: 'env_code', width: 110 },
@@ -77,7 +78,6 @@ const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '创建者', dataIndex: 'triggered_by', key: 'triggered_by', width: 140 },
   { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 190 },
   { title: '结束时间', dataIndex: 'finished_at', key: 'finished_at', width: 190 },
-  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 190 },
   { title: '操作', key: 'actions', width: 280, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
@@ -98,22 +98,6 @@ const canCancelRelease = computed(() => authStore.hasPermission('release.cancel'
 const canLoadApplications = computed(
   () => authStore.hasPermission('application.view') || authStore.hasPermission('application.manage'),
 )
-
-function canViewReleaseOrderForApplication(applicationID: string) {
-  const appID = String(applicationID || '').trim()
-  if (!appID) {
-    return false
-  }
-  if (authStore.isAdmin) {
-    return true
-  }
-  return (
-    authStore.hasApplicationPermission('release.view', appID) ||
-    authStore.hasApplicationPermission('release.create', appID) ||
-    authStore.hasApplicationPermission('release.execute', appID) ||
-    authStore.hasApplicationPermission('release.cancel', appID)
-  )
-}
 
 function applyActiveQueryFromFilters() {
   activeQuery.application_id = filters.application_id
@@ -196,7 +180,6 @@ async function loadApplicationOptions() {
   try {
     const response = await listApplications({ page: 1, page_size: 100 })
     applicationOptions.value = response.data
-      .filter((item) => canViewReleaseOrderForApplication(item.id))
       .map((item) => ({
         label: `${item.name} (${item.key})`,
         value: item.id,

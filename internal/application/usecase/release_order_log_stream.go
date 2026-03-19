@@ -2,7 +2,9 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -162,6 +164,15 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 					}
 					continue
 				}
+				if isRetryableJenkinsLogError(queueErr) {
+					if err := uc.emitStatusOnce(emit, &lastStatusMessage, "Jenkins 队列接口响应较慢，正在自动重试", queueURL, buildURL, offset); err != nil {
+						return err
+					}
+					if err := sleepWithContext(ctx, pollInterval); err != nil {
+						return nil
+					}
+					continue
+				}
 				return fmt.Errorf("%w: query jenkins queue failed: %v", ErrInvalidInput, queueErr)
 			}
 			if cancelled {
@@ -221,6 +232,15 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 				}
 				continue
 			}
+			if isRetryableJenkinsLogError(logErr) {
+				if err := uc.emitStatusOnce(emit, &lastStatusMessage, "Jenkins 日志接口响应较慢，正在自动重试", queueURL, buildURL, offset); err != nil {
+					return err
+				}
+				if err := sleepWithContext(ctx, pollInterval); err != nil {
+					return nil
+				}
+				continue
+			}
 			return fmt.Errorf("%w: fetch jenkins logs failed: %v", ErrInvalidInput, logErr)
 		}
 
@@ -248,6 +268,15 @@ func (uc *ReleaseOrderLogStreamer) Stream(
 					return uc.emitDone(emit, order, offset, "")
 				}
 				if err := uc.emitStatusOnce(emit, &lastStatusMessage, "Jenkins 构建状态暂不可用，稍后重试", queueURL, buildURL, offset); err != nil {
+					return err
+				}
+				if err := sleepWithContext(ctx, pollInterval); err != nil {
+					return nil
+				}
+				continue
+			}
+			if isRetryableJenkinsLogError(statusErr) {
+				if err := uc.emitStatusOnce(emit, &lastStatusMessage, "Jenkins 构建状态接口响应较慢，正在自动重试", queueURL, buildURL, offset); err != nil {
 					return err
 				}
 				if err := sleepWithContext(ctx, pollInterval); err != nil {
@@ -328,6 +357,12 @@ func (uc *ReleaseOrderLogStreamer) flushTailLogs(
 		if err != nil {
 			if isResourceNotFoundError(err) {
 				return offset, nil
+			}
+			if isRetryableJenkinsLogError(err) {
+				if sleepErr := sleepWithContext(ctx, 1500*time.Millisecond); sleepErr != nil {
+					return offset, nil
+				}
+				continue
 			}
 			return offset, fmt.Errorf("%w: fetch tail jenkins logs failed: %v", ErrInvalidInput, err)
 		}
@@ -433,4 +468,21 @@ func orderResultFromStatus(status releasedomain.OrderStatus) string {
 	default:
 		return strings.ToUpper(strings.TrimSpace(string(status)))
 	}
+}
+
+func isRetryableJenkinsLogError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "client.timeout exceeded") ||
+		strings.Contains(message, "awaiting headers") ||
+		strings.Contains(message, "timeout")
 }

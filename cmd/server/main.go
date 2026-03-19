@@ -132,6 +132,17 @@ func main() {
 		userManagement,
 		authSessionManager,
 	)
+	releaseSettingsQuery := usecase.NewQueryReleaseSettings(
+		configstore.NewReleaseStore(bootstrap.ResolveConfigPath()),
+	)
+	systemSettingsHandler := httpapi.NewSystemSettingsHandler(
+		releaseSettingsQuery,
+		usecase.NewUpdateReleaseSettings(
+			configstore.NewReleaseStore(bootstrap.ResolveConfigPath()),
+			releaseSettingsQuery,
+		),
+		authSessionManager,
+	)
 	pipelineHandler := httpapi.NewPipelineHandler(
 		syncPipelines,
 		usecase.NewQueryPipeline(pipelineRepo, jenkinsClient),
@@ -149,6 +160,7 @@ func main() {
 		gitopsStatusQuery,
 		usecase.NewQueryGitOpsBindingTargets(gitopsService),
 		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
+		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsService),
 		usecase.NewUpdateGitOpsCommitTemplate(
 			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
 			gitopsService,
@@ -176,7 +188,7 @@ func main() {
 		argocdUsecaseClient,
 		gitopsService,
 	)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, gitopsService)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,
@@ -261,6 +273,7 @@ func main() {
 		userHandler,
 		authSessionManager,
 		handler,
+		systemSettingsHandler,
 		pipelineHandler,
 		argocdHandler,
 		gitopsHandler,

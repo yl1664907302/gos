@@ -3,11 +3,15 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
+	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
 )
+
+var gitopsTemplatePlaceholderPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
 
 func (uc *ReleaseOrderManager) startArgoCDExecution(
 	ctx context.Context,
@@ -50,6 +54,11 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		return fmt.Errorf("%w: image_version is required when cd executor is argocd", ErrInvalidInput)
 	}
 	commitFields := buildGitOpsCommitMessageFields(order, orderParams, appKey, environment, imageVersion, sourcePath)
+	_, _, _, templateGitOpsRules, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
+	if err != nil {
+		return err
+	}
+	commitMessage := uc.gitops.BuildCommitMessage(commitFields)
 
 	triggerCode := scopeStepCode(execution.PipelineScope, "trigger_pipeline")
 	runningCode := scopeStepCode(execution.PipelineScope, "pipeline_running")
@@ -57,17 +66,49 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 
 	_ = uc.markStepRunning(ctx, order.ID, triggerCode, "开始写入 GitOps 仓库并触发 ArgoCD Sync")
 
-	_, manifestPath, commitSHA, previousTag, changed, err := uc.gitops.UpdateKustomizationImage(
+	manifestChangedFiles := make([]string, 0)
+	commitSHA := ""
+	manifestChanged := false
+	if len(templateGitOpsRules) > 0 {
+		manifestRules, buildErr := uc.buildArgoCDManifestRules(templateGitOpsRules, commitFields)
+		if buildErr != nil {
+			_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "GitOps 规则渲染失败: "+buildErr.Error())
+			return buildErr
+		}
+		if len(manifestRules) > 0 {
+			_, manifestFiles, manifestCommitSHA, changed, applyErr := uc.gitops.ApplyManifestRules(
+				ctx,
+				repoURL,
+				strings.TrimSpace(app.GetTargetRevision()),
+				manifestRules,
+				commitMessage,
+			)
+			if applyErr != nil {
+				_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "GitOps YAML 替换失败: "+applyErr.Error())
+				return fmt.Errorf("%w: apply gitops manifest rules failed: %v", ErrInvalidInput, applyErr)
+			}
+			manifestChangedFiles = append(manifestChangedFiles, manifestFiles...)
+			if strings.TrimSpace(manifestCommitSHA) != "" {
+				commitSHA = strings.TrimSpace(manifestCommitSHA)
+			}
+			manifestChanged = changed
+		}
+	}
+
+	_, manifestPath, imageCommitSHA, previousTag, changed, err := uc.gitops.UpdateKustomizationImage(
 		ctx,
 		repoURL,
 		sourcePath,
 		strings.TrimSpace(app.GetTargetRevision()),
 		imageVersion,
-		uc.gitops.BuildCommitMessage(commitFields),
+		commitMessage,
 	)
 	if err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "GitOps 仓库更新失败: "+err.Error())
 		return fmt.Errorf("%w: update gitops repo failed: %v", ErrInvalidInput, err)
+	}
+	if strings.TrimSpace(imageCommitSHA) != "" {
+		commitSHA = strings.TrimSpace(imageCommitSHA)
 	}
 	if err := uc.argocd.SyncApplication(ctx, appName); err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "触发 ArgoCD Sync 失败: "+err.Error())
@@ -85,6 +126,9 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	}
 
 	triggerMessage := fmt.Sprintf("GitOps 仓库写入成功，app: %s，commit: %s", appName, strings.TrimSpace(commitSHA))
+	if len(manifestChangedFiles) > 0 {
+		triggerMessage += fmt.Sprintf("，yaml_changed: %d", len(manifestChangedFiles))
+	}
 	if manifestPath != "" {
 		triggerMessage += "，file: " + strings.TrimSpace(manifestPath)
 	}
@@ -92,6 +136,9 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		triggerMessage += fmt.Sprintf("，image_version: %s -> %s", previousTag, imageVersion)
 	} else {
 		triggerMessage += fmt.Sprintf("，image_version 已是 %s", imageVersion)
+	}
+	if !changed && manifestChanged {
+		triggerMessage += "，已应用 GitOps YAML 字段替换"
 	}
 	_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusSuccess, triggerMessage)
 	_ = uc.markStepRunning(ctx, order.ID, runningCode, "ArgoCD Sync 已触发，等待应用状态回传")
@@ -235,6 +282,44 @@ func buildGitOpsCommitMessageFields(
 		fields[paramKey] = paramValue
 	}
 	return fields
+}
+
+func (uc *ReleaseOrderManager) buildArgoCDManifestRules(
+	rules []domain.ReleaseTemplateGitOpsRule,
+	fields map[string]string,
+) ([]gitopsdomain.ManifestRule, error) {
+	result := make([]gitopsdomain.ManifestRule, 0, len(rules))
+	for _, item := range rules {
+		sourceKey := strings.ToLower(strings.TrimSpace(item.SourceParamKey))
+		if sourceKey != "" && strings.TrimSpace(fields[sourceKey]) == "" {
+			return nil, fmt.Errorf("%w: gitops 替换规则缺少取值字段 %s", ErrInvalidInput, sourceKey)
+		}
+
+		filePath := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.FilePathTemplate), fields))
+		documentName := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.DocumentName), fields))
+		value := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.ValueTemplate), fields))
+		if filePath == "" {
+			return nil, fmt.Errorf("%w: gitops 替换规则缺少目标文件路径", ErrInvalidInput)
+		}
+		if value == "" {
+			return nil, fmt.Errorf("%w: gitops 替换规则字段 %s 未取到值", ErrInvalidInput, firstNonEmpty(item.SourceParamName, item.SourceParamKey))
+		}
+		if unresolvedGitOpsTemplate(filePath) || unresolvedGitOpsTemplate(documentName) || unresolvedGitOpsTemplate(value) {
+			return nil, fmt.Errorf("%w: gitops 替换规则仍存在未解析占位符，请检查字段映射", ErrInvalidInput)
+		}
+		result = append(result, gitopsdomain.ManifestRule{
+			FilePath:     normalizeArgoCDSourcePath(filePath),
+			DocumentKind: strings.TrimSpace(item.DocumentKind),
+			DocumentName: documentName,
+			TargetPath:   strings.TrimSpace(item.TargetPath),
+			Value:        value,
+		})
+	}
+	return result, nil
+}
+
+func unresolvedGitOpsTemplate(value string) bool {
+	return gitopsTemplatePlaceholderPattern.MatchString(strings.TrimSpace(value))
 }
 
 // resolveArgoCDApplicationByRef 兼容两种 external_ref：

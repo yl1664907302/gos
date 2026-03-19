@@ -344,7 +344,7 @@ onMounted(() => {
           :page-size="filters.pageSize"
           :total="total"
           :show-size-changer="true"
-          :show-total="(value) => `共 ${value} 条`"
+          :show-total="(value: number) => `共 ${value} 条`"
           @change="handlePageChange"
           @show-size-change="handlePageChange"
         />

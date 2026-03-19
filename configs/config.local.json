@@ -54,8 +54,14 @@
     "startup_check_enabled": true,
     "startup_max_retries": 5,
     "startup_retry_interval_sec": 2,
-    "timeout_sec": 5,
+    "timeout_sec": 60,
     "username": "shuang"
+  },
+  "release": {
+    "env_options": [
+      "dev",
+      "prod"
+    ]
   },
   "server": {
     "addr": ":8081",

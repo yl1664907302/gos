@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { listApplications } from '../../api/application'
 import { listApplicationExecutorParamDefs } from '../../api/pipeline'
 import { createReleaseOrder, getReleaseTemplateByID, listAllReleaseTemplates } from '../../api/release'
+import { getReleaseSettings } from '../../api/system'
 import { useAuthStore } from '../../stores/auth'
 import type { ExecutorParamDef } from '../../types/pipeline'
 import type {
@@ -33,6 +34,7 @@ interface ChoiceMeta {
 interface CreateFormState {
   application_id: string
   template_id: string
+  env_code: string
   remark: string
 }
 
@@ -48,12 +50,14 @@ const authStore = useAuthStore()
 
 const formRef = ref<FormInstance>()
 const loadingApplications = ref(false)
+const loadingEnvOptions = ref(false)
 const loadingTemplates = ref(false)
 const loadingTemplateDetail = ref(false)
 const submitting = ref(false)
 const templateWarning = ref('')
 
 const allApplicationOptions = ref<SelectOption[]>([])
+const envOptions = ref<SelectOption[]>([])
 const templateOptions = ref<SelectOption[]>([])
 const templateList = ref<ReleaseTemplate[]>([])
 const selectedTemplate = ref<ReleaseTemplate | null>(null)
@@ -80,12 +84,14 @@ const preferredBindingID = ref('')
 const formState = reactive<CreateFormState>({
   application_id: '',
   template_id: '',
+  env_code: '',
   remark: '',
 })
 
 const rules: Record<string, Rule[]> = {
   application_id: [{ required: true, message: '请选择应用', trigger: 'change' }],
   template_id: [{ required: true, message: '请选择发布模板', trigger: 'change' }],
+  env_code: [{ required: true, message: '请选择环境', trigger: 'change' }],
 }
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
@@ -130,6 +136,8 @@ const bindingMapByScope = computed<Record<ReleasePipelineScope, ReleaseTemplateB
   ci: templateBindings.value.find((item) => item.pipeline_scope === 'ci' && item.enabled) || null,
   cd: templateBindings.value.find((item) => item.pipeline_scope === 'cd' && item.enabled) || null,
 }))
+
+const isArgoCDCDTemplate = computed(() => bindingMapByScope.value.cd?.provider === 'argocd')
 
 const templateParamMetaByScope = computed<Record<ReleasePipelineScope, Record<string, ReleaseTemplateParam>>>(() => {
   const map: Record<ReleasePipelineScope, Record<string, ReleaseTemplateParam>> = {
@@ -219,6 +227,24 @@ async function loadApplicationOptions() {
     message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
   } finally {
     loadingApplications.value = false
+  }
+}
+
+async function loadEnvOptions() {
+  loadingEnvOptions.value = true
+  try {
+    const response = await getReleaseSettings()
+    envOptions.value = (response.data.env_options || []).map((item) => ({
+      label: item,
+      value: item,
+    }))
+    if (!formState.env_code && envOptions.value.length === 1 && envOptions.value[0]) {
+      formState.env_code = envOptions.value[0].value
+    }
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '环境选项加载失败'))
+  } finally {
+    loadingEnvOptions.value = false
   }
 }
 
@@ -535,8 +561,12 @@ function useSelectForChoice(item: ExecutorParamDef) {
   return item.param_type === 'choice' && getChoiceMeta(item).options.length > 0
 }
 
-function isMultipleChoice(item: ExecutorParamDef) {
-  return useSelectForChoice(item) && getChoiceMeta(item).multiple
+function isSingleValueProjectName(scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  return isArgoCDCDTemplate.value && scope === 'ci' && String(item.param_key || '').trim().toLowerCase() === 'project_name'
+}
+
+function isMultipleChoice(scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  return useSelectForChoice(item) && getChoiceMeta(item).multiple && !isSingleValueProjectName(scope, item)
 }
 
 function splitByDelimiter(value: string, delimiter: string) {
@@ -553,12 +583,12 @@ function splitByDelimiter(value: string, delimiter: string) {
   return splitChoiceText(text)
 }
 
-function getChoiceSingleValue(item: ExecutorParamDef): string | undefined {
+function getChoiceSingleValue(scope: ReleasePipelineScope, item: ExecutorParamDef): string | undefined {
   const value = String(paramValues[item.id] || '').trim()
   if (!value) {
     return undefined
   }
-  if (!isMultipleChoice(item)) {
+  if (!isMultipleChoice(scope, item)) {
     return value
   }
   const first = splitByDelimiter(value, getChoiceMeta(item).delimiter)[0]
@@ -601,6 +631,9 @@ function buildParamsPayload(): CreateReleaseOrderParamPayload[] {
       if (item.required && !value) {
         throw new Error(`参数 ${label} 为必填，请填写发布值`)
       }
+      if (isSingleValueProjectName(scope, item) && /,|，|\r|\n/.test(value)) {
+        throw new Error('当前模板的 CD 使用 ArgoCD，project_name 仅支持单值，请只选择一个项目')
+      }
       if (!value) {
         continue
       }
@@ -642,6 +675,7 @@ async function handleSubmit() {
     const response = await createReleaseOrder({
       application_id: formState.application_id.trim(),
       template_id: formState.template_id.trim(),
+      env_code: formState.env_code.trim(),
       trigger_type: 'manual',
       triggered_by: currentUserDisplayName.value !== '-' ? currentUserDisplayName.value : undefined,
       remark: formState.remark.trim() || undefined,
@@ -662,7 +696,7 @@ function scopeHint(scope: ReleasePipelineScope) {
     return ''
   }
   if (binding.provider === 'argocd') {
-    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会沿用 CI 中映射并勾选的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。`
+    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会优先沿用 CI 中已取到的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。环境统一来自基础参数“环境”，当前版本如果使用 project_name，会按单值场景处理。`
   }
   if (binding.provider !== 'jenkins') {
     return `${scope.toUpperCase()} 当前使用 ${binding.provider}，当前版本暂不开放额外参数表单。`
@@ -673,7 +707,7 @@ function scopeHint(scope: ReleasePipelineScope) {
 onMounted(async () => {
   await authStore.loadMe(true)
   applyRouteQuery()
-  await loadApplicationOptions()
+  await Promise.all([loadApplicationOptions(), loadEnvOptions()])
   resetSelectionIfUnauthorized()
   if (formState.application_id) {
     await loadTemplateOptions()
@@ -745,6 +779,20 @@ onMounted(async () => {
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
+            <a-form-item label="环境" name="env_code">
+              <a-select
+                v-model:value="formState.env_code"
+                :options="envOptions"
+                :loading="loadingEnvOptions"
+                placeholder="请选择环境"
+                allow-clear
+              />
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-row :gutter="16">
+          <a-col :xs="24" :md="12">
             <a-form-item label="备注" name="remark">
               <a-input v-model:value="formState.remark" placeholder="本次发布说明" allow-clear />
             </a-form-item>
@@ -800,7 +848,7 @@ onMounted(async () => {
                 >
                   <a-form-item :label="resolveTemplateParamLabel(item.scope, param)" :required="param.required">
                     <a-select
-                      v-if="useSelectForChoice(param) && isMultipleChoice(param)"
+                      v-if="useSelectForChoice(param) && isMultipleChoice(item.scope, param)"
                       mode="multiple"
                       class="param-value-control"
                       :value="getChoiceMultiValues(param)"
@@ -812,9 +860,15 @@ onMounted(async () => {
                     <a-select
                       v-else-if="useSelectForChoice(param)"
                       class="param-value-control"
-                      :value="getChoiceSingleValue(param)"
+                      :value="getChoiceSingleValue(item.scope, param)"
                       :options="getChoiceMeta(param).options"
-                      :placeholder="param.required ? '必填，请选择发布值' : '选填，留空将不下发'"
+                      :placeholder="
+                        isSingleValueProjectName(item.scope, param)
+                          ? '当前按单值处理，请只选择一个项目'
+                          : param.required
+                            ? '必填，请选择发布值'
+                            : '选填，留空将不下发'
+                      "
                       allow-clear
                       @change="handleChoiceSingleChange(param, $event)"
                     />
@@ -822,10 +876,19 @@ onMounted(async () => {
                       v-else
                       :value="paramValues[param.id]"
                       class="param-value-control"
-                      :placeholder="param.required ? '必填，请输入发布值' : '选填，留空将不下发'"
+                      :placeholder="
+                        isSingleValueProjectName(item.scope, param)
+                          ? '当前按单值处理，请输入单个项目名'
+                          : param.required
+                            ? '必填，请输入发布值'
+                            : '选填，留空将不下发'
+                      "
                       allow-clear
                       @update:value="handleParamValueInput(param, String($event || ''))"
                     />
+                    <div v-if="isSingleValueProjectName(item.scope, param)" class="param-helper">
+                      当前模板的 CD 使用 ArgoCD，project_name 先按单值场景处理。
+                    </div>
                   </a-form-item>
                 </a-col>
               </a-row>
@@ -878,6 +941,13 @@ onMounted(async () => {
 
 .param-value-control {
   width: 100%;
+}
+
+.param-helper {
+  color: var(--ant-color-text-description, #8c8c8c);
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 4px;
 }
 
 .action-area {

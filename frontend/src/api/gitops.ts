@@ -1,5 +1,5 @@
 import { http } from './http'
-import type { GitOpsStatus, GitOpsTemplateField } from '../types/gitops'
+import type { GitOpsFieldCandidate, GitOpsStatus, GitOpsTemplateField } from '../types/gitops'
 
 export async function getGitOpsStatus() {
   const response = await http.get<{ data: GitOpsStatus }>('/gitops/status')
@@ -15,5 +15,12 @@ export async function updateGitOpsCommitMessageTemplate(template: string) {
 
 export async function listGitOpsTemplateFields() {
   const response = await http.get<{ data: GitOpsTemplateField[] }>('/gitops/template-fields')
+  return response.data
+}
+
+export async function listGitOpsFieldCandidates(applicationID: string) {
+  const response = await http.get<{ data: GitOpsFieldCandidate[] }>('/gitops/field-candidates', {
+    params: { application_id: applicationID },
+  })
   return response.data
 }

@@ -184,6 +184,23 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE KEY uk_release_template_param_unique (template_id, executor_param_def_id),
 	KEY idx_release_template_param_template_sort (template_id, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_template_gitops_rule (
+	id VARCHAR(64) PRIMARY KEY,
+	template_id VARCHAR(64) NOT NULL,
+	pipeline_scope VARCHAR(20) NOT NULL DEFAULT 'cd',
+	source_param_key VARCHAR(100) NOT NULL,
+	source_param_name VARCHAR(100) NOT NULL DEFAULT '',
+	source_from VARCHAR(32) NOT NULL DEFAULT '',
+	file_path_template VARCHAR(255) NOT NULL,
+	document_kind VARCHAR(100) NOT NULL DEFAULT '',
+	document_name VARCHAR(150) NOT NULL DEFAULT '',
+	target_path VARCHAR(255) NOT NULL,
+	value_template VARCHAR(255) NOT NULL DEFAULT '',
+	sort_no INT NOT NULL DEFAULT 0,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	KEY idx_release_template_gitops_rule_template_sort (template_id, sort_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		}, nil
 
 	case "sqlite":
@@ -331,6 +348,23 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE(template_id, executor_param_def_id)
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_template_param_template_sort ON release_template_param (template_id, sort_no);`,
+			`CREATE TABLE IF NOT EXISTS release_template_gitops_rule (
+	id TEXT PRIMARY KEY,
+	template_id TEXT NOT NULL,
+	pipeline_scope TEXT NOT NULL DEFAULT 'cd',
+	source_param_key TEXT NOT NULL,
+	source_param_name TEXT NOT NULL DEFAULT '',
+	source_from TEXT NOT NULL DEFAULT '',
+	file_path_template TEXT NOT NULL,
+	document_kind TEXT NOT NULL DEFAULT '',
+	document_name TEXT NOT NULL DEFAULT '',
+	target_path TEXT NOT NULL,
+	value_template TEXT NOT NULL DEFAULT '',
+	sort_no INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_gitops_rule_template_sort ON release_template_gitops_rule (template_id, sort_no);`,
 		}, nil
 
 	default:
@@ -1200,6 +1234,7 @@ func (r *ReleaseRepository) CreateTemplate(
 	template domain.ReleaseTemplate,
 	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
+	gitopsRules []domain.ReleaseTemplateGitOpsRule,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1243,6 +1278,9 @@ INSERT INTO release_template (
 	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
 		return err
 	}
+	if err := r.insertTemplateGitOpsRules(ctx, tx, gitopsRules); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return err
@@ -1254,7 +1292,7 @@ INSERT INTO release_template (
 func (r *ReleaseRepository) GetTemplateByID(
 	ctx context.Context,
 	id string,
-) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, error) {
+) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, []domain.ReleaseTemplateGitOpsRule, error) {
 	const q = `
 SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
 FROM release_template
@@ -1264,20 +1302,24 @@ WHERE id = ?;`
 	item, err := scanReleaseTemplate(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.ReleaseTemplate{}, nil, nil, domain.ErrTemplateNotFound
+			return domain.ReleaseTemplate{}, nil, nil, nil, domain.ErrTemplateNotFound
 		}
-		return domain.ReleaseTemplate{}, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 	bindings, err := r.listTemplateBindings(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 	params, err := r.listTemplateParams(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, err
+	}
+	gitopsRules, err := r.listTemplateGitOpsRules(ctx, item.ID)
+	if err != nil {
+		return domain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 	item.ParamCount = len(params)
-	return item, bindings, params, nil
+	return item, bindings, params, gitopsRules, nil
 }
 
 func (r *ReleaseRepository) ListTemplates(
@@ -1364,6 +1406,7 @@ func (r *ReleaseRepository) UpdateTemplate(
 	template domain.ReleaseTemplate,
 	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
+	gitopsRules []domain.ReleaseTemplateGitOpsRule,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1408,6 +1451,9 @@ WHERE id = ?;`
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, template.ID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_gitops_rule WHERE template_id = ?;`, template.ID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, template.ID); err != nil {
 		return err
 	}
@@ -1415,6 +1461,9 @@ WHERE id = ?;`
 		return err
 	}
 	if err := r.insertTemplateParams(ctx, tx, params); err != nil {
+		return err
+	}
+	if err := r.insertTemplateGitOpsRules(ctx, tx, gitopsRules); err != nil {
 		return err
 	}
 
@@ -1437,6 +1486,9 @@ func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error
 	}()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_param WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_gitops_rule WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
@@ -1527,6 +1579,41 @@ INSERT INTO release_template_param (
 	return nil
 }
 
+func (r *ReleaseRepository) insertTemplateGitOpsRules(
+	ctx context.Context,
+	tx *sql.Tx,
+	rules []domain.ReleaseTemplateGitOpsRule,
+) error {
+	const insertRule = `
+INSERT INTO release_template_gitops_rule (
+	id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	for _, item := range rules {
+		if _, err := tx.ExecContext(
+			ctx,
+			insertRule,
+			item.ID,
+			item.TemplateID,
+			string(item.PipelineScope),
+			item.SourceParamKey,
+			item.SourceParamName,
+			string(item.SourceFrom),
+			item.FilePathTemplate,
+			item.DocumentKind,
+			item.DocumentName,
+			item.TargetPath,
+			item.ValueTemplate,
+			item.SortNo,
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ReleaseRepository) listTemplateBindings(
 	ctx context.Context,
 	templateID string,
@@ -1576,6 +1663,36 @@ ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
 	items := make([]domain.ReleaseTemplateParam, 0)
 	for rows.Next() {
 		item, scanErr := scanReleaseTemplateParam(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) listTemplateGitOpsRules(
+	ctx context.Context,
+	templateID string,
+) ([]domain.ReleaseTemplateGitOpsRule, error) {
+	const q = `
+SELECT id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
+FROM release_template_gitops_rule
+WHERE template_id = ?
+ORDER BY sort_no ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseTemplateGitOpsRule, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseTemplateGitOpsRule(rows)
 		if scanErr != nil {
 			return nil, scanErr
 		}
@@ -1906,6 +2023,39 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 	}
 	item.PipelineScope = domain.PipelineScope(pipelineScope)
 	item.Required = required > 0
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplateGitOpsRule(s scanner) (domain.ReleaseTemplateGitOpsRule, error) {
+	var (
+		item          domain.ReleaseTemplateGitOpsRule
+		pipelineScope string
+		sourceFrom    string
+		createdAt     int64
+		updatedAt     int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.TemplateID,
+		&pipelineScope,
+		&item.SourceParamKey,
+		&item.SourceParamName,
+		&sourceFrom,
+		&item.FilePathTemplate,
+		&item.DocumentKind,
+		&item.DocumentName,
+		&item.TargetPath,
+		&item.ValueTemplate,
+		&item.SortNo,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseTemplateGitOpsRule{}, err
+	}
+	item.PipelineScope = domain.PipelineScope(pipelineScope)
+	item.SourceFrom = domain.GitOpsRuleSourceFrom(sourceFrom)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil

@@ -16,6 +16,7 @@ func NewRouter(
 	userHandler *UserHandler,
 	sessionResolver SessionUserResolver,
 	applicationHandler *ApplicationHandler,
+	systemSettingsHandler *SystemSettingsHandler,
 	pipelineHandler *PipelineHandler,
 	argocdHandler *ArgoCDHandler,
 	gitopsHandler *GitOpsHandler,
@@ -33,6 +34,7 @@ func NewRouter(
 	registerProtectedAuthRoutes(router, authHandler)
 	registerUserRoutes(router, userHandler)
 	registerApplicationRoutes(router, applicationHandler)
+	registerSystemSettingsRoutes(router, systemSettingsHandler)
 	registerPipelineRoutes(router, pipelineHandler)
 	registerArgoCDRoutes(router, argocdHandler)
 	registerGitOpsRoutes(router, gitopsHandler)
@@ -57,6 +59,13 @@ func registerUserRoutes(router gin.IRouter, userHandler *UserHandler) {
 
 func registerApplicationRoutes(router gin.IRouter, applicationHandler *ApplicationHandler) {
 	applicationHandler.RegisterRoutes(router)
+}
+
+func registerSystemSettingsRoutes(router gin.IRouter, systemSettingsHandler *SystemSettingsHandler) {
+	if systemSettingsHandler == nil {
+		return
+	}
+	systemSettingsHandler.RegisterRoutes(router)
 }
 
 func registerPipelineRoutes(router gin.IRouter, pipelineHandler *PipelineHandler) {

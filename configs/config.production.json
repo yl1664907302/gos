@@ -24,7 +24,7 @@
     "base_url": "https://jenkins.internal.company",
     "username": "deploy_bot",
     "api_token": "${JENKINS_API_TOKEN}",
-    "timeout_sec": 5,
+    "timeout_sec": 60,
     "startup_check_enabled": true,
     "startup_max_retries": 10,
     "startup_retry_interval_sec": 3,
@@ -55,5 +55,12 @@
     "author_email": "gos@example.com",
     "commit_message_template": "chore(release): {env} -> {image_version}",
     "command_timeout_sec": 30
+  },
+  "release": {
+    "env_options": [
+      "dev",
+      "test",
+      "prod"
+    ]
   }
 }

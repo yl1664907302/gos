@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	gitopsdomain "gos/internal/domain/gitops"
+
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -282,6 +284,90 @@ func (s *Service) ListBindingTargets(ctx context.Context) ([]BindingTarget, erro
 	return targets, nil
 }
 
+// ListFieldCandidates 扫描指定应用目录下 overlays 里的 YAML 标量字段，
+// 供 ArgoCD/GitOps 替换规则在模板页里做受控选择。
+//
+// 当前扫描约定：
+// 1. 只扫描 apps/<appKey>/overlays/<env> 下的 .yaml/.yml 文件；
+// 2. 会自动把实际环境目录替换成 {env}，生成稳定的 file_path_template；
+// 3. 只暴露可直接替换的标量叶子节点，避免首版就开放复杂结构编辑。
+func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error) {
+	status, err := s.GetStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !status.Enabled || !status.PathExists || !status.IsGitRepo {
+		return []gitopsdomain.FieldCandidate{}, nil
+	}
+
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return []gitopsdomain.FieldCandidate{}, nil
+	}
+
+	overlayRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", appKey, "overlays")
+	envEntries, err := os.ReadDir(overlayRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []gitopsdomain.FieldCandidate{}, nil
+		}
+		return nil, err
+	}
+
+	result := make([]gitopsdomain.FieldCandidate, 0)
+	seen := make(map[string]struct{})
+	for _, envEntry := range envEntries {
+		if !envEntry.IsDir() {
+			continue
+		}
+		environment := strings.TrimSpace(envEntry.Name())
+		if environment == "" {
+			continue
+		}
+		envRoot := filepath.Join(overlayRoot, environment)
+		walkErr := filepath.Walk(envRoot, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if info == nil || info.IsDir() {
+				return nil
+			}
+			lowerName := strings.ToLower(info.Name())
+			if !strings.HasSuffix(lowerName, ".yaml") && !strings.HasSuffix(lowerName, ".yml") {
+				return nil
+			}
+			items, scanErr := scanYAMLFieldCandidates(path, appKey, environment)
+			if scanErr != nil {
+				return scanErr
+			}
+			for _, item := range items {
+				key := strings.Join([]string{
+					item.FilePathTemplate,
+					item.DocumentKind,
+					item.DocumentName,
+					item.TargetPath,
+				}, "::")
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				result = append(result, item)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.Join([]string{result[i].FilePathTemplate, result[i].DocumentKind, result[i].DocumentName, result[i].TargetPath}, "::")
+		right := strings.Join([]string{result[j].FilePathTemplate, result[j].DocumentKind, result[j].DocumentName, result[j].TargetPath}, "::")
+		return strings.Compare(left, right) < 0
+	})
+	return result, nil
+}
+
 // BuildCommitMessage 使用配置模版渲染 GitOps 提交信息。
 //
 // 当前只支持轻量的占位符替换，而不引入完整模板引擎：
@@ -298,6 +384,16 @@ func (s *Service) BuildCommitMessage(fields map[string]string) string {
 		return strings.Join(strings.Fields(strings.TrimSpace(renderCommitMessageTemplate(defaultCommitMessageTemplate, normalizedFields))), " ")
 	}
 	return rendered
+}
+
+// RenderTemplate 复用与提交信息模版相同的轻量占位符替换规则。
+//
+// 与 BuildCommitMessage 的区别在于：
+// 1. 这里不会回退到默认提交模版；
+// 2. 更适合 GitOps YAML 字段值模版渲染；
+// 3. 未识别占位符保留原样，方便定位规则配置问题。
+func (s *Service) RenderTemplate(template string, fields map[string]string) string {
+	return strings.TrimSpace(renderCommitMessageTemplate(strings.TrimSpace(template), normalizeCommitMessageFields(fields)))
 }
 
 // UpdateKustomizationImage 只做一件事：更新某个 overlay 下 kustomization.yaml 的镜像 tag。
@@ -390,6 +486,111 @@ func (s *Service) UpdateKustomizationImage(
 		return "", "", "", "", false, err
 	}
 	return workspacePath, manifestPath, commitSHA, previousTag, changed, nil
+}
+
+// ApplyManifestRules 将规则化的 YAML 字段替换应用到 GitOps 仓库，并独立提交一次 Git 变更。
+//
+// 当前版本仍保持保守：
+// 1. 只支持基于 file/document/path 的精确字段替换；
+// 2. 只改标量叶子节点；
+// 3. 如果所有规则都没有实际改动，则不会生成空提交。
+func (s *Service) ApplyManifestRules(
+	ctx context.Context,
+	repoURL string,
+	branch string,
+	rules []gitopsdomain.ManifestRule,
+	commitMessage string,
+) (workspacePath string, changedFiles []string, commitSHA string, changed bool, err error) {
+	if !s.Enabled() {
+		return "", nil, "", false, fmt.Errorf("gitops service is not configured")
+	}
+	if len(rules) == 0 {
+		return "", []string{}, "", false, nil
+	}
+
+	repoURL = strings.TrimSpace(repoURL)
+	branch = resolveBranch(branch, s.defaultBranch)
+	commitMessage = strings.TrimSpace(commitMessage)
+	if repoURL == "" {
+		return "", nil, "", false, fmt.Errorf("gitops repo url is required")
+	}
+	if commitMessage == "" {
+		commitMessage = "chore(gitops): update manifest fields"
+	}
+
+	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
+	if err != nil {
+		return "", nil, "", false, err
+	}
+	if err = os.MkdirAll(s.localRoot, 0o755); err != nil {
+		return "", nil, "", false, err
+	}
+	if err = s.prepareWorkspace(ctx, repoURL, branch, workspacePath); err != nil {
+		return "", nil, "", false, err
+	}
+	if err = s.configureAuthor(ctx, workspacePath); err != nil {
+		return "", nil, "", false, err
+	}
+
+	grouped := make(map[string][]gitopsdomain.ManifestRule)
+	for _, item := range rules {
+		filePath := strings.TrimSpace(item.FilePath)
+		if filePath == "" {
+			continue
+		}
+		grouped[filePath] = append(grouped[filePath], item)
+	}
+	if len(grouped) == 0 {
+		return workspacePath, []string{}, "", false, nil
+	}
+
+	relativeChanged := make([]string, 0, len(grouped))
+	for relativePath, items := range grouped {
+		absolutePath, joinErr := secureJoin(workspacePath, relativePath)
+		if joinErr != nil {
+			return workspacePath, nil, "", false, joinErr
+		}
+		content, readErr := os.ReadFile(absolutePath)
+		if readErr != nil {
+			return workspacePath, nil, "", false, readErr
+		}
+		updated, fileChanged, applyErr := applyManifestRulesToFile(content, items)
+		if applyErr != nil {
+			return workspacePath, nil, "", false, applyErr
+		}
+		if !fileChanged {
+			continue
+		}
+		if writeErr := os.WriteFile(absolutePath, updated, 0o644); writeErr != nil {
+			return workspacePath, nil, "", false, writeErr
+		}
+		relativeChanged = append(relativeChanged, relativePath)
+	}
+
+	if len(relativeChanged) == 0 {
+		commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
+		if err != nil {
+			return workspacePath, []string{}, "", false, err
+		}
+		return workspacePath, []string{}, commitSHA, false, nil
+	}
+
+	sort.Strings(relativeChanged)
+	addArgs := append([]string{"add"}, relativeChanged...)
+	if _, err := s.runGit(ctx, workspacePath, addArgs...); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	if _, err := s.runGit(ctx, workspacePath, "commit", "-m", commitMessage); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	if _, err := s.runGit(ctx, workspacePath, "push", "origin", branch); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
+	if err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	return workspacePath, append([]string(nil), relativeChanged...), commitSHA, true, nil
 }
 
 // resolveWorkspacePath 优先复用 local_root 本身作为 GitOps 工作仓库。
@@ -657,6 +858,348 @@ func mapSliceString(items yaml.MapSlice, key string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(fmt.Sprint(value)), true
+}
+
+func scanYAMLFieldCandidates(path string, appKey string, environment string) ([]gitopsdomain.FieldCandidate, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	documents := splitYAMLDocuments(string(content))
+	if len(documents) == 0 {
+		return []gitopsdomain.FieldCandidate{}, nil
+	}
+
+	relativeWithinEnv, err := filepath.Rel(filepath.Join(filepath.Dir(path), ".."), path)
+	if err != nil {
+		// fallback to path relative from env root if the above shape is not met
+		relativeWithinEnv, err = filepath.Rel(filepath.Join(filepath.Dir(path[:len(path)-len(filepath.Base(path))])), path)
+		if err != nil {
+			relativeWithinEnv = filepath.Base(path)
+		}
+	}
+	// The path we actually need is relative to overlays/<env>/...
+	overlayIndex := strings.Index(filepath.ToSlash(path), filepath.ToSlash(filepath.Join("apps", appKey, "overlays", environment)))
+	if overlayIndex >= 0 {
+		relativeWithinEnv = strings.TrimPrefix(filepath.ToSlash(path)[overlayIndex+len(filepath.ToSlash(filepath.Join("apps", appKey, "overlays", environment))):], "/")
+	}
+	filePathTemplate := filepath.ToSlash(filepath.Join("apps", appKey, "overlays", "{env}", relativeWithinEnv))
+
+	result := make([]gitopsdomain.FieldCandidate, 0)
+	for _, rawDoc := range documents {
+		var node interface{}
+		if err := yaml.Unmarshal([]byte(rawDoc), &node); err != nil {
+			return nil, fmt.Errorf("parse yaml candidate file failed: %w", err)
+		}
+		kind, name := extractDocumentIdentity(node)
+		name = normalizeEnvironmentPlaceholder(name, environment)
+		fields := make([]gitopsdomain.FieldCandidate, 0)
+		collectScalarCandidates(node, "", filePathTemplate, kind, name, &fields)
+		result = append(result, fields...)
+	}
+	return result, nil
+}
+
+// normalizeEnvironmentPlaceholder 将环境相关的资源名归一成 {env} 模版。
+//
+// 这么做的原因是 GitOps 替换规则配置发生在“模板层”，而模板层还没有具体环境值：
+// 1. 扫描 overlays/dev、overlays/test、overlays/prod 时，文件路径已经被统一成 {env}；
+// 2. 如果 metadata.name 仍然保留具体环境后缀，前端会看到一堆看似重复的资源；
+// 3. 统一成 {env} 后，模板保存的是稳定规则，执行时再结合发布单环境渲染成真实名称。
+func normalizeEnvironmentPlaceholder(value string, environment string) string {
+	value = strings.TrimSpace(value)
+	environment = strings.TrimSpace(environment)
+	if value == "" || environment == "" {
+		return value
+	}
+	pattern := regexp.MustCompile(`(^|[-_./])` + regexp.QuoteMeta(environment) + `($|[-_./])`)
+	return pattern.ReplaceAllString(value, "${1}{env}${2}")
+}
+
+func collectScalarCandidates(
+	node interface{},
+	pointer string,
+	filePathTemplate string,
+	documentKind string,
+	documentName string,
+	items *[]gitopsdomain.FieldCandidate,
+) {
+	switch typed := node.(type) {
+	case map[interface{}]interface{}:
+		for key, value := range typed {
+			token := encodeJSONPointerToken(strings.TrimSpace(fmt.Sprint(key)))
+			collectScalarCandidates(value, pointer+"/"+token, filePathTemplate, documentKind, documentName, items)
+		}
+	case map[string]interface{}:
+		for key, value := range typed {
+			token := encodeJSONPointerToken(strings.TrimSpace(key))
+			collectScalarCandidates(value, pointer+"/"+token, filePathTemplate, documentKind, documentName, items)
+		}
+	case []interface{}:
+		for idx, value := range typed {
+			collectScalarCandidates(value, fmt.Sprintf("%s/%d", pointer, idx), filePathTemplate, documentKind, documentName, items)
+		}
+	case string, bool, int, int64, float64, float32, uint, uint64:
+		path := pointer
+		if path == "" {
+			path = "/"
+		}
+		sample := strings.TrimSpace(fmt.Sprint(typed))
+		if len(sample) > 120 {
+			sample = sample[:120] + "..."
+		}
+		display := strings.Join([]string{
+			filepath.Base(filePathTemplate),
+			firstNonEmpty(documentKind, "Document"),
+			firstNonEmpty(documentName, "-"),
+			path,
+		}, " / ")
+		*items = append(*items, gitopsdomain.FieldCandidate{
+			FilePathTemplate: filePathTemplate,
+			DocumentKind:     strings.TrimSpace(documentKind),
+			DocumentName:     strings.TrimSpace(documentName),
+			TargetPath:       path,
+			ValueType:        scalarTypeName(typed),
+			SampleValue:      sample,
+			DisplayName:      display,
+		})
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func applyManifestRulesToFile(content []byte, rules []gitopsdomain.ManifestRule) ([]byte, bool, error) {
+	documents := splitYAMLDocuments(string(content))
+	if len(documents) == 0 {
+		return content, false, nil
+	}
+
+	changed := false
+	encodedDocs := make([]string, 0, len(documents))
+	for _, rawDoc := range documents {
+		var doc yaml.MapSlice
+		if err := yaml.Unmarshal([]byte(rawDoc), &doc); err != nil {
+			return nil, false, fmt.Errorf("parse yaml manifest failed: %w", err)
+		}
+		kind := strings.TrimSpace(extractKindFromMapSlice(doc))
+		name := strings.TrimSpace(extractMetadataNameFromMapSlice(doc))
+		docChanged := false
+		for _, rule := range rules {
+			if !strings.EqualFold(strings.TrimSpace(rule.DocumentKind), kind) {
+				continue
+			}
+			if strings.TrimSpace(rule.DocumentName) != "" && strings.TrimSpace(rule.DocumentName) != name {
+				continue
+			}
+			updated, applied, err := setMapSliceValueByPointer(doc, strings.TrimSpace(rule.TargetPath), strings.TrimSpace(rule.Value))
+			if err != nil {
+				return nil, false, err
+			}
+			if applied {
+				doc = updated
+				docChanged = true
+				changed = true
+			}
+		}
+		encoded, err := yaml.Marshal(doc)
+		if err != nil {
+			return nil, false, fmt.Errorf("encode yaml manifest failed: %w", err)
+		}
+		if docChanged {
+			encodedDocs = append(encodedDocs, strings.TrimRight(string(encoded), "\n"))
+			continue
+		}
+		encodedDocs = append(encodedDocs, strings.TrimRight(string(encoded), "\n"))
+	}
+	return []byte(strings.Join(encodedDocs, "\n---\n") + "\n"), changed, nil
+}
+
+func splitYAMLDocuments(raw string) []string {
+	normalized := strings.ReplaceAll(raw, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	current := make([]string, 0, len(lines))
+	result := make([]string, 0)
+	flush := func() {
+		doc := strings.TrimSpace(strings.Join(current, "\n"))
+		if doc != "" {
+			result = append(result, doc)
+		}
+		current = current[:0]
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "---" {
+			flush()
+			continue
+		}
+		current = append(current, line)
+	}
+	flush()
+	return result
+}
+
+func encodeJSONPointerToken(value string) string {
+	return strings.NewReplacer("~", "~0", "/", "~1").Replace(value)
+}
+
+func decodeJSONPointerToken(value string) string {
+	return strings.NewReplacer("~1", "/", "~0", "~").Replace(value)
+}
+
+func extractDocumentIdentity(node interface{}) (kind string, name string) {
+	switch typed := node.(type) {
+	case map[interface{}]interface{}:
+		for key, value := range typed {
+			keyText := strings.TrimSpace(fmt.Sprint(key))
+			switch keyText {
+			case "kind":
+				kind = strings.TrimSpace(fmt.Sprint(value))
+			case "metadata":
+				switch metadata := value.(type) {
+				case map[interface{}]interface{}:
+					for mk, mv := range metadata {
+						if strings.TrimSpace(fmt.Sprint(mk)) == "name" {
+							name = strings.TrimSpace(fmt.Sprint(mv))
+						}
+					}
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(kind), strings.TrimSpace(name)
+}
+
+func scalarTypeName(value interface{}) string {
+	switch value.(type) {
+	case bool:
+		return "bool"
+	case int, int64, float64, float32, uint, uint64:
+		return "number"
+	default:
+		return "string"
+	}
+}
+
+func extractKindFromMapSlice(doc yaml.MapSlice) string {
+	value, ok := mapSliceString(doc, "kind")
+	if !ok {
+		return ""
+	}
+	return value
+}
+
+func extractMetadataNameFromMapSlice(doc yaml.MapSlice) string {
+	value, ok := mapSliceGet(doc, "metadata")
+	if !ok {
+		return ""
+	}
+	items, ok := value.(yaml.MapSlice)
+	if !ok {
+		return ""
+	}
+	name, _ := mapSliceString(items, "name")
+	return name
+}
+
+func setMapSliceValueByPointer(doc yaml.MapSlice, pointer string, newValue string) (yaml.MapSlice, bool, error) {
+	if strings.TrimSpace(pointer) == "" || strings.TrimSpace(pointer) == "/" {
+		return doc, false, fmt.Errorf("yaml target path is required")
+	}
+	segments := strings.Split(strings.TrimPrefix(strings.TrimSpace(pointer), "/"), "/")
+	decoded := make([]string, 0, len(segments))
+	for _, item := range segments {
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		decoded = append(decoded, decodeJSONPointerToken(item))
+	}
+	if len(decoded) == 0 {
+		return doc, false, fmt.Errorf("yaml target path is required")
+	}
+
+	updated, changed, err := setNodeValueByPointer(doc, decoded, newValue)
+	if err != nil {
+		return doc, false, err
+	}
+	result, ok := updated.(yaml.MapSlice)
+	if !ok {
+		return doc, false, fmt.Errorf("yaml root document must be a map")
+	}
+	return result, changed, nil
+}
+
+func setNodeValueByPointer(node interface{}, segments []string, newValue string) (interface{}, bool, error) {
+	if len(segments) == 0 {
+		current := strings.TrimSpace(fmt.Sprint(node))
+		if current == strings.TrimSpace(newValue) {
+			return node, false, nil
+		}
+		return newValue, true, nil
+	}
+
+	switch typed := node.(type) {
+	case yaml.MapSlice:
+		key := segments[0]
+		for idx, item := range typed {
+			if strings.TrimSpace(fmt.Sprint(item.Key)) != key {
+				continue
+			}
+			updated, changed, err := setNodeValueByPointer(item.Value, segments[1:], newValue)
+			if err != nil {
+				return node, false, err
+			}
+			if changed {
+				typed[idx].Value = updated
+			}
+			return typed, changed, nil
+		}
+		return node, false, fmt.Errorf("yaml target path not found: %s", "/"+strings.Join(segments, "/"))
+	case []interface{}:
+		indexValue, err := parseSliceIndex(segments[0])
+		if err != nil {
+			return node, false, err
+		}
+		if indexValue < 0 || indexValue >= len(typed) {
+			return node, false, fmt.Errorf("yaml target index out of range: %s", segments[0])
+		}
+		updated, changed, err := setNodeValueByPointer(typed[indexValue], segments[1:], newValue)
+		if err != nil {
+			return node, false, err
+		}
+		if changed {
+			typed[indexValue] = updated
+		}
+		return typed, changed, nil
+	default:
+		if len(segments) > 0 {
+			return node, false, fmt.Errorf("yaml target path is not replaceable: %s", "/"+strings.Join(segments, "/"))
+		}
+		current := strings.TrimSpace(fmt.Sprint(node))
+		if current == strings.TrimSpace(newValue) {
+			return node, false, nil
+		}
+		return newValue, true, nil
+	}
+}
+
+func parseSliceIndex(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, fmt.Errorf("yaml target index is required")
+	}
+	var index int
+	_, err := fmt.Sscanf(value, "%d", &index)
+	if err != nil {
+		return 0, fmt.Errorf("invalid yaml target index: %s", value)
+	}
+	return index, nil
 }
 
 func mapSliceSet(items yaml.MapSlice, key string, value interface{}) yaml.MapSlice {

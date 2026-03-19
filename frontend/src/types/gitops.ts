@@ -27,3 +27,13 @@ export interface GitOpsTemplateField {
   builtin: boolean
   required: boolean
 }
+
+export interface GitOpsFieldCandidate {
+  file_path_template: string
+  document_kind: string
+  document_name: string
+  target_path: string
+  value_type: string
+  sample_value: string
+  display_name: string
+}

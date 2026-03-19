@@ -38,26 +38,28 @@ func (h *ReleaseTemplateHandler) RegisterRoutes(router gin.IRouter) {
 }
 
 type CreateReleaseTemplateRequest struct {
-	Name          string   `json:"name"`
-	ApplicationID string   `json:"application_id"`
-	CIBindingID   string   `json:"ci_binding_id"`
-	CDBindingID   string   `json:"cd_binding_id"`
-	CDProvider    string   `json:"cd_provider"`
-	Status        string   `json:"status"`
-	Remark        string   `json:"remark"`
-	CIParamDefIDs []string `json:"ci_param_def_ids"`
-	CDParamDefIDs []string `json:"cd_param_def_ids"`
+	Name          string                             `json:"name"`
+	ApplicationID string                             `json:"application_id"`
+	CIBindingID   string                             `json:"ci_binding_id"`
+	CDBindingID   string                             `json:"cd_binding_id"`
+	CDProvider    string                             `json:"cd_provider"`
+	Status        string                             `json:"status"`
+	Remark        string                             `json:"remark"`
+	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
+	CDParamDefIDs []string                           `json:"cd_param_def_ids"`
+	GitOpsRules   []ReleaseTemplateGitOpsRuleRequest `json:"gitops_rules"`
 }
 
 type UpdateReleaseTemplateRequest struct {
-	Name          string   `json:"name"`
-	CIBindingID   string   `json:"ci_binding_id"`
-	CDBindingID   string   `json:"cd_binding_id"`
-	CDProvider    string   `json:"cd_provider"`
-	Status        string   `json:"status"`
-	Remark        string   `json:"remark"`
-	CIParamDefIDs []string `json:"ci_param_def_ids"`
-	CDParamDefIDs []string `json:"cd_param_def_ids"`
+	Name          string                             `json:"name"`
+	CIBindingID   string                             `json:"ci_binding_id"`
+	CDBindingID   string                             `json:"cd_binding_id"`
+	CDProvider    string                             `json:"cd_provider"`
+	Status        string                             `json:"status"`
+	Remark        string                             `json:"remark"`
+	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
+	CDParamDefIDs []string                           `json:"cd_param_def_ids"`
+	GitOpsRules   []ReleaseTemplateGitOpsRuleRequest `json:"gitops_rules"`
 }
 
 type ReleaseTemplateResponse struct {
@@ -105,11 +107,39 @@ type ReleaseTemplateBindingResponse struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+type ReleaseTemplateGitOpsRuleRequest struct {
+	SourceParamKey   string `json:"source_param_key"`
+	SourceFrom       string `json:"source_from"`
+	FilePathTemplate string `json:"file_path_template"`
+	DocumentKind     string `json:"document_kind"`
+	DocumentName     string `json:"document_name"`
+	TargetPath       string `json:"target_path"`
+	ValueTemplate    string `json:"value_template"`
+}
+
+type ReleaseTemplateGitOpsRuleResponse struct {
+	ID               string    `json:"id"`
+	TemplateID       string    `json:"template_id"`
+	PipelineScope    string    `json:"pipeline_scope"`
+	SourceParamKey   string    `json:"source_param_key"`
+	SourceParamName  string    `json:"source_param_name"`
+	SourceFrom       string    `json:"source_from"`
+	FilePathTemplate string    `json:"file_path_template"`
+	DocumentKind     string    `json:"document_kind"`
+	DocumentName     string    `json:"document_name"`
+	TargetPath       string    `json:"target_path"`
+	ValueTemplate    string    `json:"value_template"`
+	SortNo           int       `json:"sort_no"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type ReleaseTemplateDataResponse struct {
 	Data struct {
-		Template ReleaseTemplateResponse          `json:"template"`
-		Bindings []ReleaseTemplateBindingResponse `json:"bindings"`
-		Params   []ReleaseTemplateParamResponse   `json:"params"`
+		Template    ReleaseTemplateResponse             `json:"template"`
+		Bindings    []ReleaseTemplateBindingResponse    `json:"bindings"`
+		Params      []ReleaseTemplateParamResponse      `json:"params"`
+		GitOpsRules []ReleaseTemplateGitOpsRuleResponse `json:"gitops_rules"`
 	} `json:"data"`
 }
 
@@ -130,7 +160,7 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		return
 	}
 
-	template, bindings, params, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
+	template, bindings, params, gitopsRules, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
 		Name:          req.Name,
 		ApplicationID: req.ApplicationID,
 		CIBindingID:   req.CIBindingID,
@@ -140,12 +170,13 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
 		CDParamDefIDs: req.CDParamDefIDs,
+		GitOpsRules:   toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, bindings, params))
+	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules))
 }
 
 func (h *ReleaseTemplateHandler) List(c *gin.Context) {
@@ -188,7 +219,7 @@ func (h *ReleaseTemplateHandler) List(c *gin.Context) {
 }
 
 func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
-	template, bindings, params, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, bindings, params, gitopsRules, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -196,11 +227,11 @@ func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
 	if !h.ensureTemplateAccess(c, template) {
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, bindings, params))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules))
 }
 
 func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
-	template, _, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, _, _, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -213,7 +244,7 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	updated, bindings, params, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
+	updated, bindings, params, gitopsRules, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
 		Name:          req.Name,
 		CIBindingID:   req.CIBindingID,
 		CDBindingID:   req.CDBindingID,
@@ -222,12 +253,13 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
 		CDParamDefIDs: req.CDParamDefIDs,
+		GitOpsRules:   toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, bindings, params))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, bindings, params, gitopsRules))
 }
 
 func (h *ReleaseTemplateHandler) Delete(c *gin.Context) {
@@ -407,10 +439,46 @@ func toReleaseTemplateBindingResponse(item releasedomain.ReleaseTemplateBinding)
 	}
 }
 
+func toReleaseTemplateGitOpsRuleInputs(items []ReleaseTemplateGitOpsRuleRequest) []usecase.ReleaseTemplateGitOpsRuleInput {
+	result := make([]usecase.ReleaseTemplateGitOpsRuleInput, 0, len(items))
+	for _, item := range items {
+		result = append(result, usecase.ReleaseTemplateGitOpsRuleInput{
+			SourceParamKey:   item.SourceParamKey,
+			SourceFrom:       releasedomain.GitOpsRuleSourceFrom(strings.ToLower(strings.TrimSpace(item.SourceFrom))),
+			FilePathTemplate: item.FilePathTemplate,
+			DocumentKind:     item.DocumentKind,
+			DocumentName:     item.DocumentName,
+			TargetPath:       item.TargetPath,
+			ValueTemplate:    item.ValueTemplate,
+		})
+	}
+	return result
+}
+
+func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOpsRule) ReleaseTemplateGitOpsRuleResponse {
+	return ReleaseTemplateGitOpsRuleResponse{
+		ID:               item.ID,
+		TemplateID:       item.TemplateID,
+		PipelineScope:    string(item.PipelineScope),
+		SourceParamKey:   item.SourceParamKey,
+		SourceParamName:  item.SourceParamName,
+		SourceFrom:       string(item.SourceFrom),
+		FilePathTemplate: item.FilePathTemplate,
+		DocumentKind:     item.DocumentKind,
+		DocumentName:     item.DocumentName,
+		TargetPath:       item.TargetPath,
+		ValueTemplate:    item.ValueTemplate,
+		SortNo:           item.SortNo,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
+	}
+}
+
 func toReleaseTemplateDataResponse(
 	template releasedomain.ReleaseTemplate,
 	bindings []releasedomain.ReleaseTemplateBinding,
 	params []releasedomain.ReleaseTemplateParam,
+	gitopsRules []releasedomain.ReleaseTemplateGitOpsRule,
 ) ReleaseTemplateDataResponse {
 	resp := ReleaseTemplateDataResponse{}
 	resp.Data.Template = toReleaseTemplateResponse(template)
@@ -421,6 +489,10 @@ func toReleaseTemplateDataResponse(
 	resp.Data.Params = make([]ReleaseTemplateParamResponse, 0, len(params))
 	for _, item := range params {
 		resp.Data.Params = append(resp.Data.Params, toReleaseTemplateParamResponse(item))
+	}
+	resp.Data.GitOpsRules = make([]ReleaseTemplateGitOpsRuleResponse, 0, len(gitopsRules))
+	for _, item := range gitopsRules {
+		resp.Data.GitOpsRules = append(resp.Data.GitOpsRules, toReleaseTemplateGitOpsRuleResponse(item))
 	}
 	return resp
 }

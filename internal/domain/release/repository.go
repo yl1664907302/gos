@@ -49,17 +49,19 @@ type Repository interface {
 		template ReleaseTemplate,
 		bindings []ReleaseTemplateBinding,
 		params []ReleaseTemplateParam,
+		gitopsRules []ReleaseTemplateGitOpsRule,
 	) error
 	GetTemplateByID(
 		ctx context.Context,
 		id string,
-	) (ReleaseTemplate, []ReleaseTemplateBinding, []ReleaseTemplateParam, error)
+	) (ReleaseTemplate, []ReleaseTemplateBinding, []ReleaseTemplateParam, []ReleaseTemplateGitOpsRule, error)
 	ListTemplates(ctx context.Context, filter TemplateListFilter) ([]ReleaseTemplate, int64, error)
 	UpdateTemplate(
 		ctx context.Context,
 		template ReleaseTemplate,
 		bindings []ReleaseTemplateBinding,
 		params []ReleaseTemplateParam,
+		gitopsRules []ReleaseTemplateGitOpsRule,
 	) error
 	DeleteTemplate(ctx context.Context, id string) error
 }

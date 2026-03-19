@@ -16,6 +16,7 @@ type Config struct {
 	Jenkins     JenkinsConfig  `json:"jenkins"`
 	ArgoCD      ArgoCDConfig   `json:"argocd"`
 	GitOps      GitOpsConfig   `json:"gitops"`
+	Release     ReleaseConfig  `json:"release"`
 	Auth        AuthConfig     `json:"auth"`
 }
 
@@ -91,6 +92,10 @@ type GitOpsConfig struct {
 	CommandTimeoutSec     int    `json:"command_timeout_sec"`
 }
 
+type ReleaseConfig struct {
+	EnvOptions []string `json:"env_options"`
+}
+
 type AuthConfig struct {
 	SessionTTLHours  int    `json:"session_ttl_hours"`
 	AdminUsername    string `json:"admin_username"`
@@ -151,7 +156,7 @@ func defaultConfig() Config {
 			BaseURL:                 "http://127.0.0.1:8080",
 			Username:                "admin",
 			APIToken:                "",
-			TimeoutSec:              5,
+			TimeoutSec:              60,
 			StartupCheckEnabled:     false,
 			StartupMaxRetries:       5,
 			StartupRetryIntervalSec: 2,
@@ -181,6 +186,9 @@ func defaultConfig() Config {
 			AuthorEmail:           "gos@example.com",
 			CommitMessageTemplate: "chore(release): {env} -> {image_version}",
 			CommandTimeoutSec:     30,
+		},
+		Release: ReleaseConfig{
+			EnvOptions: []string{"dev", "test", "prod"},
 		},
 		Auth: AuthConfig{
 			SessionTTLHours:  24,
@@ -396,7 +404,7 @@ func applyConfigDefaults(cfg *Config) {
 	cfg.Jenkins.Username = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.Username))
 	cfg.Jenkins.APIToken = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.APIToken))
 	if cfg.Jenkins.TimeoutSec <= 0 {
-		cfg.Jenkins.TimeoutSec = 5
+		cfg.Jenkins.TimeoutSec = 60
 	}
 	if cfg.Jenkins.StartupMaxRetries <= 0 {
 		cfg.Jenkins.StartupMaxRetries = 5
@@ -451,6 +459,11 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.GitOps.CommandTimeoutSec <= 0 {
 		cfg.GitOps.CommandTimeoutSec = 30
+	}
+
+	cfg.Release.EnvOptions = normalizeStringList(cfg.Release.EnvOptions)
+	if len(cfg.Release.EnvOptions) == 0 {
+		cfg.Release.EnvOptions = []string{"dev", "test", "prod"}
 	}
 
 	if cfg.Auth.SessionTTLHours <= 0 {
@@ -546,4 +559,27 @@ func intFromEnv(key string) (int, bool) {
 		return 0, false
 	}
 	return value, true
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(os.ExpandEnv(item))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }

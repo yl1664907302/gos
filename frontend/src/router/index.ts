@@ -19,6 +19,7 @@ import ReleaseOrderDetailView from '../views/release/ReleaseOrderDetailView.vue'
 import ReleaseOrderListView from '../views/release/ReleaseOrderListView.vue'
 import ReleaseTemplateView from '../views/release/ReleaseTemplateView.vue'
 import SystemPermissionView from '../views/system/SystemPermissionView.vue'
+import SystemSettingsView from '../views/system/SystemSettingsView.vue'
 import SystemUserView from '../views/system/SystemUserView.vue'
 
 declare module 'vue-router' {
@@ -41,42 +42,8 @@ function normalizePermissions(metaPermission: string | string[] | undefined): st
 }
 
 function resolveFirstAccessiblePath(authStore: ReturnType<typeof useAuthStore>) {
-  if (authStore.hasPermission('application.view') || authStore.hasPermission('application.manage')) {
-    return '/applications'
-  }
-  if (authStore.hasPermission('platform_param.manage')) {
-    return '/platform-param-dicts'
-  }
-  if (
-    authStore.hasPermission('release.view') ||
-    authStore.hasPermission('release.create') ||
-    authStore.hasPermission('release.execute') ||
-    authStore.hasPermission('release.cancel')
-  ) {
-    return '/releases'
-  }
-  if (authStore.hasPermission('release.template.manage')) {
-    return '/release-templates'
-  }
-  if (authStore.hasPermission('component.view')) {
-    return '/components/jenkins'
-  }
-  if (authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage')) {
-    return '/components/argocd'
-  }
-  if (authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage')) {
-    return '/components/gitops'
-  }
-  if (authStore.hasPermission('pipeline_param.manage')) {
-    return '/components/executor-params'
-  }
-  if (authStore.hasPermission('system.user.manage')) {
-    return '/system/users'
-  }
-  if (authStore.hasPermission('system.permission.manage')) {
-    return '/system/permissions'
-  }
-  return '/403'
+  void authStore
+  return '/releases'
 }
 
 export const router = createRouter({
@@ -166,7 +133,7 @@ export const router = createRouter({
           path: 'releases',
           name: 'release-order-list',
           component: ReleaseOrderListView,
-          meta: { title: '发布单', permission: ['release.view', 'release.create', 'release.execute', 'release.cancel'] },
+          meta: { title: '发布单' },
         },
         {
           path: 'releases/new',
@@ -178,7 +145,7 @@ export const router = createRouter({
           path: 'releases/:id',
           name: 'release-order-detail',
           component: ReleaseOrderDetailView,
-          meta: { title: '发布单详情', permission: ['release.view', 'release.create', 'release.execute', 'release.cancel'] },
+          meta: { title: '发布单详情' },
         },
         {
           path: 'release-templates',
@@ -197,6 +164,12 @@ export const router = createRouter({
           name: 'system-permissions',
           component: SystemPermissionView,
           meta: { title: '权限授权', permission: 'system.permission.manage' },
+        },
+        {
+          path: 'system/settings',
+          name: 'system-settings',
+          component: SystemSettingsView,
+          meta: { title: '系统设置', permission: 'system.permission.manage' },
         },
       ],
     },

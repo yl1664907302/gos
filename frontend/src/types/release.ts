@@ -250,6 +250,35 @@ export interface ReleaseTemplateParam {
   updated_at: string
 }
 
+export type ReleaseTemplateGitOpsRuleSourceFrom = 'ci' | 'builtin'
+
+export interface ReleaseTemplateGitOpsRule {
+  id: string
+  template_id: string
+  pipeline_scope: ReleasePipelineScope
+  source_param_key: string
+  source_param_name: string
+  source_from: ReleaseTemplateGitOpsRuleSourceFrom
+  file_path_template: string
+  document_kind: string
+  document_name: string
+  target_path: string
+  value_template: string
+  sort_no: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ReleaseTemplateGitOpsRulePayload {
+  source_param_key: string
+  source_from: ReleaseTemplateGitOpsRuleSourceFrom
+  file_path_template: string
+  document_kind: string
+  document_name?: string
+  target_path: string
+  value_template?: string
+}
+
 export interface ReleaseTemplateListParams {
   application_id?: string
   binding_id?: string
@@ -270,6 +299,7 @@ export interface ReleaseTemplateDataResponse {
     template: ReleaseTemplate
     bindings: ReleaseTemplateBinding[]
     params: ReleaseTemplateParam[]
+    gitops_rules: ReleaseTemplateGitOpsRule[]
   }
 }
 
@@ -283,6 +313,7 @@ export interface ReleaseTemplatePayload {
   remark?: string
   ci_param_def_ids: string[]
   cd_param_def_ids: string[]
+  gitops_rules?: ReleaseTemplateGitOpsRulePayload[]
 }
 
 export interface UpdateReleaseTemplatePayload {
@@ -294,4 +325,5 @@ export interface UpdateReleaseTemplatePayload {
   remark?: string
   ci_param_def_ids: string[]
   cd_param_def_ids: string[]
+  gitops_rules?: ReleaseTemplateGitOpsRulePayload[]
 }

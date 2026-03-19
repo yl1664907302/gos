@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	appdomain "gos/internal/domain/application"
+	gitopsdomain "gos/internal/domain/gitops"
 	platformparamdomain "gos/internal/domain/platformparam"
 	gitopsinfra "gos/internal/infrastructure/gitops"
 )
@@ -71,6 +73,25 @@ type QueryGitOpsTemplateFields struct {
 	reader GitOpsTemplateFieldReader
 }
 
+type GitOpsFieldCandidateReader interface {
+	ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error)
+}
+
+type QueryGitOpsFieldCandidateOutput struct {
+	FilePathTemplate string `json:"file_path_template"`
+	DocumentKind     string `json:"document_kind"`
+	DocumentName     string `json:"document_name"`
+	TargetPath       string `json:"target_path"`
+	ValueType        string `json:"value_type"`
+	SampleValue      string `json:"sample_value"`
+	DisplayName      string `json:"display_name"`
+}
+
+type QueryGitOpsFieldCandidates struct {
+	appRepo appdomain.Repository
+	reader  GitOpsFieldCandidateReader
+}
+
 func NewQueryGitOpsStatus(reader GitOpsStatusReader) *QueryGitOpsStatus {
 	return &QueryGitOpsStatus{reader: reader}
 }
@@ -81,6 +102,13 @@ func NewQueryGitOpsBindingTargets(reader GitOpsBindingTargetReader) *QueryGitOps
 
 func NewQueryGitOpsTemplateFields(reader GitOpsTemplateFieldReader) *QueryGitOpsTemplateFields {
 	return &QueryGitOpsTemplateFields{reader: reader}
+}
+
+func NewQueryGitOpsFieldCandidates(
+	appRepo appdomain.Repository,
+	reader GitOpsFieldCandidateReader,
+) *QueryGitOpsFieldCandidates {
+	return &QueryGitOpsFieldCandidates{appRepo: appRepo, reader: reader}
 }
 
 func (uc *QueryGitOpsStatus) Execute(ctx context.Context) (QueryGitOpsStatusOutput, error) {
@@ -166,6 +194,44 @@ func (uc *QueryGitOpsTemplateFields) Execute(ctx context.Context) ([]QueryGitOps
 			Description: strings.TrimSpace(item.Description),
 			Builtin:     item.Builtin,
 			Required:    item.Required,
+		})
+	}
+	return result, nil
+}
+
+func (uc *QueryGitOpsFieldCandidates) Execute(
+	ctx context.Context,
+	applicationID string,
+) ([]QueryGitOpsFieldCandidateOutput, error) {
+	if uc == nil || uc.appRepo == nil || uc.reader == nil {
+		return nil, fmt.Errorf("%w: gitops manager is not configured", ErrInvalidInput)
+	}
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		return nil, fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+	}
+	app, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	appKey := strings.TrimSpace(app.Key)
+	if appKey == "" {
+		return nil, fmt.Errorf("%w: application key is required", ErrInvalidInput)
+	}
+	items, err := uc.reader.ListFieldCandidates(ctx, appKey)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]QueryGitOpsFieldCandidateOutput, 0, len(items))
+	for _, item := range items {
+		result = append(result, QueryGitOpsFieldCandidateOutput{
+			FilePathTemplate: strings.TrimSpace(item.FilePathTemplate),
+			DocumentKind:     strings.TrimSpace(item.DocumentKind),
+			DocumentName:     strings.TrimSpace(item.DocumentName),
+			TargetPath:       strings.TrimSpace(item.TargetPath),
+			ValueType:        strings.TrimSpace(item.ValueType),
+			SampleValue:      strings.TrimSpace(item.SampleValue),
+			DisplayName:      strings.TrimSpace(item.DisplayName),
 		})
 	}
 	return result, nil

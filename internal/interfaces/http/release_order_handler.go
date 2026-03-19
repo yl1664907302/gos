@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -907,16 +906,8 @@ func ensureReleaseApplicationPermission(
 	)
 }
 
-var releaseOrderDisplayPermissionCodes = []string{
-	"release.view",
-	"release.create",
-	"release.execute",
-	"release.cancel",
-}
-
 func ensureAnyReleaseOrderDisplayPermission(c *gin.Context, authz RequestAuthorizer) bool {
-	user, ok := getCurrentUser(c)
-	if !ok {
+	if _, ok := getCurrentUser(c); !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return false
 	}
@@ -924,32 +915,8 @@ func ensureAnyReleaseOrderDisplayPermission(c *gin.Context, authz RequestAuthori
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
 		return false
 	}
-	if user.Role == userdomain.RoleAdmin {
-		return true
-	}
-
-	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		return false
-	}
-	for _, item := range items {
-		if !item.Enabled || !isReleaseOrderDisplayPermission(item.PermissionCode) {
-			continue
-		}
-		scopeType := strings.ToLower(strings.TrimSpace(item.ScopeType))
-		switch scopeType {
-		case "", "global":
-			return true
-		case "application":
-			if strings.TrimSpace(item.ScopeValue) != "" {
-				return true
-			}
-		}
-	}
-
-	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-	return false
+	// 发布记录展示权限已取消：所有已登录用户都可以查看发布记录。
+	return true
 }
 
 func ensureReleaseOrderVisible(
@@ -958,8 +925,7 @@ func ensureReleaseOrderVisible(
 	applicationID string,
 	creatorUserID string,
 ) bool {
-	user, ok := getCurrentUser(c)
-	if !ok {
+	if _, ok := getCurrentUser(c); !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return false
 	}
@@ -967,33 +933,8 @@ func ensureReleaseOrderVisible(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
 		return false
 	}
-	if user.Role == userdomain.RoleAdmin {
-		return true
-	}
-	if strings.TrimSpace(creatorUserID) == "" || strings.TrimSpace(creatorUserID) != strings.TrimSpace(user.ID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-		return false
-	}
-
-	applicationID = strings.TrimSpace(applicationID)
-	if applicationID == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-		return false
-	}
-
-	for _, code := range releaseOrderDisplayPermissionCodes {
-		allowed, err := authz.HasPermission(c.Request.Context(), user, code, "application", applicationID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-			return false
-		}
-		if allowed {
-			return true
-		}
-	}
-
-	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
-	return false
+	// 发布记录展示权限已取消：所有已登录用户都可以查看任意发布记录详情。
+	return true
 }
 
 func resolveVisibleReleaseOrderApplicationIDs(
@@ -1009,49 +950,9 @@ func resolveVisibleReleaseOrderApplicationIDs(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
 		return false, nil, false
 	}
-	if user.Role == userdomain.RoleAdmin {
-		return true, nil, true
-	}
-
-	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
-		return false, nil, false
-	}
-
-	seen := make(map[string]struct{})
-	result := make([]string, 0)
-	for _, item := range items {
-		if !item.Enabled {
-			continue
-		}
-		if !isReleaseOrderDisplayPermission(item.PermissionCode) {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
-			continue
-		}
-		applicationID := strings.TrimSpace(item.ScopeValue)
-		if applicationID == "" {
-			continue
-		}
-		if _, exists := seen[applicationID]; exists {
-			continue
-		}
-		seen[applicationID] = struct{}{}
-		result = append(result, applicationID)
-	}
-	sort.Strings(result)
-	return false, result, true
-}
-
-func isReleaseOrderDisplayPermission(code string) bool {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "release.view", "release.create", "release.execute", "release.cancel":
-		return true
-	default:
-		return false
-	}
+	_ = user
+	// 发布记录列表不再按应用范围过滤。
+	return true, nil, true
 }
 
 func resolveReleaseListApplicationIDs(applicationID string, allowAll bool, visibleApplicationIDs []string) []string {
@@ -1062,10 +963,8 @@ func resolveReleaseListApplicationIDs(applicationID string, allowAll bool, visib
 }
 
 func resolveReleaseOrderCreatorFilter(user userdomain.User) string {
-	if user.Role == userdomain.RoleAdmin {
-		return ""
-	}
-	return strings.TrimSpace(user.ID)
+	_ = user
+	return ""
 }
 
 func writeEmptyReleaseOrderList(c *gin.Context, page int, pageSize int) {
