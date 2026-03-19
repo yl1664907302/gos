@@ -313,17 +313,21 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 	if err != nil {
 		return false, false, err
 	}
+	gitopsType, gitopsErr := uc.manager.resolveOrderGitOpsType(ctx, order)
+	if gitopsErr != nil {
+		return false, false, gitopsErr
+	}
 	if _, refreshErr := uc.manager.refreshPipelineStages(ctx, order, runningExecution, binding); refreshErr != nil {
 		// 阶段刷新失败不直接打断主状态同步，避免短暂接口抖动影响发布闭环。
 	}
 
-	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode))
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
 			updated, finishErr := uc.finishStep(
 				ctx,
 				order.ID,
-				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+				scopeStepCode(runningExecution.PipelineScope, "health_check"),
 				domain.StepStatusFailed,
 				"ArgoCD 绑定未配置可用的 GitOps 子目录或 Application 标识",
 			)
@@ -336,7 +340,7 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 			updated, finishErr := uc.finishStep(
 				ctx,
 				order.ID,
-				scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+				scopeStepCode(runningExecution.PipelineScope, "health_check"),
 				domain.StepStatusFailed,
 				"ArgoCD Application 不存在，无法继续追踪部署状态",
 			)
@@ -348,7 +352,7 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 		updated, finishErr := uc.finishStep(
 			ctx,
 			order.ID,
-			scopeStepCode(runningExecution.PipelineScope, "pipeline_running"),
+			scopeStepCode(runningExecution.PipelineScope, "health_check"),
 			domain.StepStatusFailed,
 			"ArgoCD 绑定未配置可用的 GitOps 子目录或 Application 标识",
 		)
@@ -369,19 +373,15 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 			FinishedAt:    &now,
 			UpdatedAt:     now,
 		})
-		updated1, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, fmt.Sprintf("ArgoCD 应用已同步，sync=%s，health=%s", firstNonEmpty(app.GetSyncStatus(), "Synced"), firstNonEmpty(app.GetHealthStatus(), "Healthy")))
+		updated1, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "health_check"), domain.StepStatusSuccess, fmt.Sprintf("ArgoCD 应用已同步，sync=%s，health=%s", firstNonEmpty(app.GetSyncStatus(), "Synced"), firstNonEmpty(app.GetHealthStatus(), "Healthy")))
 		if err != nil {
 			return false, false, err
 		}
-		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, "ArgoCD 部署完成")
+		updated2, err := uc.syncNextStepAfterExecution(ctx, order)
 		if err != nil {
 			return false, false, err
 		}
-		updated3, err := uc.syncNextStepAfterExecution(ctx, order)
-		if err != nil {
-			return false, false, err
-		}
-		return updated1 || updated2 || updated3, false, nil
+		return updated1 || updated2, false, nil
 	case operationPhase == "failed" || healthStatus == "degraded":
 		now := uc.now()
 		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
@@ -392,19 +392,15 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 			UpdatedAt:     now,
 		})
 		message := fmt.Sprintf("ArgoCD 同步失败，sync=%s，health=%s，phase=%s", firstNonEmpty(app.GetSyncStatus(), "Unknown"), firstNonEmpty(app.GetHealthStatus(), "Unknown"), firstNonEmpty(app.GetOperationPhase(), "Unknown"))
-		updated, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_running"), domain.StepStatusFailed, message)
+		updated, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "health_check"), domain.StepStatusFailed, message)
 		if err != nil {
 			return false, false, err
 		}
-		updated2, err := uc.finishStep(ctx, order.ID, scopeStepCode(runningExecution.PipelineScope, "pipeline_success"), domain.StepStatusFailed, "ArgoCD 部署失败")
+		updated2, err := uc.failRemainingExecutions(ctx, order, executions, runningExecution.PipelineScope, "ArgoCD 部署失败，未继续执行后续阶段")
 		if err != nil {
 			return false, false, err
 		}
-		updated3, err := uc.failRemainingExecutions(ctx, order, executions, runningExecution.PipelineScope, "ArgoCD 部署失败，未继续执行后续阶段")
-		if err != nil {
-			return false, false, err
-		}
-		return updated || updated2 || updated3, false, nil
+		return updated || updated2, false, nil
 	default:
 		return false, false, nil
 	}
@@ -500,20 +496,12 @@ func (uc *TrackReleaseExecution) failRemainingExecutions(
 		}); err != nil {
 			return false, err
 		}
-		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "trigger_pipeline"), domain.StepStatusFailed, message); err != nil {
-			return false, err
-		} else if ok {
-			updated = true
-		}
-		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "pipeline_running"), domain.StepStatusFailed, message); err != nil {
-			return false, err
-		} else if ok {
-			updated = true
-		}
-		if ok, err := uc.finishStep(ctx, order.ID, scopeStepCode(item.PipelineScope, "pipeline_success"), domain.StepStatusFailed, message); err != nil {
-			return false, err
-		} else if ok {
-			updated = true
+		for _, code := range executionStepCodes(item) {
+			if ok, err := uc.finishStep(ctx, order.ID, code, domain.StepStatusFailed, message); err != nil {
+				return false, err
+			} else if ok {
+				updated = true
+			}
 		}
 	}
 	if _, err := uc.finishStep(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message); err != nil {

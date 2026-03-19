@@ -32,14 +32,15 @@ func (s Status) Valid() bool {
 }
 
 type PlatformParamDict struct {
-	ID          string
-	ParamKey    string
-	Name        string
-	Description string
-	ParamType   ParamType
-	Required    bool
-	Builtin     bool
-	Status      Status
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID            string
+	ParamKey      string
+	Name          string
+	Description   string
+	ParamType     ParamType
+	Required      bool
+	GitOpsLocator bool
+	Builtin       bool
+	Status        Status
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }

@@ -213,6 +213,7 @@ export interface ReleaseTemplate {
   binding_id: string
   binding_name: string
   binding_type: string
+  gitops_type: ReleaseTemplateGitOpsType
   status: ReleaseTemplateStatus
   remark: string
   param_count: number
@@ -251,6 +252,7 @@ export interface ReleaseTemplateParam {
 }
 
 export type ReleaseTemplateGitOpsRuleSourceFrom = 'ci' | 'builtin'
+export type ReleaseTemplateGitOpsType = '' | 'kustomize' | 'helm'
 
 export interface ReleaseTemplateGitOpsRule {
   id: string
@@ -259,6 +261,8 @@ export interface ReleaseTemplateGitOpsRule {
   source_param_key: string
   source_param_name: string
   source_from: ReleaseTemplateGitOpsRuleSourceFrom
+  locator_param_key: string
+  locator_param_name: string
   file_path_template: string
   document_kind: string
   document_name: string
@@ -272,6 +276,7 @@ export interface ReleaseTemplateGitOpsRule {
 export interface ReleaseTemplateGitOpsRulePayload {
   source_param_key: string
   source_from: ReleaseTemplateGitOpsRuleSourceFrom
+  locator_param_key?: string
   file_path_template: string
   document_kind: string
   document_name?: string
@@ -309,6 +314,7 @@ export interface ReleaseTemplatePayload {
   ci_binding_id?: string
   cd_binding_id?: string
   cd_provider?: string
+  gitops_type?: ReleaseTemplateGitOpsType
   status: ReleaseTemplateStatus
   remark?: string
   ci_param_def_ids: string[]
@@ -321,6 +327,7 @@ export interface UpdateReleaseTemplatePayload {
   ci_binding_id?: string
   cd_binding_id?: string
   cd_provider?: string
+  gitops_type?: ReleaseTemplateGitOpsType
   status: ReleaseTemplateStatus
   remark?: string
   ci_param_def_ids: string[]

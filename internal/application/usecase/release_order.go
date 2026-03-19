@@ -109,6 +109,13 @@ type GitOpsReleaseService interface {
 		rules []gitopsdomain.ManifestRule,
 		commitMessage string,
 	) (workspacePath string, changedFiles []string, commitSHA string, changed bool, err error)
+	ApplyValuesRules(
+		ctx context.Context,
+		repoURL string,
+		branch string,
+		rules []gitopsdomain.ValuesRule,
+		commitMessage string,
+	) (workspacePath string, changedFiles []string, commitSHA string, changed bool, err error)
 	BuildCommitMessage(fields map[string]string) string
 	RenderTemplate(template string, fields map[string]string) string
 }
@@ -212,7 +219,7 @@ func (uc *ReleaseOrderManager) Create(
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	steps, err := uc.buildCreateSteps(order.ID, now, executions, input.Steps)
+	steps, err := uc.buildCreateSteps(order.ID, now, executions, template.GitOpsType, input.Steps)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
@@ -683,10 +690,7 @@ func shouldFinishStepOnCancel(step domain.ReleaseOrderStep) bool {
 	if step.Status != domain.StepStatusPending {
 		return false
 	}
-	return strings.Contains(step.StepCode, ":trigger_pipeline") ||
-		strings.Contains(step.StepCode, ":pipeline_running") ||
-		strings.Contains(step.StepCode, ":pipeline_success") ||
-		step.StepCode == "global:release_finish"
+	return step.StepScope != domain.StepScopeGlobal || step.StepCode == "global:release_finish"
 }
 
 func (uc *ReleaseOrderManager) abortExecution(ctx context.Context, execution domain.ReleaseOrderExecution) string {
@@ -796,7 +800,11 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		case string(pipelinedomain.ProviderJenkins):
 			// Jenkins 执行继续走现有触发链路。
 		case string(pipelinedomain.ProviderArgoCD):
-			return uc.startArgoCDExecution(ctx, order, execution, orderParams)
+			if err := uc.startArgoCDExecution(ctx, order, execution, orderParams, executions); err != nil {
+				uc.markExecutionStartFailed(ctx, order, execution, err.Error())
+				return err
+			}
+			return nil
 		default:
 			now := uc.now()
 			_, err := uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
@@ -808,9 +816,13 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			if err != nil {
 				return err
 			}
-			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "trigger_pipeline"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非受支持执行器暂记为跳过")
-			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_running"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 非受支持执行器暂记为跳过")
-			_ = uc.markStepFinished(ctx, order.ID, scopeStepCode(execution.PipelineScope, "pipeline_success"), domain.StepStatusSuccess, strings.ToUpper(string(execution.PipelineScope))+" 已跳过")
+			for idx, code := range executionStepCodes(execution) {
+				message := strings.ToUpper(string(execution.PipelineScope)) + " 非受支持执行器暂记为跳过"
+				if idx == len(executionStepCodes(execution))-1 {
+					message = strings.ToUpper(string(execution.PipelineScope)) + " 已跳过"
+				}
+				_ = uc.markStepFinished(ctx, order.ID, code, domain.StepStatusSuccess, message)
+			}
 			continue
 		}
 
@@ -858,7 +870,7 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		_ = uc.markStepRunning(ctx, order.ID, triggerCode, "开始触发 "+strings.ToUpper(string(execution.PipelineScope))+" Jenkins 管线")
 		queueURL, triggerErr := uc.jenkins.TriggerBuild(ctx, pipeline.JobFullName, buildParams)
 		if triggerErr != nil {
-			_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusFailed, "触发 Jenkins 失败: "+triggerErr.Error())
+			uc.markExecutionStartFailed(ctx, order, execution, "触发 Jenkins 失败: "+triggerErr.Error())
 			return fmt.Errorf("%w: trigger jenkins failed: %v", ErrInvalidInput, triggerErr)
 		}
 
@@ -887,6 +899,58 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 	_ = uc.markStepRunning(ctx, order.ID, "global:release_finish", "所有执行单元已完成")
 	_ = uc.markStepFinished(ctx, order.ID, "global:release_finish", domain.StepStatusSuccess, "发布完成")
 	return nil
+}
+
+func (uc *ReleaseOrderManager) markExecutionStartFailed(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
+	message string,
+) {
+	message = strings.TrimSpace(message)
+	now := uc.now()
+	_, _ = uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+		Status:     domain.ExecutionStatusFailed,
+		StartedAt:  &now,
+		FinishedAt: &now,
+		UpdatedAt:  now,
+	})
+	_ = uc.markOpenExecutionStepsFailed(ctx, order.ID, execution, message)
+	_ = uc.markStepFinished(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message)
+	_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now)
+}
+
+func (uc *ReleaseOrderManager) markOpenExecutionStepsFailed(
+	ctx context.Context,
+	orderID string,
+	execution domain.ReleaseOrderExecution,
+	message string,
+) error {
+	steps, err := uc.repo.ListSteps(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	for _, code := range executionStepCodes(execution) {
+		current := findStepByCode(steps, code)
+		if current == nil || current.Status == domain.StepStatusSuccess || current.Status == domain.StepStatusFailed {
+			continue
+		}
+		if err := uc.markStepFinished(ctx, orderID, code, domain.StepStatusFailed, message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (uc *ReleaseOrderManager) resolveOrderGitOpsType(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+) (domain.GitOpsType, error) {
+	template, _, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(order.TemplateID))
+	if err != nil {
+		return "", err
+	}
+	return normalizeTemplateGitOpsType(template.GitOpsType, true), nil
 }
 
 func scopeStepCode(scope domain.PipelineScope, suffix string) string {
@@ -1182,10 +1246,11 @@ func (uc *ReleaseOrderManager) buildCreateSteps(
 	orderID string,
 	now time.Time,
 	executions []domain.ReleaseOrderExecution,
+	gitopsType domain.GitOpsType,
 	input []CreateReleaseOrderStepInput,
 ) ([]domain.ReleaseOrderStep, error) {
 	if len(input) == 0 {
-		return defaultReleaseOrderSteps(orderID, executions, now), nil
+		return defaultReleaseOrderSteps(orderID, executions, now, gitopsType), nil
 	}
 
 	items := make([]domain.ReleaseOrderStep, 0, len(input))
@@ -1223,7 +1288,46 @@ func (uc *ReleaseOrderManager) buildCreateSteps(
 	return items, nil
 }
 
-func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderExecution, now time.Time) []domain.ReleaseOrderStep {
+type releaseExecutionStepDef struct {
+	Suffix string
+	Name   string
+}
+
+func defaultExecutionStepDefs(
+	execution domain.ReleaseOrderExecution,
+	gitopsType domain.GitOpsType,
+) []releaseExecutionStepDef {
+	scopeLabel := strings.ToUpper(string(execution.PipelineScope))
+	if isArgoCDExecution(execution) {
+		updateName := "CD 更新 GitOps 配置"
+		if normalizeTemplateGitOpsType(gitopsType, true) == domain.GitOpsTypeHelm {
+			updateName = "CD 更新 Helm Values"
+		}
+		return []releaseExecutionStepDef{
+			{Suffix: "gitops_update", Name: updateName},
+			{Suffix: "git_commit", Name: "CD Git 提交"},
+			{Suffix: "git_push", Name: "CD Git 推送"},
+			{Suffix: "argocd_sync", Name: "CD 触发 ArgoCD"},
+			{Suffix: "health_check", Name: "CD 健康检查"},
+		}
+	}
+	return []releaseExecutionStepDef{
+		{Suffix: "trigger_pipeline", Name: scopeLabel + " 触发管线"},
+		{Suffix: "pipeline_running", Name: scopeLabel + " 管线运行"},
+		{Suffix: "pipeline_success", Name: scopeLabel + " 发布完成"},
+	}
+}
+
+func executionStepCodes(execution domain.ReleaseOrderExecution) []string {
+	defs := defaultExecutionStepDefs(execution, "")
+	result := make([]string, 0, len(defs))
+	for _, item := range defs {
+		result = append(result, scopeStepCode(execution.PipelineScope, item.Suffix))
+	}
+	return result
+}
+
+func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderExecution, now time.Time, gitopsType domain.GitOpsType) []domain.ReleaseOrderStep {
 	items := make([]domain.ReleaseOrderStep, 0, 8)
 	sortNo := 1
 	appendStep := func(scope domain.StepScope, executionID string, code string, name string) {
@@ -1243,11 +1347,10 @@ func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderEx
 
 	appendStep(domain.StepScopeGlobal, "", "global:param_resolve", "参数解析")
 	for _, execution := range orderExecutionsByScope(executions) {
-		scopeLabel := strings.ToUpper(string(execution.PipelineScope))
 		stepScope := domain.StepScope(strings.ToLower(string(execution.PipelineScope)))
-		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":trigger_pipeline", scopeLabel+" 触发管线")
-		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":pipeline_running", scopeLabel+" 管线运行")
-		appendStep(stepScope, execution.ID, string(execution.PipelineScope)+":pipeline_success", scopeLabel+" 发布完成")
+		for _, stepDef := range defaultExecutionStepDefs(execution, gitopsType) {
+			appendStep(stepScope, execution.ID, scopeStepCode(execution.PipelineScope, stepDef.Suffix), stepDef.Name)
+		}
 	}
 	appendStep(domain.StepScopeGlobal, "", "global:release_finish", "发布完成")
 	return items

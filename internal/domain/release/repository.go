@@ -35,6 +35,7 @@ type Repository interface {
 	ListParams(ctx context.Context, releaseOrderID string) ([]ReleaseOrderParam, error)
 	ListSteps(ctx context.Context, releaseOrderID string) ([]ReleaseOrderStep, error)
 	GetStepByCode(ctx context.Context, releaseOrderID string, stepCode string) (ReleaseOrderStep, error)
+	ReplaceSteps(ctx context.Context, releaseOrderID string, steps []ReleaseOrderStep) error
 	ReplacePipelineStages(ctx context.Context, releaseOrderID string, stages []ReleaseOrderPipelineStage) error
 	ListPipelineStages(ctx context.Context, releaseOrderID string) ([]ReleaseOrderPipelineStage, error)
 	GetPipelineStageByID(ctx context.Context, releaseOrderID string, stageID string) (ReleaseOrderPipelineStage, error)

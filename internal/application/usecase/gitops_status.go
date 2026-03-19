@@ -75,6 +75,7 @@ type QueryGitOpsTemplateFields struct {
 
 type GitOpsFieldCandidateReader interface {
 	ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error)
+	ListValuesCandidates(ctx context.Context, appKey string) ([]gitopsdomain.ValuesCandidate, error)
 }
 
 type QueryGitOpsFieldCandidateOutput struct {
@@ -88,6 +89,19 @@ type QueryGitOpsFieldCandidateOutput struct {
 }
 
 type QueryGitOpsFieldCandidates struct {
+	appRepo appdomain.Repository
+	reader  GitOpsFieldCandidateReader
+}
+
+type QueryGitOpsValuesCandidateOutput struct {
+	FilePathTemplate string `json:"file_path_template"`
+	TargetPath       string `json:"target_path"`
+	ValueType        string `json:"value_type"`
+	SampleValue      string `json:"sample_value"`
+	DisplayName      string `json:"display_name"`
+}
+
+type QueryGitOpsValuesCandidates struct {
 	appRepo appdomain.Repository
 	reader  GitOpsFieldCandidateReader
 }
@@ -109,6 +123,13 @@ func NewQueryGitOpsFieldCandidates(
 	reader GitOpsFieldCandidateReader,
 ) *QueryGitOpsFieldCandidates {
 	return &QueryGitOpsFieldCandidates{appRepo: appRepo, reader: reader}
+}
+
+func NewQueryGitOpsValuesCandidates(
+	appRepo appdomain.Repository,
+	reader GitOpsFieldCandidateReader,
+) *QueryGitOpsValuesCandidates {
+	return &QueryGitOpsValuesCandidates{appRepo: appRepo, reader: reader}
 }
 
 func (uc *QueryGitOpsStatus) Execute(ctx context.Context) (QueryGitOpsStatusOutput, error) {
@@ -228,6 +249,42 @@ func (uc *QueryGitOpsFieldCandidates) Execute(
 			FilePathTemplate: strings.TrimSpace(item.FilePathTemplate),
 			DocumentKind:     strings.TrimSpace(item.DocumentKind),
 			DocumentName:     strings.TrimSpace(item.DocumentName),
+			TargetPath:       strings.TrimSpace(item.TargetPath),
+			ValueType:        strings.TrimSpace(item.ValueType),
+			SampleValue:      strings.TrimSpace(item.SampleValue),
+			DisplayName:      strings.TrimSpace(item.DisplayName),
+		})
+	}
+	return result, nil
+}
+
+func (uc *QueryGitOpsValuesCandidates) Execute(
+	ctx context.Context,
+	applicationID string,
+) ([]QueryGitOpsValuesCandidateOutput, error) {
+	if uc == nil || uc.appRepo == nil || uc.reader == nil {
+		return nil, fmt.Errorf("%w: gitops manager is not configured", ErrInvalidInput)
+	}
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		return nil, fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+	}
+	app, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
+		return nil, err
+	}
+	appKey := strings.TrimSpace(app.Key)
+	if appKey == "" {
+		return nil, fmt.Errorf("%w: application key is required", ErrInvalidInput)
+	}
+	items, err := uc.reader.ListValuesCandidates(ctx, appKey)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]QueryGitOpsValuesCandidateOutput, 0, len(items))
+	for _, item := range items {
+		result = append(result, QueryGitOpsValuesCandidateOutput{
+			FilePathTemplate: strings.TrimSpace(item.FilePathTemplate),
 			TargetPath:       strings.TrimSpace(item.TargetPath),
 			ValueType:        strings.TrimSpace(item.ValueType),
 			SampleValue:      strings.TrimSpace(item.SampleValue),

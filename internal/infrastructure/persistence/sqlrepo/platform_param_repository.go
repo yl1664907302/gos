@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 	description VARCHAR(500) NOT NULL,
 	param_type VARCHAR(50) NOT NULL,
 	required TINYINT(1) NOT NULL,
+	gitops_locator TINYINT(1) NOT NULL DEFAULT 0,
 	builtin TINYINT(1) NOT NULL,
 	status TINYINT(1) NOT NULL,
 	created_at BIGINT NOT NULL,
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 	description TEXT NOT NULL,
 	param_type TEXT NOT NULL,
 	required INTEGER NOT NULL,
+	gitops_locator INTEGER NOT NULL DEFAULT 0,
 	builtin INTEGER NOT NULL,
 	status INTEGER NOT NULL,
 	created_at INTEGER NOT NULL,
@@ -69,23 +71,61 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 			return err
 		}
 	}
+	if err := r.migrateSchema(ctx); err != nil {
+		return err
+	}
 	return r.ensureBuiltinParams(ctx)
+}
+
+func (r *PlatformParamRepository) migrateSchema(ctx context.Context) error {
+	switch r.dbDriver {
+	case "mysql":
+		exists, err := r.mysqlColumnExists(ctx, "platform_param_dict", "gitops_locator")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE platform_param_dict ADD COLUMN gitops_locator TINYINT(1) NOT NULL DEFAULT 0 AFTER required;`,
+			); err != nil {
+				return err
+			}
+		}
+	case "sqlite":
+		columns, err := r.sqliteTableColumns(ctx, "platform_param_dict")
+		if err != nil {
+			return err
+		}
+		if _, ok := columns["gitops_locator"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE platform_param_dict ADD COLUMN gitops_locator INTEGER NOT NULL DEFAULT 0;`,
+			); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+	return nil
 }
 
 func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error {
 	now := time.Now().UTC()
 	items := []domain.PlatformParamDict{
 		{
-			ID:          "ppd-image-version",
-			ParamKey:    "image_version",
-			Name:        "镜像版本",
-			Description: "平台自动分配；Jenkins CI 默认取本次构建号 BUILD_NUMBER",
-			ParamType:   domain.ParamTypeString,
-			Required:    false,
-			Builtin:     true,
-			Status:      domain.StatusEnabled,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+			ID:            "ppd-image-version",
+			ParamKey:      "image_version",
+			Name:          "镜像版本",
+			Description:   "平台自动分配；Jenkins CI 默认取本次构建号 BUILD_NUMBER",
+			ParamType:     domain.ParamTypeString,
+			Required:      false,
+			GitOpsLocator: false,
+			Builtin:       true,
+			Status:        domain.StatusEnabled,
+			CreatedAt:     now,
+			UpdatedAt:     now,
 		},
 	}
 
@@ -104,13 +144,14 @@ func (r *PlatformParamRepository) upsertBuiltinParam(ctx context.Context, item d
 	case "mysql":
 		const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
 	name = VALUES(name),
 	description = VALUES(description),
 	param_type = VALUES(param_type),
 	required = VALUES(required),
+	gitops_locator = VALUES(gitops_locator),
 	builtin = VALUES(builtin),
 	status = VALUES(status),
 	updated_at = VALUES(updated_at);`
@@ -123,6 +164,7 @@ ON DUPLICATE KEY UPDATE
 			item.Description,
 			string(item.ParamType),
 			boolToInt(item.Required),
+			boolToInt(item.GitOpsLocator),
 			boolToInt(item.Builtin),
 			int(item.Status),
 			item.CreatedAt.UTC().UnixNano(),
@@ -132,13 +174,14 @@ ON DUPLICATE KEY UPDATE
 	case "sqlite":
 		const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(param_key) DO UPDATE SET
 	name = excluded.name,
 	description = excluded.description,
 	param_type = excluded.param_type,
 	required = excluded.required,
+	gitops_locator = excluded.gitops_locator,
 	builtin = excluded.builtin,
 	status = excluded.status,
 	updated_at = excluded.updated_at;`
@@ -151,6 +194,7 @@ ON CONFLICT(param_key) DO UPDATE SET
 			item.Description,
 			string(item.ParamType),
 			boolToInt(item.Required),
+			boolToInt(item.GitOpsLocator),
 			boolToInt(item.Builtin),
 			int(item.Status),
 			item.CreatedAt.UTC().UnixNano(),
@@ -188,8 +232,8 @@ func (r *PlatformParamRepository) normalizeBuiltinFlags(ctx context.Context, bui
 func (r *PlatformParamRepository) Create(ctx context.Context, item domain.PlatformParamDict) error {
 	const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err := r.db.ExecContext(
 		ctx,
@@ -200,6 +244,7 @@ INSERT INTO platform_param_dict (
 		item.Description,
 		string(item.ParamType),
 		boolToInt(item.Required),
+		boolToInt(item.GitOpsLocator),
 		boolToInt(item.Builtin),
 		int(item.Status),
 		item.CreatedAt.UTC().UnixNano(),
@@ -216,7 +261,7 @@ INSERT INTO platform_param_dict (
 
 func (r *PlatformParamRepository) GetByID(ctx context.Context, id string) (domain.PlatformParamDict, error) {
 	const q = `
-SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
 FROM platform_param_dict
 WHERE id = ?;`
 
@@ -233,7 +278,7 @@ WHERE id = ?;`
 
 func (r *PlatformParamRepository) GetByParamKey(ctx context.Context, paramKey string) (domain.PlatformParamDict, error) {
 	const q = `
-SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
 FROM platform_param_dict
 WHERE param_key = ?;`
 
@@ -268,6 +313,10 @@ func (r *PlatformParamRepository) List(ctx context.Context, filter domain.ListFi
 		where = append(where, "builtin = ?")
 		args = append(args, boolToInt(*filter.Builtin))
 	}
+	if filter.GitOpsLocator != nil {
+		where = append(where, "gitops_locator = ?")
+		args = append(args, boolToInt(*filter.GitOpsLocator))
+	}
 
 	countQuery := "SELECT COUNT(1) FROM platform_param_dict"
 	if len(where) > 0 {
@@ -279,7 +328,7 @@ func (r *PlatformParamRepository) List(ctx context.Context, filter domain.ListFi
 	}
 
 	listQuery := `
-SELECT id, param_key, name, description, param_type, required, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
 FROM platform_param_dict`
 	if len(where) > 0 {
 		listQuery += " WHERE " + strings.Join(where, " AND ")
@@ -310,7 +359,7 @@ FROM platform_param_dict`
 func (r *PlatformParamRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.PlatformParamDict, error) {
 	const q = `
 UPDATE platform_param_dict
-SET param_key = ?, name = ?, description = ?, param_type = ?, required = ?, builtin = ?, status = ?, updated_at = ?
+SET param_key = ?, name = ?, description = ?, param_type = ?, required = ?, gitops_locator = ?, builtin = ?, status = ?, updated_at = ?
 WHERE id = ?;`
 
 	res, err := r.db.ExecContext(
@@ -321,6 +370,7 @@ WHERE id = ?;`
 		input.Description,
 		string(input.ParamType),
 		boolToInt(input.Required),
+		boolToInt(input.GitOpsLocator),
 		boolToInt(input.Builtin),
 		int(input.Status),
 		updatedAt.UTC().UnixNano(),
@@ -360,13 +410,14 @@ func (r *PlatformParamRepository) Delete(ctx context.Context, id string) error {
 
 func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 	var (
-		item      domain.PlatformParamDict
-		paramType string
-		required  int
-		builtin   int
-		status    int
-		createdAt int64
-		updatedAt int64
+		item          domain.PlatformParamDict
+		paramType     string
+		required      int
+		gitopsLocator int
+		builtin       int
+		status        int
+		createdAt     int64
+		updatedAt     int64
 	)
 
 	if err := s.Scan(
@@ -376,6 +427,7 @@ func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 		&item.Description,
 		&paramType,
 		&required,
+		&gitopsLocator,
 		&builtin,
 		&status,
 		&createdAt,
@@ -386,11 +438,54 @@ func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 
 	item.ParamType = domain.ParamType(paramType)
 	item.Required = required > 0
+	item.GitOpsLocator = gitopsLocator > 0
 	item.Builtin = builtin > 0
 	item.Status = domain.Status(status)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
+}
+
+func (r *PlatformParamRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {
+	const q = `
+SELECT COUNT(1)
+FROM information_schema.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE()
+  AND TABLE_NAME = ?
+  AND COLUMN_NAME = ?;`
+	var count int
+	if err := r.db.QueryRowContext(ctx, q, table, column).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (r *PlatformParamRepository) sqliteTableColumns(ctx context.Context, table string) (map[string]string, error) {
+	rows, err := r.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s);`, table))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := make(map[string]string)
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return nil, err
+		}
+		columns[strings.ToLower(strings.TrimSpace(name))] = columnType
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func boolToInt(v bool) int {

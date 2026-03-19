@@ -54,6 +54,7 @@ const formState = reactive<FormState>({
   description: '',
   param_type: 'string',
   required: false,
+  gitops_locator: false,
   status: 1,
 })
 
@@ -63,6 +64,7 @@ const initialColumns: TableColumnsType<PlatformParamDict> = [
   { title: '字段说明', dataIndex: 'description', key: 'description', width: 260, ellipsis: true },
   { title: '字段类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
   { title: '默认必填', dataIndex: 'required', key: 'required', width: 110 },
+  { title: 'GitOps定位', dataIndex: 'gitops_locator', key: 'gitops_locator', width: 120 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 110 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
   { title: '操作', key: 'actions', width: 220, fixed: 'right' },
@@ -113,6 +115,7 @@ function resetFormState() {
   formState.description = ''
   formState.param_type = 'string'
   formState.required = false
+  formState.gitops_locator = false
   formState.status = 1
 }
 
@@ -123,6 +126,7 @@ function toPayload(): PlatformParamDictPayload {
     description: formState.description.trim(),
     param_type: formState.param_type,
     required: formState.required,
+    gitops_locator: formState.gitops_locator,
     status: formState.status,
   }
 }
@@ -186,6 +190,7 @@ async function openEditModal(record: PlatformParamDict) {
     formState.description = item.description
     formState.param_type = item.param_type
     formState.required = item.required
+    formState.gitops_locator = item.gitops_locator
     formState.status = item.status
     modalVisible.value = true
   } catch (error) {
@@ -328,6 +333,9 @@ onMounted(() => {
           <template v-else-if="column.key === 'required'">
             {{ boolText(record.required) }}
           </template>
+          <template v-else-if="column.key === 'gitops_locator'">
+            {{ boolText(record.gitops_locator) }}
+          </template>
           <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ statusText(record.status) }}</a-tag>
           </template>
@@ -433,6 +441,14 @@ onMounted(() => {
           <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
         </a-form-item>
 
+        <a-form-item label="GitOps 定位字段" name="gitops_locator">
+          <a-switch
+            v-model:checked="formState.gitops_locator"
+            checked-children="是"
+            un-checked-children="否"
+          />
+        </a-form-item>
+
         <a-form-item label="状态" name="status" :rules="[{ required: true, message: '请选择状态' }]">
           <a-select v-model:value="formState.status" :options="statusOptions" />
         </a-form-item>
@@ -455,6 +471,7 @@ onMounted(() => {
         <a-descriptions-item label="字段说明">{{ detailData.description || '-' }}</a-descriptions-item>
         <a-descriptions-item label="字段类型">{{ detailData.param_type }}</a-descriptions-item>
         <a-descriptions-item label="默认必填">{{ boolText(detailData.required) }}</a-descriptions-item>
+        <a-descriptions-item label="GitOps 定位字段">{{ boolText(detailData.gitops_locator) }}</a-descriptions-item>
         <a-descriptions-item label="状态">{{ statusText(detailData.status) }}</a-descriptions-item>
         <a-descriptions-item label="创建时间">{{ formatTime(detailData.created_at) }}</a-descriptions-item>
         <a-descriptions-item label="更新时间">{{ formatTime(detailData.updated_at) }}</a-descriptions-item>

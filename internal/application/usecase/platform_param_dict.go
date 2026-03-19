@@ -20,12 +20,13 @@ type PlatformParamDictManager struct {
 }
 
 type CreatePlatformParamDictInput struct {
-	ParamKey    string
-	Name        string
-	Description string
-	ParamType   domain.ParamType
-	Required    bool
-	Status      domain.Status
+	ParamKey      string
+	Name          string
+	Description   string
+	ParamType     domain.ParamType
+	Required      bool
+	GitOpsLocator bool
+	Status        domain.Status
 }
 
 func NewPlatformParamDictManager(repo domain.Repository, paramRepo pipelineparamdomain.Repository) *PlatformParamDictManager {
@@ -58,12 +59,13 @@ func (uc *PlatformParamDictManager) Create(ctx context.Context, input CreatePlat
 
 	now := uc.now()
 	item := domain.PlatformParamDict{
-		ID:          generateID("ppd"),
-		ParamKey:    paramKey,
-		Name:        name,
-		Description: strings.TrimSpace(input.Description),
-		ParamType:   input.ParamType,
-		Required:    input.Required,
+		ID:            generateID("ppd"),
+		ParamKey:      paramKey,
+		Name:          name,
+		Description:   strings.TrimSpace(input.Description),
+		ParamType:     input.ParamType,
+		Required:      input.Required,
+		GitOpsLocator: input.GitOpsLocator,
 		// Manual entries are always non-builtin. Builtin keys are seeded by the platform.
 		Builtin:   false,
 		Status:    status,
@@ -146,11 +148,12 @@ func (uc *PlatformParamDictManager) Update(ctx context.Context, id string, input
 	}
 
 	clean := domain.UpdateInput{
-		ParamKey:    paramKey,
-		Name:        strings.TrimSpace(input.Name),
-		Description: strings.TrimSpace(input.Description),
-		ParamType:   input.ParamType,
-		Required:    input.Required,
+		ParamKey:      paramKey,
+		Name:          strings.TrimSpace(input.Name),
+		Description:   strings.TrimSpace(input.Description),
+		ParamType:     input.ParamType,
+		Required:      input.Required,
+		GitOpsLocator: input.GitOpsLocator,
 		// Builtin fields are not editable; manual fields remain non-builtin.
 		Builtin: false,
 		Status:  input.Status,

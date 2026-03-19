@@ -34,34 +34,37 @@ func (h *PlatformParamHandler) RegisterRoutes(router gin.IRouter) {
 }
 
 type CreatePlatformParamDictRequest struct {
-	ParamKey    string `json:"param_key"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ParamType   string `json:"param_type"`
-	Required    bool   `json:"required"`
-	Status      *int   `json:"status"`
+	ParamKey      string `json:"param_key"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ParamType     string `json:"param_type"`
+	Required      bool   `json:"required"`
+	GitOpsLocator bool   `json:"gitops_locator"`
+	Status        *int   `json:"status"`
 }
 
 type UpdatePlatformParamDictRequest struct {
-	ParamKey    string `json:"param_key"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	ParamType   string `json:"param_type"`
-	Required    bool   `json:"required"`
-	Status      int    `json:"status"`
+	ParamKey      string `json:"param_key"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	ParamType     string `json:"param_type"`
+	Required      bool   `json:"required"`
+	GitOpsLocator bool   `json:"gitops_locator"`
+	Status        int    `json:"status"`
 }
 
 type PlatformParamDictResponse struct {
-	ID          string    `json:"id"`
-	ParamKey    string    `json:"param_key"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	ParamType   string    `json:"param_type"`
-	Required    bool      `json:"required"`
-	Builtin     bool      `json:"builtin"`
-	Status      int       `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID            string    `json:"id"`
+	ParamKey      string    `json:"param_key"`
+	Name          string    `json:"name"`
+	Description   string    `json:"description"`
+	ParamType     string    `json:"param_type"`
+	Required      bool      `json:"required"`
+	GitOpsLocator bool      `json:"gitops_locator"`
+	Builtin       bool      `json:"builtin"`
+	Status        int       `json:"status"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type PlatformParamDictDataResponse struct {
@@ -97,12 +100,13 @@ func (h *PlatformParamHandler) Create(c *gin.Context) {
 	}
 
 	item, err := h.manager.Create(c.Request.Context(), usecase.CreatePlatformParamDictInput{
-		ParamKey:    req.ParamKey,
-		Name:        req.Name,
-		Description: req.Description,
-		ParamType:   domain.ParamType(strings.TrimSpace(req.ParamType)),
-		Required:    req.Required,
-		Status:      createPlatformParamStatus(req.Status),
+		ParamKey:      req.ParamKey,
+		Name:          req.Name,
+		Description:   req.Description,
+		ParamType:     domain.ParamType(strings.TrimSpace(req.ParamType)),
+		Required:      req.Required,
+		GitOpsLocator: req.GitOpsLocator,
+		Status:        createPlatformParamStatus(req.Status),
 	})
 	if err != nil {
 		writePlatformParamHTTPError(c, err)
@@ -221,12 +225,13 @@ func (h *PlatformParamHandler) Update(c *gin.Context) {
 	}
 
 	item, err := h.manager.Update(c.Request.Context(), c.Param("id"), domain.UpdateInput{
-		ParamKey:    req.ParamKey,
-		Name:        req.Name,
-		Description: req.Description,
-		ParamType:   domain.ParamType(strings.TrimSpace(req.ParamType)),
-		Required:    req.Required,
-		Status:      domain.Status(req.Status),
+		ParamKey:      req.ParamKey,
+		Name:          req.Name,
+		Description:   req.Description,
+		ParamType:     domain.ParamType(strings.TrimSpace(req.ParamType)),
+		Required:      req.Required,
+		GitOpsLocator: req.GitOpsLocator,
+		Status:        domain.Status(req.Status),
 	})
 	if err != nil {
 		writePlatformParamHTTPError(c, err)
@@ -259,16 +264,17 @@ func (h *PlatformParamHandler) Delete(c *gin.Context) {
 
 func toPlatformParamResponse(item domain.PlatformParamDict) PlatformParamDictResponse {
 	return PlatformParamDictResponse{
-		ID:          item.ID,
-		ParamKey:    item.ParamKey,
-		Name:        item.Name,
-		Description: item.Description,
-		ParamType:   string(item.ParamType),
-		Required:    item.Required,
-		Builtin:     item.Builtin,
-		Status:      int(item.Status),
-		CreatedAt:   item.CreatedAt,
-		UpdatedAt:   item.UpdatedAt,
+		ID:            item.ID,
+		ParamKey:      item.ParamKey,
+		Name:          item.Name,
+		Description:   item.Description,
+		ParamType:     string(item.ParamType),
+		Required:      item.Required,
+		GitOpsLocator: item.GitOpsLocator,
+		Builtin:       item.Builtin,
+		Status:        int(item.Status),
+		CreatedAt:     item.CreatedAt,
+		UpdatedAt:     item.UpdatedAt,
 	}
 }
 

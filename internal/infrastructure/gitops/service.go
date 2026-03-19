@@ -305,7 +305,15 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 		return []gitopsdomain.FieldCandidate{}, nil
 	}
 
-	overlayRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", appKey, "overlays")
+	resolvedAppDir, err := s.resolveAppDirectory(strings.TrimSpace(status.LocalRoot), appKey)
+	if err != nil {
+		return nil, err
+	}
+	if resolvedAppDir == "" {
+		return []gitopsdomain.FieldCandidate{}, nil
+	}
+
+	overlayRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", resolvedAppDir, "overlays")
 	envEntries, err := os.ReadDir(overlayRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -336,7 +344,7 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 			if !strings.HasSuffix(lowerName, ".yaml") && !strings.HasSuffix(lowerName, ".yml") {
 				return nil
 			}
-			items, scanErr := scanYAMLFieldCandidates(path, appKey, environment)
+			items, scanErr := scanYAMLFieldCandidates(path, resolvedAppDir, environment)
 			if scanErr != nil {
 				return scanErr
 			}
@@ -363,6 +371,75 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 	sort.Slice(result, func(i, j int) bool {
 		left := strings.Join([]string{result[i].FilePathTemplate, result[i].DocumentKind, result[i].DocumentName, result[i].TargetPath}, "::")
 		right := strings.Join([]string{result[j].FilePathTemplate, result[j].DocumentKind, result[j].DocumentName, result[j].TargetPath}, "::")
+		return strings.Compare(left, right) < 0
+	})
+	return result, nil
+}
+
+// ListValuesCandidates 扫描应用目录下的 Helm values 文件标量路径，供模板页做受控选择。
+//
+// 当前策略保持克制：
+// 1. 只扫描文件名包含 values 的 .yaml/.yml；
+// 2. 只暴露标量叶子节点；
+// 3. 会把实际环境目录替换成 {env}，便于用户生成稳定模板。
+func (s *Service) ListValuesCandidates(ctx context.Context, appKey string) ([]gitopsdomain.ValuesCandidate, error) {
+	status, err := s.GetStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !status.Enabled || !status.PathExists || !status.IsGitRepo {
+		return []gitopsdomain.ValuesCandidate{}, nil
+	}
+
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return []gitopsdomain.ValuesCandidate{}, nil
+	}
+
+	resolvedAppDir, err := s.resolveAppDirectory(strings.TrimSpace(status.LocalRoot), appKey)
+	if err != nil {
+		return nil, err
+	}
+	if resolvedAppDir == "" {
+		return []gitopsdomain.ValuesCandidate{}, nil
+	}
+
+	appRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", resolvedAppDir)
+	result := make([]gitopsdomain.ValuesCandidate, 0)
+	seen := make(map[string]struct{})
+	walkErr := filepath.Walk(appRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info == nil || info.IsDir() {
+			return nil
+		}
+		lowerName := strings.ToLower(info.Name())
+		if (!strings.HasSuffix(lowerName, ".yaml") && !strings.HasSuffix(lowerName, ".yml")) ||
+			!strings.Contains(lowerName, "values") {
+			return nil
+		}
+		items, scanErr := scanValuesCandidates(path, resolvedAppDir)
+		if scanErr != nil {
+			return scanErr
+		}
+		for _, item := range items {
+			key := strings.Join([]string{item.FilePathTemplate, item.TargetPath}, "::")
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, item)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.Join([]string{result[i].FilePathTemplate, result[i].TargetPath}, "::")
+		right := strings.Join([]string{result[j].FilePathTemplate, result[j].TargetPath}, "::")
 		return strings.Compare(left, right) < 0
 	})
 	return result, nil
@@ -555,6 +632,106 @@ func (s *Service) ApplyManifestRules(
 			return workspacePath, nil, "", false, readErr
 		}
 		updated, fileChanged, applyErr := applyManifestRulesToFile(content, items)
+		if applyErr != nil {
+			return workspacePath, nil, "", false, applyErr
+		}
+		if !fileChanged {
+			continue
+		}
+		if writeErr := os.WriteFile(absolutePath, updated, 0o644); writeErr != nil {
+			return workspacePath, nil, "", false, writeErr
+		}
+		relativeChanged = append(relativeChanged, relativePath)
+	}
+
+	if len(relativeChanged) == 0 {
+		commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
+		if err != nil {
+			return workspacePath, []string{}, "", false, err
+		}
+		return workspacePath, []string{}, commitSHA, false, nil
+	}
+
+	sort.Strings(relativeChanged)
+	addArgs := append([]string{"add"}, relativeChanged...)
+	if _, err := s.runGit(ctx, workspacePath, addArgs...); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	if _, err := s.runGit(ctx, workspacePath, "commit", "-m", commitMessage); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	if _, err := s.runGit(ctx, workspacePath, "push", "origin", branch); err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
+	if err != nil {
+		return workspacePath, nil, "", false, err
+	}
+	return workspacePath, append([]string(nil), relativeChanged...), commitSHA, true, nil
+}
+
+// ApplyValuesRules 将 Helm values 规则写回到 GitOps 仓库，并独立提交一次 Git 变更。
+func (s *Service) ApplyValuesRules(
+	ctx context.Context,
+	repoURL string,
+	branch string,
+	rules []gitopsdomain.ValuesRule,
+	commitMessage string,
+) (workspacePath string, changedFiles []string, commitSHA string, changed bool, err error) {
+	if !s.Enabled() {
+		return "", nil, "", false, fmt.Errorf("gitops service is not configured")
+	}
+	if len(rules) == 0 {
+		return "", []string{}, "", false, nil
+	}
+
+	repoURL = strings.TrimSpace(repoURL)
+	branch = resolveBranch(branch, s.defaultBranch)
+	commitMessage = strings.TrimSpace(commitMessage)
+	if repoURL == "" {
+		return "", nil, "", false, fmt.Errorf("gitops repo url is required")
+	}
+	if commitMessage == "" {
+		commitMessage = "chore(gitops): update helm values"
+	}
+
+	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
+	if err != nil {
+		return "", nil, "", false, err
+	}
+	if err = os.MkdirAll(s.localRoot, 0o755); err != nil {
+		return "", nil, "", false, err
+	}
+	if err = s.prepareWorkspace(ctx, repoURL, branch, workspacePath); err != nil {
+		return "", nil, "", false, err
+	}
+	if err = s.configureAuthor(ctx, workspacePath); err != nil {
+		return "", nil, "", false, err
+	}
+
+	grouped := make(map[string][]gitopsdomain.ValuesRule)
+	for _, item := range rules {
+		filePath := strings.TrimSpace(item.FilePath)
+		if filePath == "" {
+			continue
+		}
+		grouped[filePath] = append(grouped[filePath], item)
+	}
+	if len(grouped) == 0 {
+		return workspacePath, []string{}, "", false, nil
+	}
+
+	relativeChanged := make([]string, 0, len(grouped))
+	for relativePath, items := range grouped {
+		absolutePath, joinErr := secureJoin(workspacePath, relativePath)
+		if joinErr != nil {
+			return workspacePath, nil, "", false, joinErr
+		}
+		content, readErr := os.ReadFile(absolutePath)
+		if readErr != nil {
+			return workspacePath, nil, "", false, readErr
+		}
+		updated, fileChanged, applyErr := applyValuesRulesToFile(content, items)
 		if applyErr != nil {
 			return workspacePath, nil, "", false, applyErr
 		}
@@ -788,6 +965,59 @@ func resolveBranch(candidate string, fallback string) string {
 	return candidate
 }
 
+func (s *Service) resolveAppDirectory(localRoot string, appKey string) (string, error) {
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return "", nil
+	}
+	root := filepath.Join(strings.TrimSpace(localRoot), "apps")
+	exactPath := filepath.Join(root, appKey)
+	if info, err := os.Stat(exactPath); err == nil && info.IsDir() {
+		return appKey, nil
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	targets := []string{
+		normalizeAppDirectoryKey(appKey),
+		normalizeAppDirectoryKey(strings.ReplaceAll(appKey, "-", "_")),
+		normalizeAppDirectoryKey(strings.ReplaceAll(appKey, "_", "-")),
+	}
+	targetSet := make(map[string]struct{}, len(targets))
+	for _, item := range targets {
+		if item != "" {
+			targetSet[item] = struct{}{}
+		}
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" {
+			continue
+		}
+		if _, ok := targetSet[normalizeAppDirectoryKey(name)]; ok {
+			return name, nil
+		}
+	}
+	return "", nil
+}
+
+func normalizeAppDirectoryKey(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.ReplaceAll(value, "_", "-")
+	for _, suffix := range []string{"-dev", "-test", "-prod", "_dev", "_test", "_prod"} {
+		value = strings.TrimSuffix(value, strings.ToLower(suffix))
+	}
+	return strings.TrimSpace(value)
+}
+
 func secureJoin(root string, parts ...string) (string, error) {
 	joined := filepath.Join(append([]string{root}, parts...)...)
 	cleanRoot := filepath.Clean(root)
@@ -898,6 +1128,139 @@ func scanYAMLFieldCandidates(path string, appKey string, environment string) ([]
 		result = append(result, fields...)
 	}
 	return result, nil
+}
+
+func scanValuesCandidates(path string, appKey string) ([]gitopsdomain.ValuesCandidate, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var node interface{}
+	if err := yaml.Unmarshal(content, &node); err != nil {
+		return nil, fmt.Errorf("parse values file failed: %w", err)
+	}
+
+	filePathTemplate := filepath.ToSlash(path)
+	appPrefix := filepath.ToSlash(filepath.Join("apps", appKey)) + "/"
+	if idx := strings.Index(filePathTemplate, appPrefix); idx >= 0 {
+		filePathTemplate = "apps/" + filePathTemplate[idx+len("apps/"):]
+	}
+	filePathTemplate = normalizeValuesFilePathTemplate(filePathTemplate)
+
+	result := make([]gitopsdomain.ValuesCandidate, 0)
+	collectValuesScalarCandidates(node, nil, filePathTemplate, &result)
+	return result, nil
+}
+
+func normalizeValuesFilePathTemplate(value string) string {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	for _, item := range []struct {
+		old string
+		new string
+	}{
+		{"/dev/", "/{env}/"},
+		{"/test/", "/{env}/"},
+		{"/prod/", "/{env}/"},
+		{"-dev.", "-{env}."},
+		{"-test.", "-{env}."},
+		{"-prod.", "-{env}."},
+		{"_dev.", "_{env}."},
+		{"_test.", "_{env}."},
+		{"_prod.", "_{env}."},
+		{".dev.", ".{env}."},
+		{".test.", ".{env}."},
+		{".prod.", ".{env}."},
+	} {
+		value = strings.ReplaceAll(value, item.old, item.new)
+	}
+	return value
+}
+
+func collectValuesScalarCandidates(
+	node interface{},
+	segments []string,
+	filePathTemplate string,
+	items *[]gitopsdomain.ValuesCandidate,
+) {
+	switch typed := node.(type) {
+	case map[interface{}]interface{}:
+		keys := make([]string, 0, len(typed))
+		values := make(map[string]interface{}, len(typed))
+		for key, value := range typed {
+			text := strings.TrimSpace(fmt.Sprint(key))
+			if text == "" {
+				continue
+			}
+			keys = append(keys, text)
+			values[text] = value
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collectValuesScalarCandidates(values[key], append(append([]string(nil), segments...), key), filePathTemplate, items)
+		}
+	case map[string]interface{}:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				keys = append(keys, key)
+			}
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collectValuesScalarCandidates(typed[key], append(append([]string(nil), segments...), key), filePathTemplate, items)
+		}
+	case []interface{}:
+		for idx, value := range typed {
+			collectValuesScalarCandidates(value, append(append([]string(nil), segments...), fmt.Sprintf("[%d]", idx)), filePathTemplate, items)
+		}
+	case string, bool, int, int64, float64, float32, uint, uint64:
+		if len(segments) == 0 {
+			return
+		}
+		targetPath := strings.Join(segments, ".")
+		sample := strings.TrimSpace(fmt.Sprint(typed))
+		if len(sample) > 120 {
+			sample = sample[:120] + "..."
+		}
+		*items = append(*items, gitopsdomain.ValuesCandidate{
+			FilePathTemplate: filePathTemplate,
+			TargetPath:       targetPath,
+			ValueType:        scalarTypeName(typed),
+			SampleValue:      sample,
+			DisplayName:      fmt.Sprintf("%s / %s", filepath.Base(filePathTemplate), targetPath),
+		})
+	}
+}
+
+func applyValuesRulesToFile(content []byte, rules []gitopsdomain.ValuesRule) ([]byte, bool, error) {
+	var node interface{}
+	if err := yaml.Unmarshal(content, &node); err != nil {
+		return nil, false, fmt.Errorf("parse values file failed: %w", err)
+	}
+
+	changed := false
+	current := node
+	for _, rule := range rules {
+		updated, applied, err := setNodeValueByDotPath(current, strings.TrimSpace(rule.TargetPath), strings.TrimSpace(rule.Value))
+		if err != nil {
+			return nil, false, err
+		}
+		if applied {
+			changed = true
+			current = updated
+		}
+	}
+
+	if !changed {
+		return content, false, nil
+	}
+	encoded, err := yaml.Marshal(current)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode values file failed: %w", err)
+	}
+	return encoded, true, nil
 }
 
 // normalizeEnvironmentPlaceholder 将环境相关的资源名归一成 {env} 模版。
@@ -1043,6 +1406,88 @@ func splitYAMLDocuments(raw string) []string {
 	}
 	flush()
 	return result
+}
+
+func setNodeValueByDotPath(node interface{}, path string, newValue string) (interface{}, bool, error) {
+	segments := splitValuesPath(path)
+	if len(segments) == 0 {
+		return node, false, fmt.Errorf("values_path is required")
+	}
+	return setNodeValueBySegments(node, segments, newValue)
+}
+
+func splitValuesPath(path string) []string {
+	parts := strings.Split(strings.TrimSpace(path), ".")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+func setNodeValueBySegments(node interface{}, segments []string, newValue string) (interface{}, bool, error) {
+	if len(segments) == 0 {
+		current := strings.TrimSpace(fmt.Sprint(node))
+		if current == strings.TrimSpace(newValue) {
+			return node, false, nil
+		}
+		return newValue, true, nil
+	}
+
+	switch typed := node.(type) {
+	case map[interface{}]interface{}:
+		key := segments[0]
+		for mapKey, mapValue := range typed {
+			if strings.TrimSpace(fmt.Sprint(mapKey)) != key {
+				continue
+			}
+			updated, changed, err := setNodeValueBySegments(mapValue, segments[1:], newValue)
+			if err != nil {
+				return node, false, err
+			}
+			if changed {
+				typed[mapKey] = updated
+			}
+			return typed, changed, nil
+		}
+		return node, false, fmt.Errorf("values_path not found: %s", strings.Join(segments, "."))
+	case map[string]interface{}:
+		key := segments[0]
+		value, ok := typed[key]
+		if !ok {
+			return node, false, fmt.Errorf("values_path not found: %s", strings.Join(segments, "."))
+		}
+		updated, changed, err := setNodeValueBySegments(value, segments[1:], newValue)
+		if err != nil {
+			return node, false, err
+		}
+		if changed {
+			typed[key] = updated
+		}
+		return typed, changed, nil
+	case []interface{}:
+		indexToken := strings.Trim(strings.TrimSpace(segments[0]), "[]")
+		indexValue, err := parseSliceIndex(indexToken)
+		if err != nil {
+			return node, false, err
+		}
+		if indexValue < 0 || indexValue >= len(typed) {
+			return node, false, fmt.Errorf("values_path index out of range: %s", segments[0])
+		}
+		updated, changed, err := setNodeValueBySegments(typed[indexValue], segments[1:], newValue)
+		if err != nil {
+			return node, false, err
+		}
+		if changed {
+			typed[indexValue] = updated
+		}
+		return typed, changed, nil
+	default:
+		return node, false, fmt.Errorf("values_path is not replaceable: %s", strings.Join(segments, "."))
+	}
 }
 
 func encodeJSONPointerToken(value string) string {

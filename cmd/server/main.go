@@ -161,6 +161,7 @@ func main() {
 		usecase.NewQueryGitOpsBindingTargets(gitopsService),
 		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
 		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsService),
+		usecase.NewQueryGitOpsValuesCandidates(repo, gitopsService),
 		usecase.NewUpdateGitOpsCommitTemplate(
 			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
 			gitopsService,

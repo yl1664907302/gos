@@ -14,6 +14,18 @@ type FieldCandidate struct {
 	DisplayName      string
 }
 
+// ValuesCandidate 描述 Helm values 文件中一个可被平台写回的标量字段。
+//
+// Helm 场景下平台不再围绕渲染后的 Kubernetes YAML 做规则配置，
+// 而是直接面向 values 文件与 values 键路径建模。
+type ValuesCandidate struct {
+	FilePathTemplate string
+	TargetPath       string
+	ValueType        string
+	SampleValue      string
+	DisplayName      string
+}
+
 // ManifestRule 描述一次 GitOps 写回时要应用到 YAML 的具体替换动作。
 //
 // ValueTemplate 由上层根据发布单参数渲染完成后再传入，这样 GitOps 服务只负责
@@ -24,4 +36,11 @@ type ManifestRule struct {
 	DocumentName string
 	TargetPath   string
 	Value        string
+}
+
+// ValuesRule 描述一次 GitOps 写回时要应用到 Helm values 文件上的具体动作。
+type ValuesRule struct {
+	FilePath   string
+	TargetPath string
+	Value      string
 }

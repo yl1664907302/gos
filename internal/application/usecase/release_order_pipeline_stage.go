@@ -319,7 +319,11 @@ func (uc *ReleaseOrderManager) refreshArgoCDStages(
 	if uc.argocd == nil {
 		return "ArgoCD 阶段同步未配置", fmt.Errorf("argocd executor is not configured")
 	}
-	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode))
+	gitopsType, err := uc.resolveOrderGitOpsType(ctx, order)
+	if err != nil {
+		return "ArgoCD 阶段同步失败：" + trimPipelineStageError(err), err
+	}
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
 	if err != nil {
 		if isResourceNotFoundError(err) {
 			return "ArgoCD Application 暂不可用，稍后自动重试", nil

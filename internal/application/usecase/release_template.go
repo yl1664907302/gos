@@ -2,7 +2,10 @@ package usecase
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,16 +29,23 @@ type ReleaseTemplateManager struct {
 
 type ReleaseTemplateGitOpsFieldCandidateReader interface {
 	ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error)
+	ListValuesCandidates(ctx context.Context, appKey string) ([]gitopsdomain.ValuesCandidate, error)
 }
 
 type ReleaseTemplateGitOpsRuleInput struct {
 	SourceParamKey   string
 	SourceFrom       releasedomain.GitOpsRuleSourceFrom
+	LocatorParamKey  string
 	FilePathTemplate string
 	DocumentKind     string
 	DocumentName     string
 	TargetPath       string
 	ValueTemplate    string
+}
+
+type gitOpsValuesTargetSelection struct {
+	FilePathTemplate string `json:"file_path_template"`
+	TargetPath       string `json:"target_path"`
 }
 
 type CreateReleaseTemplateInput struct {
@@ -44,6 +54,7 @@ type CreateReleaseTemplateInput struct {
 	CIBindingID   string
 	CDBindingID   string
 	CDProvider    pipelinedomain.Provider
+	GitOpsType    releasedomain.GitOpsType
 	Status        releasedomain.TemplateStatus
 	Remark        string
 	CIParamDefIDs []string
@@ -56,6 +67,7 @@ type UpdateReleaseTemplateInput struct {
 	CIBindingID   string
 	CDBindingID   string
 	CDProvider    pipelinedomain.Provider
+	GitOpsType    releasedomain.GitOpsType
 	Status        releasedomain.TemplateStatus
 	Remark        string
 	CIParamDefIDs []string
@@ -117,6 +129,7 @@ func (uc *ReleaseTemplateManager) Create(
 		input.CIBindingID,
 		input.CDBindingID,
 		input.CDProvider,
+		input.GitOpsType,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
 		input.GitOpsRules,
@@ -135,6 +148,7 @@ func (uc *ReleaseTemplateManager) Create(
 		BindingID:       applicationID,
 		BindingName:     summaryName,
 		BindingType:     summaryType,
+		GitOpsType:      normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
 		Status:          status,
 		Remark:          strings.TrimSpace(input.Remark),
 		ParamCount:      len(params),
@@ -240,6 +254,7 @@ func (uc *ReleaseTemplateManager) Update(
 		input.CIBindingID,
 		input.CDBindingID,
 		input.CDProvider,
+		input.GitOpsType,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
 		input.GitOpsRules,
@@ -258,6 +273,7 @@ func (uc *ReleaseTemplateManager) Update(
 		BindingID:       current.ApplicationID,
 		BindingName:     summaryName,
 		BindingType:     summaryType,
+		GitOpsType:      normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
 		Status:          status,
 		Remark:          strings.TrimSpace(input.Remark),
 		ParamCount:      len(params),
@@ -300,6 +316,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	ciBindingID string,
 	cdBindingID string,
 	cdProvider pipelinedomain.Provider,
+	gitopsType releasedomain.GitOpsType,
 	ciParamDefIDs []string,
 	cdParamDefIDs []string,
 	gitopsRuleInputs []ReleaseTemplateGitOpsRuleInput,
@@ -352,10 +369,11 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	if len(bindings) == 0 {
 		return nil, nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
 	}
-	if err := uc.validateArgoCDTemplateImageVersion(ctx, bindings, params); err != nil {
+	gitopsType = normalizeTemplateGitOpsType(gitopsType, templateUsesArgoCD(bindings))
+	if err := uc.validateArgoCDTemplateConfig(ctx, bindings, params, gitopsType); err != nil {
 		return nil, nil, nil, "", err
 	}
-	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsRuleInputs)
+	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsType, gitopsRuleInputs)
 	if err != nil {
 		return nil, nil, nil, "", err
 	}
@@ -507,11 +525,26 @@ func normalizeStringIDs(values []string) []string {
 	return result
 }
 
+func normalizeTemplateGitOpsType(candidate releasedomain.GitOpsType, usesArgoCD bool) releasedomain.GitOpsType {
+	if !usesArgoCD {
+		return ""
+	}
+	candidate = releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(string(candidate))))
+	if candidate == "" {
+		return releasedomain.GitOpsTypeKustomize
+	}
+	if !candidate.Valid() {
+		return releasedomain.GitOpsTypeKustomize
+	}
+	return candidate
+}
+
 func (uc *ReleaseTemplateManager) buildGitOpsRules(
 	ctx context.Context,
 	applicationID string,
 	bindings []releasedomain.ReleaseTemplateBinding,
 	params []releasedomain.ReleaseTemplateParam,
+	gitopsType releasedomain.GitOpsType,
 	inputs []ReleaseTemplateGitOpsRuleInput,
 ) ([]releasedomain.ReleaseTemplateGitOpsRule, error) {
 	if !templateUsesArgoCD(bindings) {
@@ -532,6 +565,7 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 	if uc.gitopsReader == nil {
 		return nil, fmt.Errorf("%w: gitops manager is not configured", ErrInvalidInput)
 	}
+	gitopsType = normalizeTemplateGitOpsType(gitopsType, true)
 
 	app, err := uc.appRepo.GetByID(ctx, applicationID)
 	if err != nil {
@@ -542,13 +576,25 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 		return nil, fmt.Errorf("%w: application key is required for argocd gitops rules", ErrInvalidInput)
 	}
 
-	candidates, err := uc.gitopsReader.ListFieldCandidates(ctx, appKey)
-	if err != nil {
-		return nil, err
-	}
-	candidateSet := make(map[string]gitopsdomain.FieldCandidate, len(candidates))
-	for _, item := range candidates {
-		candidateSet[buildGitOpsCandidateKey(item.FilePathTemplate, item.DocumentKind, item.DocumentName, item.TargetPath)] = item
+	fieldCandidateSet := make(map[string]gitopsdomain.FieldCandidate)
+	valuesCandidateSet := make(map[string]gitopsdomain.ValuesCandidate)
+	switch gitopsType {
+	case releasedomain.GitOpsTypeHelm:
+		candidates, listErr := uc.gitopsReader.ListValuesCandidates(ctx, appKey)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, item := range candidates {
+			valuesCandidateSet[buildGitOpsValuesCandidateKey(item.FilePathTemplate, item.TargetPath)] = item
+		}
+	default:
+		candidates, listErr := uc.gitopsReader.ListFieldCandidates(ctx, appKey)
+		if listErr != nil {
+			return nil, listErr
+		}
+		for _, item := range candidates {
+			fieldCandidateSet[buildGitOpsCandidateKey(item.FilePathTemplate, item.DocumentKind, item.DocumentName, item.TargetPath)] = item
+		}
 	}
 
 	builtinParams, err := uc.listBuiltinPlatformParamsForTemplate(ctx)
@@ -603,22 +649,75 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 			sourceName = firstNonEmpty(dict.Name, paramKey)
 		}
 
-		filePathTemplate := filepathSlash(strings.TrimSpace(input.FilePathTemplate))
-		documentKind := strings.TrimSpace(input.DocumentKind)
-		documentName := strings.TrimSpace(input.DocumentName)
-		targetPath := strings.TrimSpace(input.TargetPath)
-		if filePathTemplate == "" || documentKind == "" || targetPath == "" {
-			return nil, fmt.Errorf("%w: gitops 替换规则必须选择 YAML 字段目标", ErrInvalidInput)
+		locatorParamKey := strings.ToLower(strings.TrimSpace(input.LocatorParamKey))
+		locatorParamName := ""
+		if locatorParamKey != "" {
+			dict, err := uc.platformRepo.GetByParamKey(ctx, locatorParamKey)
+			if err != nil {
+				return nil, fmt.Errorf("%w: gitops 定位字段不存在：%s", ErrInvalidInput, locatorParamKey)
+			}
+			if dict.Status != platformparamdomain.StatusEnabled {
+				return nil, fmt.Errorf("%w: gitops 定位字段已停用：%s", ErrInvalidInput, locatorParamKey)
+			}
+			if !dict.GitOpsLocator {
+				return nil, fmt.Errorf("%w: 请选择已标记为 gitops 定位字段的标准 Key：%s", ErrInvalidInput, locatorParamKey)
+			}
+			if _, ok := ciParams[locatorParamKey]; !ok {
+				if _, builtin := builtinParams[locatorParamKey]; !builtin {
+					return nil, fmt.Errorf("%w: gitops 定位字段必须来自 ci 已勾选字段或系统内置字段：%s", ErrInvalidInput, locatorParamKey)
+				}
+			}
+			locatorParamName = firstNonEmpty(dict.Name, locatorParamKey)
 		}
 
-		candidateKey := buildGitOpsCandidateKey(filePathTemplate, documentKind, documentName, targetPath)
-		if _, ok := candidateSet[candidateKey]; !ok {
-			return nil, fmt.Errorf("%w: 选中的 YAML 字段目标不存在或已变更", ErrInvalidInput)
+		filePathTemplate := filepathSlash(strings.TrimSpace(input.FilePathTemplate))
+		targetPath := strings.TrimSpace(input.TargetPath)
+		documentKind := strings.TrimSpace(input.DocumentKind)
+		documentName := strings.TrimSpace(input.DocumentName)
+		if gitopsType == releasedomain.GitOpsTypeHelm {
+			selection := gitOpsValuesTargetSelection{}
+			if targetPath != "" && strings.HasPrefix(targetPath, "{") && json.Unmarshal([]byte(targetPath), &selection) == nil {
+				filePathTemplate = firstNonEmpty(filepathSlash(selection.FilePathTemplate), filePathTemplate)
+				targetPath = strings.TrimSpace(selection.TargetPath)
+			}
 		}
-		if _, exists := seen[candidateKey+"::"+paramKey]; exists {
+		if filePathTemplate == "" || targetPath == "" {
+			switch gitopsType {
+			case releasedomain.GitOpsTypeHelm:
+				return nil, fmt.Errorf("%w: gitops 替换规则必须选择 values 路径目标", ErrInvalidInput)
+			default:
+				return nil, fmt.Errorf("%w: gitops 替换规则必须选择 YAML 字段目标", ErrInvalidInput)
+			}
+		}
+
+		candidateIdentity := ""
+		switch gitopsType {
+		case releasedomain.GitOpsTypeHelm:
+			documentKind = "values"
+			documentName = ""
+			if !isPlatformValuesFileTemplate(filePathTemplate) {
+				return nil, fmt.Errorf("%w: helm 模式下，gitops 替换规则只能写入 platform.values-{env}.yaml", ErrInvalidInput)
+			}
+			candidateKey := buildGitOpsValuesCandidateKey(filePathTemplate, targetPath)
+			if _, ok := valuesCandidateSet[candidateKey]; !ok {
+				return nil, fmt.Errorf("%w: 选中的 values 路径目标不存在或已变更", ErrInvalidInput)
+			}
+			candidateIdentity = candidateKey
+		default:
+			if documentKind == "" {
+				return nil, fmt.Errorf("%w: gitops 替换规则必须选择 YAML 字段目标", ErrInvalidInput)
+			}
+			candidateKey := buildGitOpsCandidateKey(filePathTemplate, documentKind, documentName, targetPath)
+			if _, ok := fieldCandidateSet[candidateKey]; !ok && !matchGitOpsCandidateTemplate(fieldCandidateSet, filePathTemplate, documentKind, documentName, targetPath, locatorParamKey) {
+				return nil, fmt.Errorf("%w: 选中的 YAML 字段目标不存在或已变更", ErrInvalidInput)
+			}
+			candidateIdentity = candidateKey
+		}
+		seenKey := strings.Join([]string{candidateIdentity, paramKey, locatorParamKey}, "::")
+		if _, exists := seen[seenKey]; exists {
 			return nil, fmt.Errorf("%w: gitops 替换规则存在重复项", ErrInvalidInput)
 		}
-		seen[candidateKey+"::"+paramKey] = struct{}{}
+		seen[seenKey] = struct{}{}
 
 		valueTemplate := strings.TrimSpace(input.ValueTemplate)
 		if valueTemplate == "" {
@@ -631,6 +730,8 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 			SourceParamKey:   paramKey,
 			SourceParamName:  sourceName,
 			SourceFrom:       sourceFrom,
+			LocatorParamKey:  locatorParamKey,
+			LocatorParamName: locatorParamName,
 			FilePathTemplate: filePathTemplate,
 			DocumentKind:     documentKind,
 			DocumentName:     documentName,
@@ -676,6 +777,95 @@ func buildGitOpsCandidateKey(filePathTemplate string, documentKind string, docum
 	}, "::")
 }
 
+func buildGitOpsValuesCandidateKey(filePathTemplate string, targetPath string) string {
+	return strings.Join([]string{
+		filepathSlash(strings.TrimSpace(filePathTemplate)),
+		strings.TrimSpace(targetPath),
+	}, "::")
+}
+
+func isPlatformValuesFileTemplate(filePathTemplate string) bool {
+	base := strings.TrimSpace(filepath.Base(filepathSlash(filePathTemplate)))
+	if base == "" {
+		return false
+	}
+	matched, _ := regexp.MatchString(`(?i)^platform\.values(?:-[^.]+)?\.ya?ml$`, base)
+	return matched
+}
+
+func matchGitOpsCandidateTemplate(
+	candidateSet map[string]gitopsdomain.FieldCandidate,
+	filePathTemplate string,
+	documentKind string,
+	documentName string,
+	targetPath string,
+	locatorParamKey string,
+) bool {
+	locatorParamKey = strings.TrimSpace(locatorParamKey)
+	if locatorParamKey == "" {
+		return false
+	}
+	placeholder := "{" + locatorParamKey + "}"
+	for _, candidate := range candidateSet {
+		if strings.TrimSpace(candidate.DocumentKind) != strings.TrimSpace(documentKind) {
+			continue
+		}
+		if strings.TrimSpace(candidate.TargetPath) != strings.TrimSpace(targetPath) {
+			continue
+		}
+		fileTemplate := buildLocatorTemplateFromCandidate(candidate.FilePathTemplate, candidate.DocumentName, placeholder)
+		documentTemplate := buildLocatorDocumentTemplate(candidate.DocumentName, placeholder)
+		if fileTemplate == filepathSlash(strings.TrimSpace(filePathTemplate)) &&
+			strings.TrimSpace(documentTemplate) == strings.TrimSpace(documentName) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildLocatorTemplateFromCandidate(filePathTemplate string, documentName string, placeholder string) string {
+	filePathTemplate = filepathSlash(filePathTemplate)
+	placeholder = strings.TrimSpace(placeholder)
+	if filePathTemplate == "" || placeholder == "" || strings.TrimSpace(documentName) == "" {
+		return filePathTemplate
+	}
+	baseName := filepath.Base(filePathTemplate)
+	ext := filepath.Ext(baseName)
+	stem := strings.TrimSuffix(baseName, ext)
+	if stem == "" {
+		return filePathTemplate
+	}
+	if !strings.Contains(strings.ToLower(strings.TrimSpace(documentName)), strings.ToLower(stem)) {
+		return filePathTemplate
+	}
+	replacedBase := replaceLocatorToken(baseName, stem, placeholder)
+	return strings.TrimSuffix(filePathTemplate, baseName) + replacedBase
+}
+
+func buildLocatorDocumentTemplate(documentName string, placeholder string) string {
+	documentName = strings.TrimSpace(documentName)
+	placeholder = strings.TrimSpace(placeholder)
+	if documentName == "" || placeholder == "" {
+		return documentName
+	}
+	base := documentName
+	if idx := strings.IndexAny(documentName, "-_."); idx > 0 {
+		base = documentName[:idx]
+	}
+	return replaceLocatorToken(documentName, base, placeholder)
+}
+
+func replaceLocatorToken(value string, token string, placeholder string) string {
+	value = strings.TrimSpace(value)
+	token = strings.TrimSpace(token)
+	placeholder = strings.TrimSpace(placeholder)
+	if value == "" || token == "" || placeholder == "" {
+		return value
+	}
+	replacer := regexp.MustCompile(`(^|[-_./])` + regexp.QuoteMeta(token) + `($|[-_./])`)
+	return replacer.ReplaceAllString(value, "${1}"+placeholder+"${2}")
+}
+
 func filepathSlash(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
 }
@@ -704,15 +894,15 @@ func summarizeTemplateBindings(bindings []releasedomain.ReleaseTemplateBinding) 
 	return strings.Join(scopeLabels, " + "), strings.Join(scopeTypes, "+")
 }
 
-func (uc *ReleaseTemplateManager) validateArgoCDTemplateImageVersion(
+func (uc *ReleaseTemplateManager) validateArgoCDTemplateConfig(
 	ctx context.Context,
 	bindings []releasedomain.ReleaseTemplateBinding,
 	params []releasedomain.ReleaseTemplateParam,
+	gitopsType releasedomain.GitOpsType,
 ) error {
 	var (
 		hasCIBinding bool
 		hasArgoCDCD  bool
-		hasEnvParam  bool
 	)
 	for _, item := range bindings {
 		if item.PipelineScope == releasedomain.PipelineScopeCI {
@@ -728,13 +918,10 @@ func (uc *ReleaseTemplateManager) validateArgoCDTemplateImageVersion(
 	if !hasCIBinding {
 		return fmt.Errorf("%w: cd 选择 argocd 时，必须同时启用 ci 执行单元", ErrInvalidInput)
 	}
-	for _, item := range params {
-		if strings.EqualFold(strings.TrimSpace(item.ParamKey), "env") {
-			hasEnvParam = true
-		}
+	if gitopsType != "" && !gitopsType.Valid() {
+		return fmt.Errorf("%w: gitops_type 无效", ErrInvalidInput)
 	}
-	if !hasEnvParam {
-		return fmt.Errorf("%w: cd 选择 argocd 时，模板参数必须包含 env", ErrInvalidInput)
-	}
+	_ = ctx
+	_ = params
 	return nil
 }

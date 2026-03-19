@@ -4,7 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "VITE_DISABLE_HMR=1 vite --host 0.0.0.0 --port 5174 --strictPort --force",
+    "dev:hot": "vite --host 0.0.0.0 --port 5174 --strictPort --force",
+    "postinstall": "node scripts/patch-plugin-vue.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview"
   },

@@ -464,6 +464,64 @@ function describeStep(step: ReleaseOrderStep) {
   return parts.join(' ｜ ')
 }
 
+function latestScopeStepMessage(
+  scope: ReleasePipelineScope,
+  preferredStatus?: ReleaseOrderStep['status'],
+) {
+  const scopedSteps = steps.value
+    .filter((item) => String(item.step_scope || '').trim().toLowerCase() === scope)
+    .sort(sortSteps)
+
+  const candidates = preferredStatus
+    ? scopedSteps.filter((item) => item.status === preferredStatus)
+    : scopedSteps
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const messageText = String(candidates[index].message || '').trim()
+    if (messageText) {
+      return messageText
+    }
+  }
+  return ''
+}
+
+function pipelineStageEmptyDescription(section: {
+  scope: ReleasePipelineScope
+  execution: ReleaseOrderExecution | null
+  isArgoCD: boolean
+  isJenkins: boolean
+}) {
+  if (!section.execution) {
+    return '暂无阶段数据'
+  }
+
+  if (section.isArgoCD) {
+    const failedMessage = latestScopeStepMessage(section.scope, 'failed')
+    switch (section.execution.status) {
+      case 'failed':
+        return failedMessage || 'CD 在启动阶段失败，尚未生成 GitOps / ArgoCD 聚合进度'
+      case 'pending':
+        return 'CD 尚未启动，待前置步骤完成后会自动生成 GitOps / ArgoCD 进度'
+      case 'running':
+        return 'GitOps 写回 / ArgoCD Sync 进度正在回收中，请稍后自动刷新'
+      case 'success':
+        return 'CD 已完成，但当前没有额外的聚合阶段数据'
+      case 'cancelled':
+        return failedMessage || 'CD 已取消，未生成聚合阶段数据'
+      case 'skipped':
+        return 'CD 已跳过，未生成聚合阶段数据'
+      default:
+        return '暂无阶段数据'
+    }
+  }
+
+  if (section.isJenkins) {
+    return latestScopeStepMessage(section.scope, 'failed') || '暂无阶段数据'
+  }
+
+  return latestScopeStepMessage(section.scope, 'failed') || '暂无阶段数据'
+}
+
 function parseStreamEvent(data: string): ReleaseOrderLogStreamEvent | null {
   const text = String(data || '').trim()
   if (!text) {
@@ -1171,7 +1229,7 @@ onBeforeUnmount(() => {
             show-icon
             :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，部署进度视图待接入。`"
           />
-          <a-empty v-if="section.stages.length === 0" description="暂无阶段数据" />
+          <a-empty v-if="section.stages.length === 0" :description="pipelineStageEmptyDescription(section)" />
           <a-table
             v-else
             row-key="id"

@@ -142,6 +142,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_id VARCHAR(64) NOT NULL,
 	binding_name VARCHAR(128) NOT NULL DEFAULT '',
 	binding_type VARCHAR(32) NOT NULL DEFAULT '',
+	gitops_type VARCHAR(32) NOT NULL DEFAULT '',
 	status VARCHAR(32) NOT NULL DEFAULT 'active',
 	remark VARCHAR(500) NOT NULL DEFAULT '',
 	created_at BIGINT NOT NULL,
@@ -191,6 +192,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	source_param_key VARCHAR(100) NOT NULL,
 	source_param_name VARCHAR(100) NOT NULL DEFAULT '',
 	source_from VARCHAR(32) NOT NULL DEFAULT '',
+	locator_param_key VARCHAR(100) NOT NULL DEFAULT '',
+	locator_param_name VARCHAR(100) NOT NULL DEFAULT '',
 	file_path_template VARCHAR(255) NOT NULL,
 	document_kind VARCHAR(100) NOT NULL DEFAULT '',
 	document_name VARCHAR(150) NOT NULL DEFAULT '',
@@ -306,6 +309,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_id TEXT NOT NULL,
 	binding_name TEXT NOT NULL DEFAULT '',
 	binding_type TEXT NOT NULL DEFAULT '',
+	gitops_type TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'active',
 	remark TEXT NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL,
@@ -355,6 +359,8 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	source_param_key TEXT NOT NULL,
 	source_param_name TEXT NOT NULL DEFAULT '',
 	source_from TEXT NOT NULL DEFAULT '',
+	locator_param_key TEXT NOT NULL DEFAULT '',
+	locator_param_name TEXT NOT NULL DEFAULT '',
 	file_path_template TEXT NOT NULL,
 	document_kind TEXT NOT NULL DEFAULT '',
 	document_name TEXT NOT NULL DEFAULT '',
@@ -460,9 +466,12 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			{"release_order_step", "step_scope", `ALTER TABLE release_order_step ADD COLUMN step_scope VARCHAR(20) NOT NULL DEFAULT 'global' AFTER release_order_id;`},
 			{"release_order_step", "execution_id", `ALTER TABLE release_order_step ADD COLUMN execution_id VARCHAR(64) NOT NULL DEFAULT '' AFTER step_scope;`},
 			{"release_order_pipeline_stage", "execution_id", `ALTER TABLE release_order_pipeline_stage ADD COLUMN execution_id VARCHAR(64) NOT NULL DEFAULT '' AFTER release_order_id;`},
+			{"release_template", "gitops_type", `ALTER TABLE release_template ADD COLUMN gitops_type VARCHAR(32) NOT NULL DEFAULT '' AFTER binding_type;`},
 			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER template_id;`},
 			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope VARCHAR(20) NOT NULL DEFAULT '' AFTER template_binding_id;`},
 			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER pipeline_scope;`},
+			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key VARCHAR(100) NOT NULL DEFAULT '' AFTER source_from;`},
+			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name VARCHAR(100) NOT NULL DEFAULT '' AFTER locator_param_key;`},
 		} {
 			exists, err = r.mysqlColumnExists(ctx, columnStmt.table, columnStmt.column)
 			if err != nil {
@@ -573,9 +582,12 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			{"release_order_step", "step_scope", `ALTER TABLE release_order_step ADD COLUMN step_scope TEXT NOT NULL DEFAULT 'global';`},
 			{"release_order_step", "execution_id", `ALTER TABLE release_order_step ADD COLUMN execution_id TEXT NOT NULL DEFAULT '';`},
 			{"release_order_pipeline_stage", "execution_id", `ALTER TABLE release_order_pipeline_stage ADD COLUMN execution_id TEXT NOT NULL DEFAULT '';`},
+			{"release_template", "gitops_type", `ALTER TABLE release_template ADD COLUMN gitops_type TEXT NOT NULL DEFAULT '';`},
 			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id TEXT NOT NULL DEFAULT '';`},
 			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope TEXT NOT NULL DEFAULT '';`},
 			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id TEXT NOT NULL DEFAULT '';`},
+			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key TEXT NOT NULL DEFAULT '';`},
+			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name TEXT NOT NULL DEFAULT '';`},
 		} {
 			tableColumns, tableErr := r.sqliteTableColumns(ctx, columnStmt.table)
 			if tableErr != nil {
@@ -1174,6 +1186,57 @@ WHERE release_order_id = ? AND id = ?;`
 	return item, nil
 }
 
+func (r *ReleaseRepository) ReplaceSteps(
+	ctx context.Context,
+	releaseOrderID string,
+	steps []domain.ReleaseOrderStep,
+) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_order_step WHERE release_order_id = ?;`, releaseOrderID); err != nil {
+		return err
+	}
+
+	const insertStep = `
+INSERT INTO release_order_step (
+	id, release_order_id, step_scope, execution_id, step_code, step_name, status, message, sort_no, started_at, finished_at, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	for _, item := range steps {
+		if _, execErr := tx.ExecContext(
+			ctx,
+			insertStep,
+			item.ID,
+			item.ReleaseOrderID,
+			string(item.StepScope),
+			item.ExecutionID,
+			item.StepCode,
+			item.StepName,
+			string(item.Status),
+			item.Message,
+			item.SortNo,
+			nullableUnixNano(item.StartedAt),
+			nullableUnixNano(item.FinishedAt),
+			item.CreatedAt.UTC().UnixNano(),
+		); execErr != nil {
+			return execErr
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	tx = nil
+	return nil
+}
+
 func (r *ReleaseRepository) GetStepByCode(
 	ctx context.Context,
 	releaseOrderID string,
@@ -1248,8 +1311,8 @@ func (r *ReleaseRepository) CreateTemplate(
 
 	const insertTemplate = `
 INSERT INTO release_template (
-	id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, remark, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	if _, err = tx.ExecContext(
 		ctx,
@@ -1261,6 +1324,7 @@ INSERT INTO release_template (
 		template.BindingID,
 		template.BindingName,
 		template.BindingType,
+		string(template.GitOpsType),
 		string(template.Status),
 		template.Remark,
 		template.CreatedAt.UTC().UnixNano(),
@@ -1294,7 +1358,7 @@ func (r *ReleaseRepository) GetTemplateByID(
 	id string,
 ) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, []domain.ReleaseTemplateGitOpsRule, error) {
 	const q = `
-SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, status, remark, created_at, updated_at
+SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, remark, created_at, updated_at
 FROM release_template
 WHERE id = ?;`
 
@@ -1367,7 +1431,7 @@ func (r *ReleaseRepository) ListTemplates(
 
 	listQuery := `
 SELECT
-	t.id, t.name, t.application_id, t.application_name, t.binding_id, t.binding_name, t.binding_type, t.status, t.remark, t.created_at, t.updated_at,
+	t.id, t.name, t.application_id, t.application_name, t.binding_id, t.binding_name, t.binding_type, t.gitops_type, t.status, t.remark, t.created_at, t.updated_at,
 	COALESCE(p.param_count, 0)
 FROM release_template t
 LEFT JOIN (
@@ -1420,7 +1484,7 @@ func (r *ReleaseRepository) UpdateTemplate(
 
 	const updateTemplate = `
 UPDATE release_template
-SET name = ?, application_name = ?, binding_name = ?, binding_type = ?, status = ?, remark = ?, updated_at = ?
+SET name = ?, application_name = ?, binding_name = ?, binding_type = ?, gitops_type = ?, status = ?, remark = ?, updated_at = ?
 WHERE id = ?;`
 	res, err := tx.ExecContext(
 		ctx,
@@ -1429,6 +1493,7 @@ WHERE id = ?;`
 		template.ApplicationName,
 		template.BindingName,
 		template.BindingType,
+		string(template.GitOpsType),
 		string(template.Status),
 		template.Remark,
 		template.UpdatedAt.UTC().UnixNano(),
@@ -1586,8 +1651,8 @@ func (r *ReleaseRepository) insertTemplateGitOpsRules(
 ) error {
 	const insertRule = `
 INSERT INTO release_template_gitops_rule (
-	id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, locator_param_key, locator_param_name, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	for _, item := range rules {
 		if _, err := tx.ExecContext(
@@ -1599,6 +1664,8 @@ INSERT INTO release_template_gitops_rule (
 			item.SourceParamKey,
 			item.SourceParamName,
 			string(item.SourceFrom),
+			item.LocatorParamKey,
+			item.LocatorParamName,
 			item.FilePathTemplate,
 			item.DocumentKind,
 			item.DocumentName,
@@ -1679,7 +1746,7 @@ func (r *ReleaseRepository) listTemplateGitOpsRules(
 	templateID string,
 ) ([]domain.ReleaseTemplateGitOpsRule, error) {
 	const q = `
-SELECT id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
+SELECT id, template_id, pipeline_scope, source_param_key, source_param_name, source_from, locator_param_key, locator_param_name, file_path_template, document_kind, document_name, target_path, value_template, sort_no, created_at, updated_at
 FROM release_template_gitops_rule
 WHERE template_id = ?
 ORDER BY sort_no ASC, created_at ASC;`
@@ -1942,6 +2009,7 @@ func scanReleaseTemplateBinding(s scanner) (domain.ReleaseTemplateBinding, error
 func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 	var (
 		item      domain.ReleaseTemplate
+		gitopsRaw string
 		statusRaw string
 		createdAt int64
 		updatedAt int64
@@ -1954,6 +2022,7 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 		&item.BindingID,
 		&item.BindingName,
 		&item.BindingType,
+		&gitopsRaw,
 		&statusRaw,
 		&item.Remark,
 		&createdAt,
@@ -1961,6 +2030,7 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 	); err != nil {
 		return domain.ReleaseTemplate{}, err
 	}
+	item.GitOpsType = domain.GitOpsType(gitopsRaw)
 	item.Status = domain.TemplateStatus(statusRaw)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
@@ -1970,6 +2040,7 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 	var (
 		item      domain.ReleaseTemplate
+		gitopsRaw string
 		statusRaw string
 		createdAt int64
 		updatedAt int64
@@ -1982,6 +2053,7 @@ func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 		&item.BindingID,
 		&item.BindingName,
 		&item.BindingType,
+		&gitopsRaw,
 		&statusRaw,
 		&item.Remark,
 		&createdAt,
@@ -1990,6 +2062,7 @@ func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 	); err != nil {
 		return domain.ReleaseTemplate{}, err
 	}
+	item.GitOpsType = domain.GitOpsType(gitopsRaw)
 	item.Status = domain.TemplateStatus(statusRaw)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
@@ -2043,6 +2116,8 @@ func scanReleaseTemplateGitOpsRule(s scanner) (domain.ReleaseTemplateGitOpsRule,
 		&item.SourceParamKey,
 		&item.SourceParamName,
 		&sourceFrom,
+		&item.LocatorParamKey,
+		&item.LocatorParamName,
 		&item.FilePathTemplate,
 		&item.DocumentKind,
 		&item.DocumentName,

@@ -43,6 +43,7 @@ type CreateReleaseTemplateRequest struct {
 	CIBindingID   string                             `json:"ci_binding_id"`
 	CDBindingID   string                             `json:"cd_binding_id"`
 	CDProvider    string                             `json:"cd_provider"`
+	GitOpsType    string                             `json:"gitops_type"`
 	Status        string                             `json:"status"`
 	Remark        string                             `json:"remark"`
 	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
@@ -55,6 +56,7 @@ type UpdateReleaseTemplateRequest struct {
 	CIBindingID   string                             `json:"ci_binding_id"`
 	CDBindingID   string                             `json:"cd_binding_id"`
 	CDProvider    string                             `json:"cd_provider"`
+	GitOpsType    string                             `json:"gitops_type"`
 	Status        string                             `json:"status"`
 	Remark        string                             `json:"remark"`
 	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
@@ -70,6 +72,7 @@ type ReleaseTemplateResponse struct {
 	BindingID       string    `json:"binding_id"`
 	BindingName     string    `json:"binding_name"`
 	BindingType     string    `json:"binding_type"`
+	GitOpsType      string    `json:"gitops_type"`
 	Status          string    `json:"status"`
 	Remark          string    `json:"remark"`
 	ParamCount      int       `json:"param_count"`
@@ -110,6 +113,7 @@ type ReleaseTemplateBindingResponse struct {
 type ReleaseTemplateGitOpsRuleRequest struct {
 	SourceParamKey   string `json:"source_param_key"`
 	SourceFrom       string `json:"source_from"`
+	LocatorParamKey  string `json:"locator_param_key"`
 	FilePathTemplate string `json:"file_path_template"`
 	DocumentKind     string `json:"document_kind"`
 	DocumentName     string `json:"document_name"`
@@ -124,6 +128,8 @@ type ReleaseTemplateGitOpsRuleResponse struct {
 	SourceParamKey   string    `json:"source_param_key"`
 	SourceParamName  string    `json:"source_param_name"`
 	SourceFrom       string    `json:"source_from"`
+	LocatorParamKey  string    `json:"locator_param_key"`
+	LocatorParamName string    `json:"locator_param_name"`
 	FilePathTemplate string    `json:"file_path_template"`
 	DocumentKind     string    `json:"document_kind"`
 	DocumentName     string    `json:"document_name"`
@@ -166,6 +172,7 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		CIBindingID:   req.CIBindingID,
 		CDBindingID:   req.CDBindingID,
 		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:    releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
 		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
@@ -249,6 +256,7 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		CIBindingID:   req.CIBindingID,
 		CDBindingID:   req.CDBindingID,
 		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:    releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
 		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
 		Remark:        req.Remark,
 		CIParamDefIDs: req.CIParamDefIDs,
@@ -397,6 +405,7 @@ func toReleaseTemplateResponse(item releasedomain.ReleaseTemplate) ReleaseTempla
 		BindingID:       item.BindingID,
 		BindingName:     item.BindingName,
 		BindingType:     item.BindingType,
+		GitOpsType:      string(item.GitOpsType),
 		Status:          string(item.Status),
 		Remark:          item.Remark,
 		ParamCount:      item.ParamCount,
@@ -445,6 +454,7 @@ func toReleaseTemplateGitOpsRuleInputs(items []ReleaseTemplateGitOpsRuleRequest)
 		result = append(result, usecase.ReleaseTemplateGitOpsRuleInput{
 			SourceParamKey:   item.SourceParamKey,
 			SourceFrom:       releasedomain.GitOpsRuleSourceFrom(strings.ToLower(strings.TrimSpace(item.SourceFrom))),
+			LocatorParamKey:  item.LocatorParamKey,
 			FilePathTemplate: item.FilePathTemplate,
 			DocumentKind:     item.DocumentKind,
 			DocumentName:     item.DocumentName,
@@ -463,6 +473,8 @@ func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOp
 		SourceParamKey:   item.SourceParamKey,
 		SourceParamName:  item.SourceParamName,
 		SourceFrom:       string(item.SourceFrom),
+		LocatorParamKey:  item.LocatorParamKey,
+		LocatorParamName: item.LocatorParamName,
 		FilePathTemplate: item.FilePathTemplate,
 		DocumentKind:     item.DocumentKind,
 		DocumentName:     item.DocumentName,

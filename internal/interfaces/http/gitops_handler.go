@@ -10,12 +10,13 @@ import (
 )
 
 type GitOpsHandler struct {
-	query           *usecase.QueryGitOpsStatus
-	targets         *usecase.QueryGitOpsBindingTargets
-	templateFields  *usecase.QueryGitOpsTemplateFields
-	fieldCandidates *usecase.QueryGitOpsFieldCandidates
-	update          *usecase.UpdateGitOpsCommitTemplate
-	authz           RequestAuthorizer
+	query            *usecase.QueryGitOpsStatus
+	targets          *usecase.QueryGitOpsBindingTargets
+	templateFields   *usecase.QueryGitOpsTemplateFields
+	fieldCandidates  *usecase.QueryGitOpsFieldCandidates
+	valuesCandidates *usecase.QueryGitOpsValuesCandidates
+	update           *usecase.UpdateGitOpsCommitTemplate
+	authz            RequestAuthorizer
 }
 
 func NewGitOpsHandler(
@@ -23,10 +24,11 @@ func NewGitOpsHandler(
 	targets *usecase.QueryGitOpsBindingTargets,
 	templateFields *usecase.QueryGitOpsTemplateFields,
 	fieldCandidates *usecase.QueryGitOpsFieldCandidates,
+	valuesCandidates *usecase.QueryGitOpsValuesCandidates,
 	update *usecase.UpdateGitOpsCommitTemplate,
 	authz RequestAuthorizer,
 ) *GitOpsHandler {
-	return &GitOpsHandler{query: query, targets: targets, templateFields: templateFields, fieldCandidates: fieldCandidates, update: update, authz: authz}
+	return &GitOpsHandler{query: query, targets: targets, templateFields: templateFields, fieldCandidates: fieldCandidates, valuesCandidates: valuesCandidates, update: update, authz: authz}
 }
 
 func (h *GitOpsHandler) RegisterRoutes(router gin.IRouter) {
@@ -34,6 +36,7 @@ func (h *GitOpsHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/gitops/targets", h.ListBindingTargets)
 	router.GET("/gitops/template-fields", h.ListTemplateFields)
 	router.GET("/gitops/field-candidates", h.ListFieldCandidates)
+	router.GET("/gitops/values-candidates", h.ListValuesCandidates)
 	router.PUT("/gitops/settings/commit-message-template", h.UpdateCommitMessageTemplate)
 }
 
@@ -51,6 +54,10 @@ type GitOpsTemplateFieldsResponse struct {
 
 type GitOpsFieldCandidatesResponse struct {
 	Data []usecase.QueryGitOpsFieldCandidateOutput `json:"data"`
+}
+
+type GitOpsValuesCandidatesResponse struct {
+	Data []usecase.QueryGitOpsValuesCandidateOutput `json:"data"`
 }
 
 type UpdateGitOpsCommitTemplateRequest struct {
@@ -162,6 +169,36 @@ func (h *GitOpsHandler) ListFieldCandidates(c *gin.Context) {
 		return
 	}
 	output, err := h.fieldCandidates.Execute(c.Request.Context(), c.Query("application_id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, usecase.ErrInvalidInput):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+// ListValuesCandidates godoc
+// @Summary      List GitOps Helm values candidates
+// @Tags         gitops
+// @Produce      json
+// @Param        application_id  query     string  true  "application id"
+// @Success      200  {object}  GitOpsValuesCandidatesResponse
+// @Failure      400  {object}  ErrorResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /gitops/values-candidates [get]
+func (h *GitOpsHandler) ListValuesCandidates(c *gin.Context) {
+	if !ensureAnyPermission(c, h.authz, "component.gitops.view", "release.template.manage") {
+		return
+	}
+	if h.valuesCandidates == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "gitops manager is not configured"})
+		return
+	}
+	output, err := h.valuesCandidates.Execute(c.Request.Context(), c.Query("application_id"))
 	if err != nil {
 		switch {
 		case errors.Is(err, usecase.ErrInvalidInput):

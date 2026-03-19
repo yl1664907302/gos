@@ -3,9 +3,9 @@ import { ExclamationCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-de
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { listApplications } from '../../api/application'
-import { listGitOpsFieldCandidates } from '../../api/gitops'
+import { listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api/gitops'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
 import {
@@ -17,7 +17,7 @@ import {
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import type { PipelineBinding, ExecutorParamDef } from '../../types/pipeline'
-import type { GitOpsFieldCandidate } from '../../types/gitops'
+import type { GitOpsFieldCandidate, GitOpsValuesCandidate } from '../../types/gitops'
 import type { PlatformParamDict } from '../../types/platform-param'
 import type {
   ReleasePipelineScope,
@@ -25,6 +25,7 @@ import type {
   ReleaseTemplateBinding,
   ReleaseTemplateGitOpsRule,
   ReleaseTemplateGitOpsRulePayload,
+  ReleaseTemplateGitOpsType,
   ReleaseTemplatePayload,
   ReleaseTemplateStatus,
   UpdateReleaseTemplatePayload,
@@ -70,16 +71,6 @@ interface GitOpsRuleFormItem {
   document_name: string
   target_path: string
   value_template: string
-}
-
-interface GitOpsFieldDocumentGroup {
-  key: string
-  file_path_template: string
-  file_name: string
-  document_kind: string
-  document_name: string
-  display_name: string
-  fields: GitOpsFieldCandidate[]
 }
 
 const loading = ref(false)
@@ -130,11 +121,10 @@ const loadingBindings = ref(false)
 const platformParamNameMap = ref<Record<string, string>>({})
 const platformParamDicts = ref<PlatformParamDict[]>([])
 const gitOpsFieldCandidates = ref<GitOpsFieldCandidate[]>([])
+const gitOpsValuesCandidates = ref<GitOpsValuesCandidate[]>([])
 const loadingGitOpsFieldCandidates = ref(false)
 const gitopsRules = ref<GitOpsRuleFormItem[]>([])
-const yamlSelectorVisible = ref(false)
-const yamlSelectorRuleID = ref('')
-const yamlFieldExpandedKeys = ref<string[]>([])
+const gitOpsType = ref<ReleaseTemplateGitOpsType>('kustomize')
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -214,44 +204,21 @@ const gitOpsSourceOptions = computed<SelectOption[]>(() => {
   return options
 })
 
-const gitOpsFieldDocumentGroups = computed<GitOpsFieldDocumentGroup[]>(() => {
-  const groups = new Map<string, GitOpsFieldDocumentGroup>()
-  gitOpsFieldCandidates.value.forEach((item) => {
-    const key = [
-      item.file_path_template,
-      item.document_kind,
-      item.document_name || '-',
-    ].join('::')
-    const existing = groups.get(key)
-    if (existing) {
-      existing.fields.push(item)
-      return
-    }
-    groups.set(key, {
-      key,
-      file_path_template: item.file_path_template,
-      file_name: item.file_path_template.split('/').filter(Boolean).pop() || item.file_path_template,
-      document_kind: item.document_kind,
-      document_name: item.document_name,
-      display_name: item.document_name
-        ? `${item.document_kind} / ${item.document_name}`
-        : item.document_kind || 'YAML 文档',
-      fields: [item],
-    })
-  })
-
-  return Array.from(groups.values()).map((group) => ({
-    ...group,
-    fields: [...group.fields].sort((left, right) => left.target_path.localeCompare(right.target_path)),
-  }))
-})
-
 function selectedBinding(scope: ReleasePipelineScope) {
   return bindingOptionsByScope.value[scope].find((item) => item.value === scopeStates[scope].binding_id)
 }
 
 function isCDUsingArgoCD() {
   return scopeStates.cd.enabled && !selectedBinding('cd')
+}
+
+function normalizedGitOpsType(type?: string): ReleaseTemplateGitOpsType {
+  const value = String(type || '').trim().toLowerCase()
+  return value === 'helm' ? 'helm' : 'kustomize'
+}
+
+function isHelmGitOps() {
+  return isCDUsingArgoCD() && normalizedGitOpsType(gitOpsType.value) === 'helm'
 }
 
 function statusColor(status: ReleaseTemplateStatus) {
@@ -296,82 +263,143 @@ function resolveGitOpsRuleSourceFrom(paramKey: string): 'ci' | 'builtin' {
   return fromCI ? 'ci' : 'builtin'
 }
 
-function buildGitOpsFieldCandidateValue(item: GitOpsFieldCandidate) {
-  return JSON.stringify({
-    file_path_template: item.file_path_template,
-    document_kind: item.document_kind,
-    document_name: item.document_name,
-    target_path: item.target_path,
-  })
+function yamlCandidatesForRule(rule: GitOpsRuleFormItem) {
+  return gitOpsFieldCandidates.value
 }
 
-function parseYamlFieldSegments(targetPath: string) {
-  return String(targetPath || '')
-    .split('/')
-    .map((item) => item.trim())
-    .filter((item) => item)
-    .map((item) => (/^\d+$/.test(item) ? `[${item}]` : item))
-}
-
-function yamlFieldLeafLabel(targetPath: string) {
-  const segments = parseYamlFieldSegments(targetPath)
-  return segments[segments.length - 1] || targetPath
-}
-
-function yamlFieldParentPath(targetPath: string) {
-  const segments = parseYamlFieldSegments(targetPath)
-  return segments.slice(0, -1).join(' / ')
-}
-
-function yamlFieldPreview(group: GitOpsFieldDocumentGroup) {
-  return group.fields
-    .slice(0, 3)
-    .map((item) => yamlFieldLeafLabel(item.target_path))
-    .join('、')
-}
-
-function yamlFieldIndentStyle(targetPath: string) {
-  const depth = Math.max(parseYamlFieldSegments(targetPath).length - 1, 0)
-  return {
-    paddingLeft: `${Math.min(depth * 18, 96)}px`,
-  }
-}
-
-function currentYamlFieldCandidateValue() {
-  const rule = currentYamlSelectorRule()
-  if (!rule || !rule.file_path_template || !rule.target_path) {
+function pathBaseName(value: string) {
+  const normalized = String(value || '').trim()
+  if (!normalized) {
     return ''
   }
-  return buildGitOpsFieldCandidateValue({
-    file_path_template: rule.file_path_template,
+  const segments = normalized.split('/')
+  return segments[segments.length - 1] || normalized
+}
+
+function isPlatformValuesFileTemplate(filePathTemplate: string) {
+  const baseName = pathBaseName(filePathTemplate)
+  return /^platform\.values(?:-[^.]+)?\.ya?ml$/i.test(baseName)
+}
+
+function platformValuesCandidates() {
+  return gitOpsValuesCandidates.value.filter((item) => isPlatformValuesFileTemplate(item.file_path_template))
+}
+
+function yamlFileOptions(rule: GitOpsRuleFormItem): SelectOption[] {
+  const seen = new Set<string>()
+  return yamlCandidatesForRule(rule)
+    .filter((item) => {
+      const key = String(item.file_path_template || '').trim()
+      if (!key || seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+    .map((item) => ({
+      label: `${pathBaseName(item.file_path_template)} · ${item.file_path_template}`,
+      value: item.file_path_template,
+    }))
+}
+
+function yamlDocumentOptions(rule: GitOpsRuleFormItem): SelectOption[] {
+  if (!rule.file_path_template) {
+    return []
+  }
+  const seen = new Set<string>()
+  return yamlCandidatesForRule(rule)
+    .filter((item) => String(item.file_path_template || '').trim() === String(rule.file_path_template || '').trim())
+    .filter((item) => {
+      const key = `${item.document_kind}::${item.document_name || ''}`
+      if (!item.document_kind || seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+    .map((item) => ({
+      label: item.document_name ? `${item.document_kind} / ${item.document_name}` : item.document_kind,
+      value: JSON.stringify({
+        document_kind: item.document_kind,
+        document_name: item.document_name || '',
+      }),
+    }))
+}
+
+function yamlFieldOptions(rule: GitOpsRuleFormItem): SelectOption[] {
+  if (!rule.file_path_template || !rule.document_kind) {
+    return []
+  }
+  return yamlCandidatesForRule(rule)
+    .filter((item) =>
+      String(item.file_path_template || '').trim() === String(rule.file_path_template || '').trim() &&
+      String(item.document_kind || '').trim() === String(rule.document_kind || '').trim() &&
+      String(item.document_name || '').trim() === String(rule.document_name || '').trim(),
+    )
+    .map((item) => ({
+      label: `${item.target_path}${item.sample_value ? ` · 示例: ${item.sample_value}` : ''}`,
+      value: item.target_path,
+    }))
+}
+
+function valuesFileOptions(): SelectOption[] {
+  const seen = new Set<string>()
+  return platformValuesCandidates()
+    .filter((item) => {
+      const key = String(item.file_path_template || '').trim()
+      if (!key || seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+    .map((item) => ({
+      label: `${pathBaseName(item.file_path_template)} · ${item.file_path_template}`,
+      value: item.file_path_template,
+    }))
+}
+
+function valuesPathOptions(rule: GitOpsRuleFormItem): SelectOption[] {
+  const selectedFileRaw = String(rule.file_path_template || '').trim()
+  const selectedFile = isPlatformValuesFileTemplate(selectedFileRaw) ? selectedFileRaw : ''
+  return platformValuesCandidates()
+    .filter((item) => {
+      if (!selectedFile) {
+        return true
+      }
+      return String(item.file_path_template || '').trim() === selectedFile
+    })
+    .map((item) => ({
+      label: selectedFile
+        ? `${item.target_path}${item.sample_value ? ` · 示例: ${item.sample_value}` : ''}`
+        : `${pathBaseName(item.file_path_template)} · ${item.target_path}${item.sample_value ? ` · 示例: ${item.sample_value}` : ''}`,
+      value: JSON.stringify({
+        file_path_template: item.file_path_template,
+        target_path: item.target_path,
+      }),
+    }))
+}
+
+function selectedYamlDocumentValue(rule: GitOpsRuleFormItem) {
+  if (!rule.document_kind) {
+    return undefined
+  }
+  return JSON.stringify({
     document_kind: rule.document_kind,
-    document_name: rule.document_name,
-    target_path: rule.target_path,
-    value_type: '',
-    sample_value: '',
-    display_name: '',
+    document_name: rule.document_name || '',
   })
 }
 
-function isYamlFieldCandidateSelected(candidate: GitOpsFieldCandidate) {
-  return currentYamlFieldCandidateValue() === buildGitOpsFieldCandidateValue(candidate)
-}
-
-function syncYamlFieldExpandedKeys() {
-  const groups = gitOpsFieldDocumentGroups.value
-  if (!groups.length) {
-    yamlFieldExpandedKeys.value = []
+async function reloadCurrentGitOpsCandidates() {
+  const appID = String(formState.application_id || '').trim()
+  if (!appID) {
     return
   }
-  const currentValue = currentYamlFieldCandidateValue()
-  const matchedGroup = currentValue
-    ? groups.find((group) => group.fields.some((field) => buildGitOpsFieldCandidateValue(field) === currentValue))
-    : null
-  const defaults = groups.slice(0, Math.min(groups.length, 4)).map((item) => item.key)
-  if (matchedGroup && !defaults.includes(matchedGroup.key)) {
-    defaults.unshift(matchedGroup.key)
+  if (isHelmGitOps()) {
+    await loadGitOpsValuesCandidates(appID)
+    return
   }
-  yamlFieldExpandedKeys.value = Array.from(new Set(defaults))
+  await loadGitOpsFieldCandidates(appID)
 }
 
 function resolveGitOpsSourceLabel(paramKey: string) {
@@ -382,17 +410,43 @@ function resolveGitOpsSourceLabel(paramKey: string) {
   return gitOpsSourceOptions.value.find((item) => item.value === normalized)?.label || `${resolvePlatformParamName(normalized)} (${normalized})`
 }
 
-function findGitOpsFieldCandidate(rule: GitOpsRuleFormItem) {
-  return gitOpsFieldCandidates.value.find(
-    (item) =>
-      item.file_path_template === rule.file_path_template &&
-      item.document_kind === rule.document_kind &&
-      String(item.document_name || '') === String(rule.document_name || '') &&
-      item.target_path === rule.target_path,
+function matchesGitOpsRuleCandidate(rule: GitOpsRuleFormItem, candidate: GitOpsFieldCandidate) {
+  return (
+    candidate.file_path_template === rule.file_path_template &&
+    candidate.document_kind === rule.document_kind &&
+    String(candidate.document_name || '') === String(rule.document_name || '') &&
+    candidate.target_path === rule.target_path
   )
 }
 
+function findGitOpsFieldCandidate(rule: GitOpsRuleFormItem) {
+  return gitOpsFieldCandidates.value.find((item) => matchesGitOpsRuleCandidate(rule, item))
+}
+
 function formatGitOpsRuleTargetSummary(rule: GitOpsRuleFormItem) {
+  if (normalizedGitOpsType(gitOpsType.value) === 'helm') {
+    const candidate = platformValuesCandidates().find(
+      (item) =>
+        String(item.file_path_template || '').trim() === String(rule.file_path_template || '').trim() &&
+        String(item.target_path || '').trim() === String(rule.target_path || '').trim(),
+    )
+    if (candidate) {
+      return {
+        title: 'Values 路径',
+        file: candidate.file_path_template,
+        path: candidate.target_path,
+        sample: candidate.sample_value || '-',
+        stale: false,
+      }
+    }
+    return {
+      title: 'Values 路径',
+      file: rule.file_path_template || '-',
+      path: rule.target_path || '-',
+      sample: '-',
+      stale: Boolean(rule.file_path_template || rule.target_path),
+    }
+  }
   const candidate = findGitOpsFieldCandidate(rule)
   if (candidate) {
     return {
@@ -431,7 +485,40 @@ function resetFormState() {
   resetScopeState('cd')
   bindingOptions.value = []
   gitOpsFieldCandidates.value = []
+  gitOpsValuesCandidates.value = []
   gitopsRules.value = []
+  gitOpsType.value = 'kustomize'
+}
+
+function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGitOpsRulePayload {
+  let filePathTemplate = String(item.file_path_template || '').trim()
+  let targetPath = String(item.target_path || '').trim()
+  let documentKind = String(item.document_kind || '').trim()
+  let documentName = String(item.document_name || '').trim()
+
+  // 兼容历史或异常态：如果 Values 路径下拉把组合值直接落进了 target_path，
+  // 提交前在前端再兜底解析一次，避免保存时因为候选键不匹配而失败。
+  if (normalizedGitOpsType(gitOpsType.value) === 'helm' && targetPath.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(targetPath)
+      filePathTemplate = String(parsed.file_path_template || filePathTemplate).trim()
+      targetPath = String(parsed.target_path || '').trim()
+      documentKind = 'values'
+      documentName = ''
+    } catch {
+      // noop: 保留原值，由后端继续兜底校验。
+    }
+  }
+
+  return {
+    source_param_key: item.source_param_key,
+    source_from: item.source_from,
+    file_path_template: filePathTemplate,
+    document_kind: documentKind,
+    document_name: documentName || undefined,
+    target_path: targetPath,
+    value_template: item.value_template || undefined,
+  }
 }
 
 function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
@@ -441,21 +528,14 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     ci_binding_id: scopeStates.ci.enabled ? scopeStates.ci.binding_id.trim() || undefined : undefined,
     cd_binding_id: scopeStates.cd.enabled ? scopeStates.cd.binding_id.trim() || undefined : undefined,
     cd_provider: scopeStates.cd.enabled ? (selectedBinding('cd')?.provider || 'argocd') : undefined,
+    gitops_type: scopeStates.cd.enabled && !selectedBinding('cd') ? normalizedGitOpsType(gitOpsType.value) : undefined,
     status: formState.status,
     remark: formState.remark.trim() || undefined,
     ci_param_def_ids: scopeStates.ci.enabled ? [...scopeStates.ci.selected_param_def_ids] : [],
     cd_param_def_ids: scopeStates.cd.enabled ? [...scopeStates.cd.selected_param_def_ids] : [],
     gitops_rules:
       scopeStates.cd.enabled && !selectedBinding('cd')
-        ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => ({
-            source_param_key: item.source_param_key,
-            source_from: item.source_from,
-            file_path_template: item.file_path_template,
-            document_kind: item.document_kind,
-            document_name: item.document_name || undefined,
-            target_path: item.target_path,
-            value_template: item.value_template || undefined,
-          }))
+        ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item))
         : [],
   }
 }
@@ -484,14 +564,30 @@ async function loadGitOpsFieldCandidates(applicationID: string, silent = false) 
   try {
     const response = await listGitOpsFieldCandidates(appID)
     gitOpsFieldCandidates.value = response.data
-    if (yamlSelectorVisible.value) {
-      await nextTick()
-      syncYamlFieldExpandedKeys()
-    }
   } catch (error) {
     gitOpsFieldCandidates.value = []
     if (!silent) {
       message.error(extractHTTPErrorMessage(error, 'GitOps YAML 字段加载失败'))
+    }
+  } finally {
+    loadingGitOpsFieldCandidates.value = false
+  }
+}
+
+async function loadGitOpsValuesCandidates(applicationID: string, silent = false) {
+  const appID = String(applicationID || '').trim()
+  if (!appID) {
+    gitOpsValuesCandidates.value = []
+    return
+  }
+  loadingGitOpsFieldCandidates.value = true
+  try {
+    const response = await listGitOpsValuesCandidates(appID)
+    gitOpsValuesCandidates.value = response.data
+  } catch (error) {
+    gitOpsValuesCandidates.value = []
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, 'GitOps Values 路径加载失败'))
     }
   } finally {
     loadingGitOpsFieldCandidates.value = false
@@ -603,8 +699,12 @@ async function handleApplicationChange(value: string | undefined) {
   resetScopeState('ci')
   resetScopeState('cd')
   gitopsRules.value = []
+  gitOpsType.value = 'kustomize'
   await loadBindings(formState.application_id)
-  await loadGitOpsFieldCandidates(formState.application_id)
+  await Promise.all([
+    loadGitOpsFieldCandidates(formState.application_id, true),
+    loadGitOpsValuesCandidates(formState.application_id, true),
+  ])
 }
 
 async function handleScopeBindingChange(scope: ReleasePipelineScope, value: string | undefined) {
@@ -619,10 +719,27 @@ async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: bo
     resetScopeState(scope)
     if (scope === 'cd') {
       gitopsRules.value = []
+      gitOpsType.value = 'kustomize'
     }
     return
   }
   await loadSelectableParams(scope)
+}
+
+function handleGitOpsTypeChange(value: ReleaseTemplateGitOpsType) {
+  const nextType = normalizedGitOpsType(value)
+  if (nextType === gitOpsType.value) {
+    return
+  }
+  gitOpsType.value = nextType
+  gitopsRules.value = gitopsRules.value.map((item) =>
+    createGitOpsRuleFormItem({
+      ...item,
+      document_kind: nextType === 'helm' ? 'values' : '',
+      document_name: nextType === 'helm' ? '' : item.document_name,
+      target_path: '',
+    }),
+  )
 }
 
 function getRowSelection(scope: ReleasePipelineScope) {
@@ -652,9 +769,22 @@ function handleGitOpsRuleSourceChange(rule: GitOpsRuleFormItem, value: string | 
   }
 }
 
-function handleGitOpsRuleTargetChange(rule: GitOpsRuleFormItem, value: string | undefined) {
+function clearGitOpsRuleTarget(rule: GitOpsRuleFormItem) {
+  rule.file_path_template = ''
+  rule.document_kind = ''
+  rule.document_name = ''
+  rule.target_path = ''
+}
+
+function handleYamlFileTemplateChange(rule: GitOpsRuleFormItem, value: string | undefined) {
+  rule.file_path_template = String(value || '').trim()
+  rule.document_kind = ''
+  rule.document_name = ''
+  rule.target_path = ''
+}
+
+function handleYamlDocumentChange(rule: GitOpsRuleFormItem, value: string | undefined) {
   if (!value) {
-    rule.file_path_template = ''
     rule.document_kind = ''
     rule.document_name = ''
     rule.target_path = ''
@@ -662,41 +792,39 @@ function handleGitOpsRuleTargetChange(rule: GitOpsRuleFormItem, value: string | 
   }
   try {
     const parsed = JSON.parse(String(value))
-    rule.file_path_template = String(parsed.file_path_template || '').trim()
     rule.document_kind = String(parsed.document_kind || '').trim()
     rule.document_name = String(parsed.document_name || '').trim()
-    rule.target_path = String(parsed.target_path || '').trim()
+    rule.target_path = ''
   } catch {
-    message.error('YAML 字段选择解析失败，请重新选择')
+    message.error('YAML 资源选择解析失败，请重新选择')
   }
 }
 
-function openYamlFieldSelector(rule: GitOpsRuleFormItem) {
-  yamlSelectorRuleID.value = rule.local_id
-  yamlSelectorVisible.value = true
-  void nextTick(() => {
-    syncYamlFieldExpandedKeys()
-  })
-  void loadGitOpsFieldCandidates(formState.application_id, true)
+function handleYamlTargetPathChange(rule: GitOpsRuleFormItem, value: string | undefined) {
+  rule.target_path = String(value || '').trim()
 }
 
-function closeYamlFieldSelector() {
-  yamlSelectorVisible.value = false
-  yamlSelectorRuleID.value = ''
-  yamlFieldExpandedKeys.value = []
+function handleValuesFileTemplateChange(rule: GitOpsRuleFormItem, value: string | undefined) {
+  rule.file_path_template = String(value || '').trim()
+  rule.document_kind = 'values'
+  rule.document_name = ''
+  rule.target_path = ''
 }
 
-function currentYamlSelectorRule() {
-  return gitopsRules.value.find((item) => item.local_id === yamlSelectorRuleID.value)
-}
-
-function handleYamlFieldCandidateSelect(candidate: GitOpsFieldCandidate) {
-  const rule = currentYamlSelectorRule()
-  if (!rule) {
+function handleValuesTargetPathChange(rule: GitOpsRuleFormItem, value: string | undefined) {
+  rule.document_kind = 'values'
+  rule.document_name = ''
+  if (!value) {
+    rule.target_path = ''
     return
   }
-  handleGitOpsRuleTargetChange(rule, buildGitOpsFieldCandidateValue(candidate))
-  closeYamlFieldSelector()
+  try {
+    const parsed = JSON.parse(String(value))
+    rule.file_path_template = String(parsed.file_path_template || rule.file_path_template || '').trim()
+    rule.target_path = String(parsed.target_path || '').trim()
+  } catch {
+    rule.target_path = String(value || '').trim()
+  }
 }
 
 function handleSearch() {
@@ -747,10 +875,12 @@ async function openEditModal(record: ReleaseTemplate) {
     formState.application_id = template.application_id
     formState.status = template.status
     formState.remark = template.remark
+    gitOpsType.value = normalizedGitOpsType(template.gitops_type)
 
     await Promise.all([
       loadBindings(formState.application_id),
-      loadGitOpsFieldCandidates(formState.application_id),
+      loadGitOpsFieldCandidates(formState.application_id, true),
+      loadGitOpsValuesCandidates(formState.application_id, true),
     ])
     applyBindingsToForm(bindings)
 
@@ -778,7 +908,11 @@ async function openEditModal(record: ReleaseTemplate) {
       }),
     )
     if (gitopsRules.value.some((item) => formatGitOpsRuleTargetSummary(item).stale)) {
-      message.warning('检测到部分 GitOps 规则引用的 YAML 字段已变化，请在保存前重新确认。')
+      message.warning(
+        isHelmGitOps()
+          ? '检测到部分 GitOps 规则引用的 Values 路径已变化，请在保存前重新确认。'
+          : '检测到部分 GitOps 规则引用的 YAML 字段已变化，请在保存前重新确认。',
+      )
     }
   } catch (error) {
     modalVisible.value = false
@@ -812,7 +946,11 @@ function validateScopeState() {
       if (!item.source_param_key.trim()) {
         throw new Error('请为 GitOps 替换规则选择标准字段')
       }
-      if (!item.file_path_template.trim() || !item.document_kind.trim() || !item.target_path.trim()) {
+      if (isHelmGitOps()) {
+        if (!item.file_path_template.trim() || !item.target_path.trim()) {
+          throw new Error('请为 GitOps 替换规则选择 Values 路径')
+        }
+      } else if (!item.file_path_template.trim() || !item.document_kind.trim() || !item.target_path.trim()) {
         throw new Error('请为 GitOps 替换规则选择 YAML 字段')
       }
     }
@@ -1098,7 +1236,9 @@ onMounted(async () => {
                 type="warning"
                 show-icon
                 message="当前未选择 CD 绑定管线，将按 ArgoCD 执行。"
-                description="先从左侧 CI 已勾选的标准字段中选择要引用的 Key，再为它绑定 GitOps YAML 字段；系统内置字段也可以直接引用。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER，当前版本如果使用 project_name，会按单值场景处理。"
+                :description="isHelmGitOps()
+                  ? '当前 GitOps 类型为 Helm。平台会按规则修改 Helm values 文件并触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
+                  : '当前 GitOps 类型为 Kustomize。先从左侧 CI 已勾选的标准字段中选择要引用的 Key，再为它绑定 GitOps YAML 字段；系统内置字段也可以直接引用。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'"
               />
               <a-alert
                 v-else-if="scopeStates.cd.enabled && selectedBinding('cd')"
@@ -1109,17 +1249,42 @@ onMounted(async () => {
               />
 
               <div v-if="isCDUsingArgoCD()" class="gitops-rule-panel">
+                <a-form-item label="GitOps 类型" class="gitops-type-item">
+                  <a-segmented
+                    :value="gitOpsType"
+                    :options="[
+                      { label: 'Kustomize', value: 'kustomize' },
+                      { label: 'Helm', value: 'helm' },
+                    ]"
+                    @change="(value: string | number) => handleGitOpsTypeChange(String(value) as ReleaseTemplateGitOpsType)"
+                  />
+                </a-form-item>
+
                 <div class="gitops-rule-header">
                   <div>
                     <div class="gitops-rule-title">GitOps 替换规则</div>
-                    <div class="gitops-rule-subtitle">先选可引用的标准字段，再把它绑定到 GitOps YAML 的具体位置；打开模板或字段选择器时会实时拉取最新 YAML 结构。</div>
+                    <div class="gitops-rule-subtitle">
+                      {{
+                        isHelmGitOps()
+                          ? '先选可引用的标准字段和定位字段，再直接下拉选择目标 values 文件与路径；推荐优先落到平台专用 values 文件里，运行时平台只负责写回这些受控键路径。'
+                          : '先选可引用的标准字段和定位字段，再直接下拉选择目标文件、资源和字段；运行时平台会按定位字段的真实值渲染最终目标。'
+                      }}
+                    </div>
                   </div>
-                  <a-button type="dashed" size="small" @click="addGitOpsRule">新增规则</a-button>
+                  <a-space>
+                    <a-button size="small" :loading="loadingGitOpsFieldCandidates" @click="reloadCurrentGitOpsCandidates">
+                      <template #icon><ReloadOutlined /></template>
+                      {{ isHelmGitOps() ? '同步 Values' : '同步字段' }}
+                    </a-button>
+                    <a-button type="dashed" size="small" @click="addGitOpsRule">新增规则</a-button>
+                  </a-space>
                 </div>
 
                 <a-empty
-                  v-if="!loadingGitOpsFieldCandidates && gitOpsFieldCandidates.length === 0"
-                  description="当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好。"
+                  v-if="!loadingGitOpsFieldCandidates && ((isHelmGitOps() && platformValuesCandidates().length === 0) || (!isHelmGitOps() && gitOpsFieldCandidates.length === 0))"
+                  :description="isHelmGitOps()
+                    ? '当前应用还没有扫描到平台专用的 Helm values 路径，请先确认 GitOps 目录下已准备好 platform.values-{env}.yaml。'
+                    : '当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好。'"
                 />
 
                 <div v-for="rule in gitopsRules" :key="rule.local_id" class="gitops-rule-item">
@@ -1150,24 +1315,82 @@ onMounted(async () => {
 
                   <div class="gitops-target-preview">
                     <div class="gitops-target-preview-header">
-                      <div class="gitops-target-preview-title">YAML 目标字段</div>
-                      <a-space>
-                        <a-tag :color="formatGitOpsRuleTargetSummary(rule).stale ? 'error' : 'processing'">
-                          {{ formatGitOpsRuleTargetSummary(rule).stale ? '字段已变化' : '字段有效' }}
-                        </a-tag>
-                        <a-button class="yaml-selector-button" @click="openYamlFieldSelector(rule)">
-                          {{ rule.target_path ? '重新选择 YAML 字段' : '选择 YAML 字段' }}
-                        </a-button>
-                      </a-space>
+                      <div class="gitops-target-preview-title">{{ isHelmGitOps() ? 'Values 目标路径' : 'YAML 目标字段' }}</div>
+                      <a-tag :color="formatGitOpsRuleTargetSummary(rule).stale ? 'error' : 'processing'">
+                        {{ formatGitOpsRuleTargetSummary(rule).stale ? '字段已变化' : '字段有效' }}
+                      </a-tag>
                     </div>
+                    <a-row v-if="isHelmGitOps()" :gutter="12" class="gitops-target-select-row">
+                      <a-col :span="24">
+                        <a-form-item label="目标文件" class="gitops-inline-item">
+                          <a-input :value="pathBaseName(rule.file_path_template || valuesFileOptions()[0]?.value || 'platform.values-{env}.yaml')" readonly />
+                        </a-form-item>
+                      </a-col>
+                      <a-col :span="24">
+                        <a-form-item label="Values 路径" class="gitops-inline-item">
+                          <a-select
+                            :value="rule.target_path ? JSON.stringify({ file_path_template: rule.file_path_template, target_path: rule.target_path }) : undefined"
+                            allow-clear
+                            show-search
+                            option-filter-prop="label"
+                            placeholder="请选择 Values 路径"
+                            :options="valuesPathOptions(rule)"
+                            @change="(value: string | undefined) => handleValuesTargetPathChange(rule, value)"
+                          />
+                        </a-form-item>
+                      </a-col>
+                    </a-row>
+                    <a-row v-else :gutter="12" class="gitops-target-select-row">
+                      <a-col :span="8">
+                        <a-form-item label="目标文件" class="gitops-inline-item">
+                          <a-select
+                            :value="rule.file_path_template || undefined"
+                            allow-clear
+                            show-search
+                            option-filter-prop="label"
+                            placeholder="请选择 YAML 文件"
+                            :options="yamlFileOptions(rule)"
+                            @change="(value: string | undefined) => handleYamlFileTemplateChange(rule, value)"
+                          />
+                        </a-form-item>
+                      </a-col>
+                      <a-col :span="8">
+                        <a-form-item label="目标资源" class="gitops-inline-item">
+                          <a-select
+                            :value="selectedYamlDocumentValue(rule)"
+                            allow-clear
+                            show-search
+                            option-filter-prop="label"
+                            placeholder="请选择资源"
+                            :options="yamlDocumentOptions(rule)"
+                            :disabled="!rule.file_path_template"
+                            @change="(value: string | undefined) => handleYamlDocumentChange(rule, value)"
+                          />
+                        </a-form-item>
+                      </a-col>
+                      <a-col :span="8">
+                        <a-form-item label="目标字段" class="gitops-inline-item">
+                          <a-select
+                            :value="rule.target_path || undefined"
+                            allow-clear
+                            show-search
+                            option-filter-prop="label"
+                            placeholder="请选择字段路径"
+                            :options="yamlFieldOptions(rule)"
+                            :disabled="!rule.file_path_template || !rule.document_kind"
+                            @change="(value: string | undefined) => handleYamlTargetPathChange(rule, value)"
+                          />
+                        </a-form-item>
+                      </a-col>
+                    </a-row>
                     <a-descriptions :column="1" size="small" bordered>
-                      <a-descriptions-item label="资源">
+                      <a-descriptions-item :label="isHelmGitOps() ? '类型' : '资源'">
                         {{ formatGitOpsRuleTargetSummary(rule).title }}
                       </a-descriptions-item>
-                      <a-descriptions-item label="文件">
+                      <a-descriptions-item :label="isHelmGitOps() ? 'Values 文件模版' : '文件'">
                         <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).file }}</span>
                       </a-descriptions-item>
-                      <a-descriptions-item label="字段路径">
+                      <a-descriptions-item :label="isHelmGitOps() ? 'Values 路径' : '字段路径'">
                         <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).path }}</span>
                       </a-descriptions-item>
                       <a-descriptions-item label="当前示例值">
@@ -1180,7 +1403,7 @@ onMounted(async () => {
                     <a-input
                       v-model:value="rule.value_template"
                       allow-clear
-                      placeholder="默认会使用 {标准Key}，例如 {project_name}-config"
+                      :placeholder="isHelmGitOps() ? '默认会使用 {标准Key}，例如 {image_version}' : '默认会使用 {标准Key}，例如 {project_name}-config'"
                     />
                   </a-form-item>
                 </div>
@@ -1214,83 +1437,6 @@ onMounted(async () => {
           </a-col>
         </a-row>
         </a-form>
-      </a-spin>
-    </a-modal>
-
-    <a-modal
-      :open="yamlSelectorVisible"
-      title="选择 YAML 字段"
-      :width="900"
-      :body-style="{ maxHeight: '72vh', overflow: 'auto' }"
-      ok-text="关闭"
-      :cancel-button-props="{ style: { display: 'none' } }"
-      @ok="closeYamlFieldSelector"
-      @cancel="closeYamlFieldSelector"
-    >
-      <a-alert
-        class="scope-binding-alert"
-        type="info"
-        show-icon
-        message="已按 文件 -> 资源 -> 字段 的顺序整理为可选视图"
-        description="这里会实时读取当前 GitOps 仓库里的 YAML 叶子字段。点击字段行即可绑定到当前规则，若 YAML 刚调整过，可以先点“同步 YAML”。"
-      />
-      <div class="yaml-selector-toolbar">
-        <a-button size="small" :loading="loadingGitOpsFieldCandidates" @click="loadGitOpsFieldCandidates(formState.application_id)">
-          <template #icon><ReloadOutlined /></template>
-          同步 YAML
-        </a-button>
-      </div>
-      <a-spin :spinning="loadingGitOpsFieldCandidates">
-        <a-empty
-          v-if="!loadingGitOpsFieldCandidates && gitOpsFieldCandidates.length === 0"
-          description="当前没有可选择的 YAML 字段"
-        />
-        <div v-else class="yaml-field-document-list">
-          <a-collapse v-model:activeKey="yamlFieldExpandedKeys" ghost class="yaml-field-collapse">
-            <a-collapse-panel
-              v-for="group in gitOpsFieldDocumentGroups"
-              :key="group.key"
-              class="yaml-field-document-card"
-            >
-              <template #header>
-                <div class="yaml-field-document-header">
-                  <div>
-                    <div class="yaml-field-document-title">{{ group.display_name }}</div>
-                    <div class="yaml-field-document-file">{{ group.file_path_template }}</div>
-                    <div class="yaml-field-document-preview">字段预览：{{ yamlFieldPreview(group) || '暂无可选字段' }}</div>
-                  </div>
-                  <a-tag color="blue">{{ group.fields.length }} 个字段</a-tag>
-                </div>
-              </template>
-
-              <div class="yaml-field-lines">
-                <div
-                  v-for="field in group.fields"
-                  :key="buildGitOpsFieldCandidateValue(field)"
-                  class="yaml-field-line"
-                  :class="{ 'yaml-field-line-selected': isYamlFieldCandidateSelected(field) }"
-                >
-                  <div class="yaml-field-line-main" :style="yamlFieldIndentStyle(field.target_path)">
-                    <span class="yaml-field-line-key">{{ yamlFieldLeafLabel(field.target_path) }}</span>
-                    <span class="yaml-field-line-value">: {{ field.sample_value || '-' }}</span>
-                  </div>
-                  <div class="yaml-field-line-actions">
-                    <div v-if="yamlFieldParentPath(field.target_path)" class="yaml-field-line-path">
-                      {{ yamlFieldParentPath(field.target_path) }}
-                    </div>
-                    <a-button
-                      type="link"
-                      size="small"
-                      @click="handleYamlFieldCandidateSelect(field)"
-                    >
-                      {{ isYamlFieldCandidateSelected(field) ? '已选中' : '选择字段' }}
-                    </a-button>
-                  </div>
-                </div>
-              </div>
-            </a-collapse-panel>
-          </a-collapse>
-        </div>
       </a-spin>
     </a-modal>
   </div>
@@ -1389,10 +1535,6 @@ onMounted(async () => {
   color: #111827;
 }
 
-.yaml-selector-button {
-  min-height: 36px;
-}
-
 .gitops-rule-source-tip {
   margin: -4px 0 12px;
   color: #6b7280;
@@ -1420,142 +1562,16 @@ onMounted(async () => {
   color: #111827;
 }
 
+.gitops-target-select-row {
+  margin-bottom: 12px;
+}
+
+.gitops-inline-item {
+  margin-bottom: 0;
+}
+
 .gitops-code-text {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  word-break: break-all;
-}
-
-.yaml-selector-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  margin: 12px 0;
-}
-
-.yaml-field-document-list {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  max-height: 560px;
-  overflow: auto;
-}
-
-.yaml-field-collapse {
-  background: transparent;
-}
-
-.yaml-field-collapse :deep(.ant-collapse-item) {
-  margin-bottom: 16px;
-  border: 1px solid #e5e7eb;
-  border-radius: 14px;
-  background: #fff;
-  overflow: hidden;
-}
-
-.yaml-field-collapse :deep(.ant-collapse-header) {
-  padding: 0 !important;
-  align-items: stretch !important;
-}
-
-.yaml-field-collapse :deep(.ant-collapse-expand-icon) {
-  padding-inline-start: 16px;
-  align-self: center;
-}
-
-.yaml-field-collapse :deep(.ant-collapse-content-box) {
-  padding: 0 !important;
-}
-
-.yaml-field-document-card {
-  overflow: hidden;
-}
-
-.yaml-field-document-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 14px 16px;
-  background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
-  border-bottom: 1px solid #edf2f7;
-}
-
-.yaml-field-document-title {
-  font-weight: 600;
-  color: #111827;
-}
-
-.yaml-field-document-file {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #6b7280;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  word-break: break-all;
-}
-
-.yaml-field-document-preview {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #64748b;
-}
-
-.yaml-field-lines {
-  display: flex;
-  flex-direction: column;
-}
-
-.yaml-field-line {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  border-top: 1px solid #f1f5f9;
-  padding: 10px 16px;
-  background: transparent;
-  transition: background-color 0.2s ease, border-color 0.2s ease;
-}
-
-.yaml-field-line:first-child {
-  border-top: 0;
-}
-
-.yaml-field-line:hover {
-  background: #f8fafc;
-}
-
-.yaml-field-line-selected {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-}
-
-.yaml-field-line-main {
-  flex: 1;
-  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-  color: #111827;
-  word-break: break-all;
-}
-
-.yaml-field-line-key {
-  font-weight: 600;
-}
-
-.yaml-field-line-value {
-  color: #2563eb;
-  word-break: break-all;
-}
-
-.yaml-field-line-actions {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  min-width: 160px;
-}
-
-.yaml-field-line-path {
-  font-size: 12px;
-  color: #6b7280;
-  text-align: right;
   word-break: break-all;
 }
 
@@ -1585,20 +1601,6 @@ onMounted(async () => {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .yaml-field-line {
-    flex-direction: column;
-  }
-
-  .yaml-field-line-actions {
-    width: 100%;
-    min-width: 0;
-    align-items: flex-start;
-  }
-
-  .yaml-field-line-path {
-    text-align: left;
   }
 }
 </style>

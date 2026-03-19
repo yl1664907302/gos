@@ -37,3 +37,11 @@ export interface GitOpsFieldCandidate {
   sample_value: string
   display_name: string
 }
+
+export interface GitOpsValuesCandidate {
+  file_path_template: string
+  target_path: string
+  value_type: string
+  sample_value: string
+  display_name: string
+}

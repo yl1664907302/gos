@@ -16,20 +16,22 @@ type Repository interface {
 }
 
 type ListFilter struct {
-	ParamKey string
-	Name     string
-	Status   *Status
-	Builtin  *bool
-	Page     int
-	PageSize int
+	ParamKey      string
+	Name          string
+	Status        *Status
+	Builtin       *bool
+	GitOpsLocator *bool
+	Page          int
+	PageSize      int
 }
 
 type UpdateInput struct {
-	ParamKey    string
-	Name        string
-	Description string
-	ParamType   ParamType
-	Required    bool
-	Builtin     bool
-	Status      Status
+	ParamKey      string
+	Name          string
+	Description   string
+	ParamType     ParamType
+	Required      bool
+	GitOpsLocator bool
+	Builtin       bool
+	Status        Status
 }

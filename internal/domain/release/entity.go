@@ -299,6 +299,7 @@ type ReleaseTemplate struct {
 	BindingID       string
 	BindingName     string
 	BindingType     string
+	GitOpsType      GitOpsType
 	Status          TemplateStatus
 	Remark          string
 	ParamCount      int
@@ -354,6 +355,22 @@ func (s GitOpsRuleSourceFrom) Valid() bool {
 	}
 }
 
+type GitOpsType string
+
+const (
+	GitOpsTypeKustomize GitOpsType = "kustomize"
+	GitOpsTypeHelm      GitOpsType = "helm"
+)
+
+func (s GitOpsType) Valid() bool {
+	switch s {
+	case "", GitOpsTypeKustomize, GitOpsTypeHelm:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReleaseTemplateGitOpsRule 描述 CD=ArgoCD 时，标准平台 Key 与 YAML 字段之间的替换关系。
 //
 // 当前版本先把规则挂在“发布模板”上，而不是直接挂在应用上：
@@ -367,6 +384,8 @@ type ReleaseTemplateGitOpsRule struct {
 	SourceParamKey   string
 	SourceParamName  string
 	SourceFrom       GitOpsRuleSourceFrom
+	LocatorParamKey  string
+	LocatorParamName string
 	FilePathTemplate string
 	DocumentKind     string
 	DocumentName     string
