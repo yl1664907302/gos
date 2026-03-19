@@ -73,7 +73,7 @@ export const router = createRouter({
           path: 'applications',
           name: 'application-list',
           component: ApplicationListView,
-          meta: { title: '我的应用', permission: ['application.view', 'application.manage'] },
+          meta: { title: '我的应用', permission: ['application.view', 'application.manage', 'release.create'] },
         },
         {
           path: 'applications/new',
@@ -85,7 +85,7 @@ export const router = createRouter({
           path: 'applications/:id',
           name: 'application-detail',
           component: ApplicationDetailView,
-          meta: { title: '应用详情', permission: ['application.view', 'application.manage'] },
+          meta: { title: '应用详情', permission: ['application.view', 'application.manage', 'release.create'] },
         },
         {
           path: 'applications/:id/edit',

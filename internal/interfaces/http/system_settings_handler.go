@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -41,7 +42,7 @@ type UpdateReleaseSettingsRequest struct {
 }
 
 func (h *SystemSettingsHandler) GetReleaseSettings(c *gin.Context) {
-	if !ensureAnyPermission(c, h.authz, "release.create", "release.template.manage", "system.permission.manage") {
+	if !h.ensureReleaseSettingsVisible(c) {
 		return
 	}
 	if h.query == nil {
@@ -59,6 +60,53 @@ func (h *SystemSettingsHandler) GetReleaseSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *SystemSettingsHandler) ensureReleaseSettingsVisible(c *gin.Context) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if h.authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+
+	for _, code := range []string{"release.template.manage", "system.permission.manage"} {
+		allowed, err := h.authz.HasPermission(c.Request.Context(), user, code, "", "")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return false
+		}
+		if allowed {
+			return true
+		}
+	}
+
+	items, err := h.authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "release.create" {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
+			continue
+		}
+		if strings.TrimSpace(item.ScopeValue) == "" {
+			continue
+		}
+		return true
+	}
+
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+	return false
 }
 
 func (h *SystemSettingsHandler) UpdateReleaseSettings(c *gin.Context) {

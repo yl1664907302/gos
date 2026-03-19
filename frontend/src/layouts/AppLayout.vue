@@ -90,6 +90,7 @@ const roleText = computed(() => (authStore.isAdmin ? '管理员' : '普通用户
 
 const canViewApplications = computed(() => authStore.hasPermission('application.view'))
 const canManageApplications = computed(() => authStore.hasPermission('application.manage'))
+const canCreateRelease = computed(() => authStore.hasPermission('release.create'))
 const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
 const canManagePlatformParam = computed(() => authStore.hasPermission('platform_param.manage'))
 const canViewComponent = computed(() => authStore.hasPermission('component.view'))
@@ -108,6 +109,7 @@ const showApplicationMenu = computed(
   () =>
     canViewApplications.value ||
     canManageApplications.value ||
+    canCreateRelease.value ||
     canViewPipeline.value ||
     canManagePlatformParam.value,
 )
@@ -200,7 +202,11 @@ async function handleLogout() {
           </template>
           <template #title>应用管理</template>
 
-          <a-menu-item v-if="canViewApplications || canManageApplications" key="my-applications" @click="goToApplications">
+          <a-menu-item
+            v-if="canViewApplications || canManageApplications || canCreateRelease"
+            key="my-applications"
+            @click="goToApplications"
+          >
             我的应用
           </a-menu-item>
           <a-menu-item v-if="canViewPipeline" key="pipeline-bindings" @click="goToPipelineBindings">

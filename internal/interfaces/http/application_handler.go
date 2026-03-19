@@ -275,7 +275,16 @@ func ensureApplicationVisible(c *gin.Context, authz RequestAuthorizer, applicati
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return false
 	}
-	if !allowed {
+	if allowed {
+		return true
+	}
+
+	releaseAllowed, err := authz.HasPermission(c.Request.Context(), user, "release.create", "application", strings.TrimSpace(applicationID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	if !releaseAllowed {
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
 		return false
 	}
@@ -320,7 +329,8 @@ func resolveVisibleApplicationIDsForApplications(
 		if !item.Enabled {
 			continue
 		}
-		if strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "application.view" {
+		permissionCode := strings.ToLower(strings.TrimSpace(item.PermissionCode))
+		if permissionCode != "application.view" && permissionCode != "release.create" {
 			continue
 		}
 		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {

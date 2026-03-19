@@ -228,7 +228,7 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 
 	var lastErr error
 	for _, endpoint := range endpoints {
-		queueURL, statusCode, err := c.post(ctx, endpoint, body, crumbHeader{})
+		queueURL, statusCode, err := c.postTriggerBuild(ctx, endpoint, body, crumbHeader{})
 		if err == nil {
 			return queueURL, nil
 		}
@@ -236,7 +236,7 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 		if statusCode == http.StatusForbidden {
 			crumbField, crumbValue, crumbErr := c.getCrumb(ctx)
 			if crumbErr == nil {
-				queueURL, _, crumbPostErr := c.post(ctx, endpoint, body, crumbHeader{field: crumbField, value: crumbValue})
+				queueURL, _, crumbPostErr := c.postTriggerBuild(ctx, endpoint, body, crumbHeader{field: crumbField, value: crumbValue})
 				if crumbPostErr == nil {
 					return queueURL, nil
 				}
@@ -251,6 +251,17 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 		lastErr = fmt.Errorf("trigger jenkins build failed")
 	}
 	return "", lastErr
+}
+
+func (c *Client) postTriggerBuild(ctx context.Context, endpoint string, encodedForm string, crumb crumbHeader) (string, int, error) {
+	queueURL, statusCode, _, err := c.doPost(ctx, endpoint, encodedForm, crumb, false)
+	if err != nil {
+		return "", statusCode, err
+	}
+	if strings.TrimSpace(queueURL) == "" {
+		return "", statusCode, fmt.Errorf("jenkins build triggered but queue location is empty")
+	}
+	return strings.TrimSpace(queueURL), statusCode, nil
 }
 
 func (c *Client) GetQueueItem(
@@ -1478,13 +1489,24 @@ func (c *Client) getCrumb(ctx context.Context) (string, string, error) {
 }
 
 func (c *Client) post(ctx context.Context, endpoint string, encodedForm string, crumb crumbHeader) (string, int, error) {
+	queueURL, statusCode, _, err := c.doPost(ctx, endpoint, encodedForm, crumb, true)
+	return queueURL, statusCode, err
+}
+
+func (c *Client) doPost(
+	ctx context.Context,
+	endpoint string,
+	encodedForm string,
+	crumb crumbHeader,
+	followRedirect bool,
+) (string, int, []byte, error) {
 	var bodyReader io.Reader
 	if encodedForm != "" {
 		bodyReader = strings.NewReader(encodedForm)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bodyReader)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if c.username != "" && c.apiToken != "" {
 		req.SetBasicAuth(c.username, c.apiToken)
@@ -1494,21 +1516,31 @@ func (c *Client) post(ctx context.Context, endpoint string, encodedForm string, 
 		req.Header.Set(crumb.field, crumb.value)
 	}
 
-	resp, err := c.client.Do(req)
+	client := c.client
+	if !followRedirect {
+		client = &http.Client{
+			Timeout: c.client.Timeout,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if readErr != nil {
-		return "", resp.StatusCode, readErr
+		return "", resp.StatusCode, nil, readErr
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", resp.StatusCode, buildJenkinsHTTPError(resp.StatusCode, responseBody)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusBadRequest {
+		return "", resp.StatusCode, responseBody, buildJenkinsHTTPError(resp.StatusCode, responseBody)
 	}
 	queueURL := strings.TrimSpace(resp.Header.Get("Location"))
-	return queueURL, resp.StatusCode, nil
+	return queueURL, resp.StatusCode, responseBody, nil
 }
 
 func (c *Client) postXML(ctx context.Context, endpoint string, payload string) error {

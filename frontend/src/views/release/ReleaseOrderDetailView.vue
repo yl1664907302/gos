@@ -789,10 +789,25 @@ function logStreamHintText(scope: ReleasePipelineScope) {
   if (state.error) {
     return '日志异常'
   }
+  if (latestScopeStepMessage(scope, 'failed')) {
+    return '执行失败'
+  }
   if (state.ended) {
     return '已结束'
   }
   return ''
+}
+
+function logSectionWarningMessage(scope: ReleasePipelineScope) {
+  const state = getLogState(scope)
+  if (state.error) {
+    return state.error
+  }
+  return latestScopeStepMessage(scope, 'failed')
+}
+
+function logSectionEmptyDescription(scope: ReleasePipelineScope) {
+  return logSectionWarningMessage(scope) || '暂无日志输出'
 }
 
 function syncVisibleLogStreams() {
@@ -1302,8 +1317,14 @@ onBeforeUnmount(() => {
           : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`"
       />
       <template v-else>
-        <a-alert v-if="section.state.error" class="log-alert" type="warning" show-icon :message="section.state.error" />
-        <pre :ref="(el) => setLogPanelRef(section.scope, el as Element | null)" class="log-panel" @scroll="syncLogFollowState(section.scope)">{{ section.state.text || '暂无日志输出' }}</pre>
+        <a-alert
+          v-if="logSectionWarningMessage(section.scope)"
+          class="log-alert"
+          type="warning"
+          show-icon
+          :message="logSectionWarningMessage(section.scope)"
+        />
+        <pre :ref="(el) => setLogPanelRef(section.scope, el as Element | null)" class="log-panel" @scroll="syncLogFollowState(section.scope)">{{ section.state.text || logSectionEmptyDescription(section.scope) }}</pre>
       </template>
     </a-card>
 
