@@ -16,6 +16,7 @@ import (
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	domain "gos/internal/domain/release"
+	"gos/internal/support/logx"
 )
 
 type ReleaseOrderManager struct {
@@ -161,13 +162,30 @@ func (uc *ReleaseOrderManager) Create(
 ) (domain.ReleaseOrder, error) {
 	applicationID := strings.TrimSpace(input.ApplicationID)
 	templateID := strings.TrimSpace(input.TemplateID)
+	logx.Info("release_order", "create_start",
+		logx.F("application_id", applicationID),
+		logx.F("template_id", templateID),
+		logx.F("creator_user_id", input.CreatorUserID),
+		logx.F("trigger_type", input.TriggerType),
+		logx.F("env_code", input.EnvCode),
+		logx.F("params_count", len(input.Params)),
+	)
 	if applicationID == "" || templateID == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id and template_id are required", ErrInvalidInput)
+		err := fmt.Errorf("%w: application_id and template_id are required", ErrInvalidInput)
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 	input.EnvCode = strings.TrimSpace(input.EnvCode)
 
 	app, err := uc.appRepo.GetByID(ctx, applicationID)
 	if err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
@@ -176,28 +194,57 @@ func (uc *ReleaseOrderManager) Create(
 		triggerType = domain.TriggerTypeManual
 	}
 	if !triggerType.Valid() {
+		logx.Error("release_order", "create_failed", ErrInvalidInput,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+			logx.F("reason", "invalid_trigger_type"),
+			logx.F("trigger_type", triggerType),
+		)
 		return domain.ReleaseOrder{}, ErrInvalidInput
 	}
 
 	template, templateBindings, templateParams, err := uc.resolveTemplateForCreate(ctx, applicationID, templateID)
 	if err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	if err := uc.validateCreateTemplateParams(ctx, template.ID, templateBindings, templateParams, input.Params); err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+			logx.F("template_name", template.Name),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	if err := validateArgoCDProjectNameSingleValue(templateBindings, input.Params); err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
 	summary := resolveReleaseOrderSummaryFields(input.Params)
 	envCode := firstNonEmpty(input.EnvCode, summary.EnvCode)
 	if envCode == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: env_code is required", ErrInvalidInput)
+		err := fmt.Errorf("%w: env_code is required", ErrInvalidInput)
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 	primaryExecution, ok := pickPrimaryExecution(executions)
 	if !ok {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
+		err := fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 
 	now := uc.now()
@@ -227,16 +274,39 @@ func (uc *ReleaseOrderManager) Create(
 	executions = uc.buildCreateExecutions(order.ID, now, templateBindings)
 	params, err := uc.buildCreateParams(order.ID, now, input.Params, executions)
 	if err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("application_id", applicationID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	steps, err := uc.buildCreateSteps(order.ID, now, executions, template.GitOpsType, input.Steps)
 	if err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
 	if err := uc.repo.Create(ctx, order, executions, params, steps); err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
+	logx.Info("release_order", "create_success",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("application_id", order.ApplicationID),
+		logx.F("template_id", order.TemplateID),
+		logx.F("env_code", order.EnvCode),
+		logx.F("executions_count", len(executions)),
+		logx.F("params_count", len(params)),
+		logx.F("steps_count", len(steps)),
+	)
 	return uc.repo.GetByID(ctx, order.ID)
 }
 
@@ -247,8 +317,16 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 	triggeredBy string,
 ) (domain.ReleaseOrder, error) {
 	applicationID = strings.TrimSpace(applicationID)
+	logx.Info("release_order", "rollback_create_start",
+		logx.F("application_id", applicationID),
+		logx.F("creator_user_id", creatorUserID),
+	)
 	if applicationID == "" {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+		err := fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+		logx.Error("release_order", "rollback_create_failed", err,
+			logx.F("application_id", applicationID),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 
 	items, _, err := uc.repo.List(ctx, domain.ListFilter{
@@ -258,15 +336,32 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 		PageSize:      1,
 	})
 	if err != nil {
+		logx.Error("release_order", "rollback_create_failed", err,
+			logx.F("application_id", applicationID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	if len(items) == 0 {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前应用暂无可回滚的成功发布单", ErrInvalidInput)
+		err := fmt.Errorf("%w: 当前应用暂无可回滚的成功发布单", ErrInvalidInput)
+		logx.Warn("release_order", "rollback_create_failed",
+			logx.F("application_id", applicationID),
+			logx.F("reason", err.Error()),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 
 	sourceOrder := items[0]
+	logx.Info("release_order", "rollback_source_selected",
+		logx.F("application_id", applicationID),
+		logx.F("source_order_id", sourceOrder.ID),
+		logx.F("source_order_no", sourceOrder.OrderNo),
+	)
 	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
 	if err != nil {
+		logx.Error("release_order", "rollback_create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("source_order_id", sourceOrder.ID),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
@@ -281,7 +376,7 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 		})
 	}
 
-	return uc.Create(ctx, CreateReleaseOrderInput{
+	order, err := uc.Create(ctx, CreateReleaseOrderInput{
 		ApplicationID:   sourceOrder.ApplicationID,
 		TemplateID:      sourceOrder.TemplateID,
 		PreviousOrderNo: sourceOrder.OrderNo,
@@ -292,6 +387,20 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 		TriggeredBy:     strings.TrimSpace(triggeredBy),
 		Params:          params,
 	})
+	if err != nil {
+		logx.Error("release_order", "rollback_create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("source_order_no", sourceOrder.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	logx.Info("release_order", "rollback_create_success",
+		logx.F("application_id", applicationID),
+		logx.F("source_order_no", sourceOrder.OrderNo),
+		logx.F("new_order_id", order.ID),
+		logx.F("new_order_no", order.OrderNo),
+	)
+	return order, nil
 }
 
 func (uc *ReleaseOrderManager) validateCreateTemplateParams(
@@ -620,9 +729,11 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
+	logx.Info("release_order", "cancel_start", logx.F("order_id", id))
 
 	order, err := uc.repo.GetByID(ctx, id)
 	if err != nil {
+		logx.Error("release_order", "cancel_failed", err, logx.F("order_id", id))
 		return domain.ReleaseOrder{}, err
 	}
 
@@ -630,16 +741,25 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	case domain.OrderStatusPending, domain.OrderStatusRunning:
 		// allowed
 	default:
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: release order cannot be cancelled in current status", ErrInvalidInput)
+		err := fmt.Errorf("%w: release order cannot be cancelled in current status", ErrInvalidInput)
+		logx.Warn("release_order", "cancel_failed",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("status", order.Status),
+			logx.F("reason", err.Error()),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 
 	now := uc.now()
 	steps, err := uc.repo.ListSteps(ctx, id)
 	if err != nil {
+		logx.Error("release_order", "cancel_failed", err, logx.F("order_id", order.ID))
 		return domain.ReleaseOrder{}, err
 	}
 	executions, err := uc.repo.ListExecutions(ctx, id)
 	if err != nil {
+		logx.Error("release_order", "cancel_failed", err, logx.F("order_id", order.ID))
 		return domain.ReleaseOrder{}, err
 	}
 
@@ -662,6 +782,10 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 				UpdatedAt:  now,
 			})
 			if updateErr != nil && !errors.Is(updateErr, domain.ErrExecutionNotFound) {
+				logx.Error("release_order", "cancel_failed", updateErr,
+					logx.F("order_id", order.ID),
+					logx.F("pipeline_scope", execution.PipelineScope),
+				)
 				return domain.ReleaseOrder{}, updateErr
 			}
 		}
@@ -686,11 +810,28 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 			FinishedAt: &now,
 		})
 		if updateErr != nil && !errors.Is(updateErr, domain.ErrStepNotFound) {
+			logx.Error("release_order", "cancel_failed", updateErr,
+				logx.F("order_id", order.ID),
+				logx.F("step_code", step.StepCode),
+			)
 			return domain.ReleaseOrder{}, updateErr
 		}
 	}
 
-	return uc.repo.UpdateStatus(ctx, id, domain.OrderStatusCancelled, order.StartedAt, &now, now)
+	item, err := uc.repo.UpdateStatus(ctx, id, domain.OrderStatusCancelled, order.StartedAt, &now, now)
+	if err != nil {
+		logx.Error("release_order", "cancel_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	logx.Info("release_order", "cancel_success",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("cancel_notes_count", len(cancelNotes)),
+	)
+	return item, nil
 }
 
 func shouldFinishStepOnCancel(step domain.ReleaseOrderStep) bool {
@@ -732,33 +873,61 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
+	logx.Info("release_order", "execute_start", logx.F("order_id", id))
 	if uc.jenkins == nil && uc.argocdFactory == nil && uc.gitops == nil {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
+		err := fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
+		logx.Error("release_order", "execute_failed", err, logx.F("order_id", id))
+		return domain.ReleaseOrder{}, err
 	}
 
 	order, err := uc.repo.GetByID(ctx, id)
 	if err != nil {
+		logx.Error("release_order", "execute_failed", err, logx.F("order_id", id))
 		return domain.ReleaseOrder{}, err
 	}
 	if !isPendingOrderStatus(order.Status) {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: only pending release order can be executed", ErrInvalidInput)
+		err := fmt.Errorf("%w: only pending release order can be executed", ErrInvalidInput)
+		logx.Warn("release_order", "execute_failed",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("status", order.Status),
+			logx.F("reason", err.Error()),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 	executions, err := uc.repo.ListExecutions(ctx, order.ID)
 	if err != nil {
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 	if len(executions) == 0 {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: release order has no executions", ErrInvalidInput)
+		err := fmt.Errorf("%w: release order has no executions", ErrInvalidInput)
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
 	}
 
 	startedAt := uc.now()
 	order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, &startedAt, nil, startedAt)
 	if err != nil {
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
 	orderParams, err := uc.repo.ListParams(ctx, order.ID)
 	if err != nil {
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
@@ -768,9 +937,19 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if err := uc.startNextPendingExecution(ctx, order, executions, orderParams); err != nil {
 		finishedAt := uc.now()
 		_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &finishedAt, finishedAt)
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return domain.ReleaseOrder{}, err
 	}
 
+	logx.Info("release_order", "execute_dispatched",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("executions_count", len(executions)),
+		logx.F("params_count", len(orderParams)),
+	)
 	return uc.repo.GetByID(ctx, order.ID)
 }
 
@@ -911,6 +1090,12 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 ) error {
 	for _, execution := range executions {
 		if execution.Status == domain.ExecutionStatusRunning {
+			logx.Info("release_order", "start_next_skip_running_exists",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("pipeline_scope", execution.PipelineScope),
+				logx.F("provider", execution.Provider),
+			)
 			return nil
 		}
 	}
@@ -919,14 +1104,35 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		if execution.Status != domain.ExecutionStatusPending {
 			continue
 		}
+		logx.Info("release_order", "execution_start_attempt",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+			logx.F("provider", execution.Provider),
+		)
 		switch strings.ToLower(strings.TrimSpace(execution.Provider)) {
 		case string(pipelinedomain.ProviderJenkins):
 			// Jenkins 执行继续走现有触发链路。
 		case string(pipelinedomain.ProviderArgoCD):
 			if err := uc.startArgoCDExecution(ctx, order, execution, orderParams, executions); err != nil {
 				uc.markExecutionStartFailed(ctx, order, execution, err.Error())
+				logx.Error("release_order", "execution_start_failed", err,
+					logx.F("order_id", order.ID),
+					logx.F("order_no", order.OrderNo),
+					logx.F("execution_id", execution.ID),
+					logx.F("pipeline_scope", execution.PipelineScope),
+					logx.F("provider", execution.Provider),
+				)
 				return err
 			}
+			logx.Info("release_order", "execution_start_success",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+				logx.F("provider", execution.Provider),
+			)
 			return nil
 		default:
 			now := uc.now()
@@ -937,6 +1143,11 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 				UpdatedAt:  now,
 			})
 			if err != nil {
+				logx.Error("release_order", "execution_skip_failed", err,
+					logx.F("order_id", order.ID),
+					logx.F("execution_id", execution.ID),
+					logx.F("provider", execution.Provider),
+				)
 				return err
 			}
 			for idx, code := range executionStepCodes(execution) {
@@ -951,6 +1162,11 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 
 		binding, err := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
 		if err != nil {
+			logx.Error("release_order", "execution_start_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", execution.ID),
+				logx.F("binding_id", execution.BindingID),
+			)
 			return err
 		}
 		pipelineID := strings.TrimSpace(execution.PipelineID)
@@ -958,10 +1174,21 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			pipelineID = strings.TrimSpace(binding.PipelineID)
 		}
 		if pipelineID == "" {
-			return fmt.Errorf("%w: pipeline_id is required", ErrInvalidInput)
+			err := fmt.Errorf("%w: pipeline_id is required", ErrInvalidInput)
+			logx.Error("release_order", "execution_start_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", execution.ID),
+				logx.F("binding_id", execution.BindingID),
+			)
+			return err
 		}
 		pipeline, err := uc.pipelineRepo.GetPipelineByID(ctx, pipelineID)
 		if err != nil {
+			logx.Error("release_order", "execution_start_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_id", pipelineID),
+			)
 			return err
 		}
 		if err := ensureActivePipelineRecord(pipeline, "绑定管线"); err != nil {
@@ -994,6 +1221,14 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		queueURL, triggerErr := uc.jenkins.TriggerBuild(ctx, pipeline.JobFullName, buildParams)
 		if triggerErr != nil {
 			uc.markExecutionStartFailed(ctx, order, execution, "触发 Jenkins 失败: "+triggerErr.Error())
+			logx.Error("release_order", "execution_start_failed", triggerErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+				logx.F("pipeline_id", pipeline.ID),
+				logx.F("job_full_name", pipeline.JobFullName),
+			)
 			return fmt.Errorf("%w: trigger jenkins failed: %v", ErrInvalidInput, triggerErr)
 		}
 
@@ -1006,6 +1241,11 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			UpdatedAt: now,
 		})
 		if err != nil {
+			logx.Error("release_order", "execution_start_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", execution.ID),
+				logx.F("queue_url", queueURL),
+			)
 			return err
 		}
 
@@ -1016,6 +1256,17 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		_ = uc.markStepFinished(ctx, order.ID, triggerCode, domain.StepStatusSuccess, triggerMessage)
 		_ = uc.markStepRunning(ctx, order.ID, runningCode, "管线已触发，等待执行结果回传，queue: "+strings.TrimSpace(queueURL))
 		_ = uc.markStep(ctx, order.ID, successCode, domain.StepStatusPending, "", nil, nil)
+		logx.Info("release_order", "execution_start_success",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+			logx.F("provider", execution.Provider),
+			logx.F("pipeline_id", pipeline.ID),
+			logx.F("job_full_name", pipeline.JobFullName),
+			logx.F("queue_url", queueURL),
+			logx.F("build_params_count", len(buildParams)),
+		)
 		return nil
 	}
 
@@ -1027,6 +1278,10 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 
 	_ = uc.markStepRunning(ctx, order.ID, "global:release_finish", "所有执行单元已完成")
 	_ = uc.markStepFinished(ctx, order.ID, "global:release_finish", domain.StepStatusSuccess, "发布完成")
+	logx.Info("release_order", "all_executions_finished",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+	)
 	return nil
 }
 
@@ -1037,6 +1292,13 @@ func (uc *ReleaseOrderManager) markExecutionStartFailed(
 	message string,
 ) {
 	message = strings.TrimSpace(message)
+	logx.Error("release_order", "execution_mark_failed", fmt.Errorf("%s", message),
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("execution_id", execution.ID),
+		logx.F("pipeline_scope", execution.PipelineScope),
+		logx.F("provider", execution.Provider),
+	)
 	now := uc.now()
 	_, _ = uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
 		Status:     domain.ExecutionStatusFailed,

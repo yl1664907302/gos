@@ -9,6 +9,7 @@ import (
 	"time"
 
 	userdomain "gos/internal/domain/user"
+	"gos/internal/support/logx"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -391,18 +392,43 @@ func (uc *UserManagement) DeleteUserParamPermission(ctx context.Context, id stri
 func (uc *AuthSessionManager) Login(ctx context.Context, input LoginInput) (LoginOutput, error) {
 	username := strings.TrimSpace(input.Username)
 	password := strings.TrimSpace(input.Password)
+	logx.Info("auth", "login_start",
+		logx.F("username", username),
+		logx.F("client_ip", input.ClientIP),
+	)
 	if username == "" || password == "" {
-		return LoginOutput{}, fmt.Errorf("%w: username and password are required", ErrInvalidInput)
+		err := fmt.Errorf("%w: username and password are required", ErrInvalidInput)
+		logx.Error("auth", "login_failed", err,
+			logx.F("username", username),
+			logx.F("client_ip", input.ClientIP),
+		)
+		return LoginOutput{}, err
 	}
 	user, err := uc.repo.GetUserByUsername(ctx, username)
 	if err != nil {
+		logx.Error("auth", "login_failed", err,
+			logx.F("username", username),
+			logx.F("client_ip", input.ClientIP),
+		)
 		return LoginOutput{}, err
 	}
 	if user.Status != userdomain.StatusActive {
-		return LoginOutput{}, fmt.Errorf("%w: user is inactive", ErrInvalidInput)
+		err := fmt.Errorf("%w: user is inactive", ErrInvalidInput)
+		logx.Warn("auth", "login_denied",
+			logx.F("username", username),
+			logx.F("user_id", user.ID),
+			logx.F("reason", err.Error()),
+		)
+		return LoginOutput{}, err
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		return LoginOutput{}, fmt.Errorf("%w: username or password is incorrect", ErrInvalidInput)
+		loginErr := fmt.Errorf("%w: username or password is incorrect", ErrInvalidInput)
+		logx.Warn("auth", "login_denied",
+			logx.F("username", username),
+			logx.F("client_ip", input.ClientIP),
+			logx.F("reason", loginErr.Error()),
+		)
+		return LoginOutput{}, loginErr
 	}
 
 	_ = uc.cleanupExpiredSessions(ctx)
@@ -422,8 +448,18 @@ func (uc *AuthSessionManager) Login(ctx context.Context, input LoginInput) (Logi
 		CreatedAt:   now,
 	}
 	if err := uc.repo.CreateSession(ctx, session); err != nil {
+		logx.Error("auth", "login_failed", err,
+			logx.F("username", username),
+			logx.F("user_id", user.ID),
+		)
 		return LoginOutput{}, err
 	}
+	logx.Info("auth", "login_success",
+		logx.F("username", username),
+		logx.F("user_id", user.ID),
+		logx.F("session_id", session.ID),
+		logx.F("expired_at", session.ExpiredAt),
+	)
 	return LoginOutput{
 		AccessToken: token,
 		ExpiredAt:   session.ExpiredAt,
@@ -434,32 +470,68 @@ func (uc *AuthSessionManager) Login(ctx context.Context, input LoginInput) (Logi
 func (uc *AuthSessionManager) Logout(ctx context.Context, token string) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
+		logx.Warn("auth", "logout_skip", logx.F("reason", "empty_token"))
 		return nil
 	}
-	return uc.repo.DeleteSessionByAccessToken(ctx, token)
+	if err := uc.repo.DeleteSessionByAccessToken(ctx, token); err != nil {
+		logx.Error("auth", "logout_failed", err, logx.F("token_suffix", suffixToken(token)))
+		return err
+	}
+	logx.Info("auth", "logout_success", logx.F("token_suffix", suffixToken(token)))
+	return nil
 }
 
 func (uc *AuthSessionManager) ResolveUserByToken(ctx context.Context, token string) (userdomain.User, userdomain.UserSession, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return userdomain.User{}, userdomain.UserSession{}, ErrInvalidInput
+		err := ErrInvalidInput
+		logx.Warn("auth", "resolve_token_failed",
+			logx.F("reason", "empty_token"),
+		)
+		return userdomain.User{}, userdomain.UserSession{}, err
 	}
 	session, err := uc.repo.GetSessionByAccessToken(ctx, token)
 	if err != nil {
+		logx.Warn("auth", "resolve_token_failed",
+			logx.F("token_suffix", suffixToken(token)),
+			logx.F("reason", err.Error()),
+		)
 		return userdomain.User{}, userdomain.UserSession{}, err
 	}
 	now := uc.now()
 	if !session.ExpiredAt.After(now) {
 		_ = uc.repo.DeleteSessionByAccessToken(ctx, token)
+		logx.Warn("auth", "resolve_token_failed",
+			logx.F("token_suffix", suffixToken(token)),
+			logx.F("session_id", session.ID),
+			logx.F("reason", "session_expired"),
+		)
 		return userdomain.User{}, userdomain.UserSession{}, userdomain.ErrSessionNotFound
 	}
 	user, err := uc.repo.GetUserByID(ctx, session.UserID)
 	if err != nil {
+		logx.Error("auth", "resolve_token_failed", err,
+			logx.F("token_suffix", suffixToken(token)),
+			logx.F("session_id", session.ID),
+			logx.F("user_id", session.UserID),
+		)
 		return userdomain.User{}, userdomain.UserSession{}, err
 	}
 	if user.Status != userdomain.StatusActive {
-		return userdomain.User{}, userdomain.UserSession{}, fmt.Errorf("%w: user is inactive", ErrInvalidInput)
+		err := fmt.Errorf("%w: user is inactive", ErrInvalidInput)
+		logx.Warn("auth", "resolve_token_failed",
+			logx.F("token_suffix", suffixToken(token)),
+			logx.F("session_id", session.ID),
+			logx.F("user_id", user.ID),
+			logx.F("reason", err.Error()),
+		)
+		return userdomain.User{}, userdomain.UserSession{}, err
 	}
+	logx.Info("auth", "resolve_token_success",
+		logx.F("token_suffix", suffixToken(token)),
+		logx.F("session_id", session.ID),
+		logx.F("user_id", user.ID),
+	)
 	return user, session, nil
 }
 
@@ -597,4 +669,12 @@ func generateSecureToken(size int) (string, error) {
 		return "", err
 	}
 	return strings.ToLower(hex.EncodeToString(buffer)), nil
+}
+
+func suffixToken(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 8 {
+		return value
+	}
+	return value[len(value)-8:]
 }

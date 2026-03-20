@@ -10,6 +10,7 @@ import (
 
 	domain "gos/internal/domain/argocdapp"
 	gitopsdomain "gos/internal/domain/gitops"
+	"gos/internal/support/logx"
 )
 
 var argocdInstanceCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
@@ -90,11 +91,38 @@ func (uc *ArgoCDInstanceManager) Create(ctx context.Context, input CreateArgoCDI
 	if uc == nil || uc.repo == nil {
 		return domain.Instance{}, fmt.Errorf("%w: argocd instance manager is not configured", ErrInvalidInput)
 	}
+	logx.Info("argocd_instance", "create_start",
+		logx.F("instance_code", input.InstanceCode),
+		logx.F("name", input.Name),
+		logx.F("base_url", input.BaseURL),
+		logx.F("gitops_instance_id", input.GitOpsInstanceID),
+		logx.F("status", input.Status),
+	)
 	instance, err := uc.normalizeCreateInput(ctx, input)
 	if err != nil {
+		logx.Error("argocd_instance", "create_failed", err,
+			logx.F("instance_code", input.InstanceCode),
+			logx.F("name", input.Name),
+			logx.F("base_url", input.BaseURL),
+		)
 		return domain.Instance{}, err
 	}
-	return uc.repo.CreateInstance(ctx, instance)
+	created, err := uc.repo.CreateInstance(ctx, instance)
+	if err != nil {
+		logx.Error("argocd_instance", "create_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+			logx.F("name", instance.Name),
+		)
+		return domain.Instance{}, err
+	}
+	logx.Info("argocd_instance", "create_success",
+		logx.F("instance_id", created.ID),
+		logx.F("instance_code", created.InstanceCode),
+		logx.F("name", created.Name),
+		logx.F("gitops_instance_id", created.GitOpsInstanceID),
+	)
+	return created, nil
 }
 
 func (uc *ArgoCDInstanceManager) Update(ctx context.Context, id string, input UpdateArgoCDInstanceInput) (domain.Instance, error) {
@@ -105,15 +133,45 @@ func (uc *ArgoCDInstanceManager) Update(ctx context.Context, id string, input Up
 	if id == "" {
 		return domain.Instance{}, ErrInvalidID
 	}
+	logx.Info("argocd_instance", "update_start",
+		logx.F("instance_id", id),
+		logx.F("instance_code", input.InstanceCode),
+		logx.F("name", input.Name),
+		logx.F("base_url", input.BaseURL),
+		logx.F("gitops_instance_id", input.GitOpsInstanceID),
+		logx.F("status", input.Status),
+	)
 	current, err := uc.repo.GetInstanceByID(ctx, id)
 	if err != nil {
+		logx.Error("argocd_instance", "update_failed", err, logx.F("instance_id", id))
 		return domain.Instance{}, err
 	}
 	instance, err := uc.normalizeUpdateInput(ctx, current, input)
 	if err != nil {
+		logx.Error("argocd_instance", "update_failed", err,
+			logx.F("instance_id", id),
+			logx.F("instance_code", current.InstanceCode),
+			logx.F("name", current.Name),
+		)
 		return domain.Instance{}, err
 	}
-	return uc.repo.UpdateInstance(ctx, instance)
+	updated, err := uc.repo.UpdateInstance(ctx, instance)
+	if err != nil {
+		logx.Error("argocd_instance", "update_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+			logx.F("name", instance.Name),
+		)
+		return domain.Instance{}, err
+	}
+	logx.Info("argocd_instance", "update_success",
+		logx.F("instance_id", updated.ID),
+		logx.F("instance_code", updated.InstanceCode),
+		logx.F("name", updated.Name),
+		logx.F("gitops_instance_id", updated.GitOpsInstanceID),
+		logx.F("status", updated.Status),
+	)
+	return updated, nil
 }
 
 func (uc *ArgoCDInstanceManager) Check(ctx context.Context, id string) (domain.Instance, error) {
@@ -124,25 +182,57 @@ func (uc *ArgoCDInstanceManager) Check(ctx context.Context, id string) (domain.I
 	if id == "" {
 		return domain.Instance{}, ErrInvalidID
 	}
+	logx.Info("argocd_instance", "health_check_start", logx.F("instance_id", id))
 	instance, err := uc.repo.GetInstanceByID(ctx, id)
 	if err != nil {
+		logx.Error("argocd_instance", "health_check_failed", err, logx.F("instance_id", id))
 		return domain.Instance{}, err
 	}
 	client := uc.factory.Build(instance)
 	if client == nil {
-		return domain.Instance{}, fmt.Errorf("%w: argocd client factory is not configured", ErrInvalidInput)
+		err := fmt.Errorf("%w: argocd client factory is not configured", ErrInvalidInput)
+		logx.Error("argocd_instance", "health_check_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+		)
+		return domain.Instance{}, err
 	}
 	checkedAt := uc.now()
 	healthStatus := "healthy"
 	if err := client.Ping(ctx); err != nil {
 		healthStatus = "unreachable"
 		_ = uc.repo.UpdateInstanceHealth(ctx, instance.ID, healthStatus, checkedAt)
+		logx.Error("argocd_instance", "health_check_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+			logx.F("base_url", instance.BaseURL),
+			logx.F("health_status", healthStatus),
+		)
 		return domain.Instance{}, err
 	}
 	if err := uc.repo.UpdateInstanceHealth(ctx, instance.ID, healthStatus, checkedAt); err != nil {
+		logx.Error("argocd_instance", "health_check_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+			logx.F("health_status", healthStatus),
+		)
 		return domain.Instance{}, err
 	}
-	return uc.repo.GetInstanceByID(ctx, instance.ID)
+	checked, err := uc.repo.GetInstanceByID(ctx, instance.ID)
+	if err != nil {
+		logx.Error("argocd_instance", "health_check_failed", err,
+			logx.F("instance_id", instance.ID),
+			logx.F("instance_code", instance.InstanceCode),
+		)
+		return domain.Instance{}, err
+	}
+	logx.Info("argocd_instance", "health_check_success",
+		logx.F("instance_id", checked.ID),
+		logx.F("instance_code", checked.InstanceCode),
+		logx.F("health_status", checked.HealthStatus),
+		logx.F("checked_at", checked.LastCheckAt),
+	)
+	return checked, nil
 }
 
 func (uc *ArgoCDInstanceManager) ListEnvBindings(ctx context.Context) ([]domain.EnvBinding, error) {
@@ -156,6 +246,7 @@ func (uc *ArgoCDInstanceManager) UpdateEnvBindings(ctx context.Context, items []
 	if uc == nil || uc.repo == nil {
 		return nil, fmt.Errorf("%w: argocd instance manager is not configured", ErrInvalidInput)
 	}
+	logx.Info("argocd_instance", "env_bindings_update_start", logx.F("items_count", len(items)))
 	now := uc.now()
 	payload := make([]domain.EnvBinding, 0, len(items))
 	seenEnv := make(map[string]struct{}, len(items))
@@ -166,10 +257,18 @@ func (uc *ArgoCDInstanceManager) UpdateEnvBindings(ctx context.Context, items []
 			continue
 		}
 		if _, exists := seenEnv[envCode]; exists {
-			return nil, fmt.Errorf("%w: 环境绑定存在重复 env_code: %s", ErrInvalidInput, envCode)
+			err := fmt.Errorf("%w: 环境绑定存在重复 env_code: %s", ErrInvalidInput, envCode)
+			logx.Error("argocd_instance", "env_bindings_update_failed", err,
+				logx.F("env_code", envCode),
+			)
+			return nil, err
 		}
 		seenEnv[envCode] = struct{}{}
 		if _, err := uc.repo.GetInstanceByID(ctx, instanceID); err != nil {
+			logx.Error("argocd_instance", "env_bindings_update_failed", err,
+				logx.F("env_code", envCode),
+				logx.F("argocd_instance_id", instanceID),
+			)
 			return nil, err
 		}
 		status := item.Status
@@ -177,6 +276,11 @@ func (uc *ArgoCDInstanceManager) UpdateEnvBindings(ctx context.Context, items []
 			status = domain.StatusActive
 		}
 		if !status.Valid() {
+			logx.Error("argocd_instance", "env_bindings_update_failed", ErrInvalidStatus,
+				logx.F("env_code", envCode),
+				logx.F("argocd_instance_id", instanceID),
+				logx.F("status", status),
+			)
 			return nil, ErrInvalidStatus
 		}
 		payload = append(payload, domain.EnvBinding{
@@ -190,9 +294,23 @@ func (uc *ArgoCDInstanceManager) UpdateEnvBindings(ctx context.Context, items []
 		})
 	}
 	if err := uc.repo.ReplaceEnvBindings(ctx, payload); err != nil {
+		logx.Error("argocd_instance", "env_bindings_update_failed", err,
+			logx.F("items_count", len(payload)),
+		)
 		return nil, err
 	}
-	return uc.repo.ListEnvBindings(ctx)
+	bindings, err := uc.repo.ListEnvBindings(ctx)
+	if err != nil {
+		logx.Error("argocd_instance", "env_bindings_update_failed", err,
+			logx.F("items_count", len(payload)),
+		)
+		return nil, err
+	}
+	logx.Info("argocd_instance", "env_bindings_update_success",
+		logx.F("items_count", len(payload)),
+		logx.F("bindings_count", len(bindings)),
+	)
+	return bindings, nil
 }
 
 func (uc *ArgoCDInstanceManager) normalizeCreateInput(ctx context.Context, input CreateArgoCDInstanceInput) (domain.Instance, error) {

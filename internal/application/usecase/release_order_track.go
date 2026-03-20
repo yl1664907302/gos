@@ -10,6 +10,7 @@ import (
 
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
+	"gos/internal/support/logx"
 )
 
 var queueURLPattern = regexp.MustCompile(`queue:\s*([^\s]+)`)
@@ -57,27 +58,52 @@ func (uc *TrackReleaseExecution) Execute(ctx context.Context) (TrackReleaseExecu
 
 	orders, err := uc.listRunningOrders(ctx)
 	if err != nil {
+		logx.Error("release_tracker", "list_trackable_orders_failed", err)
 		return TrackReleaseExecutionOutput{}, err
 	}
+	logx.Info("release_tracker", "tick_start", logx.F("running_orders", len(orders)))
 
 	output := TrackReleaseExecutionOutput{
 		RunningOrders: len(orders),
 	}
 
 	for _, order := range orders {
+		logx.Info("release_tracker", "sync_order_start",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("status", order.Status),
+		)
 		updated, skipped, runErr := uc.syncOrder(ctx, order)
 		if runErr != nil {
+			logx.Error("release_tracker", "sync_order_failed", runErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
 			output.FailedOrders++
 			continue
 		}
 		if skipped {
+			logx.Info("release_tracker", "sync_order_skipped",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
 			output.SkippedOrders++
 			continue
 		}
 		if updated {
+			logx.Info("release_tracker", "sync_order_updated",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
 			output.UpdatedOrders++
 		}
 	}
+	logx.Info("release_tracker", "tick_finish",
+		logx.F("running_orders", output.RunningOrders),
+		logx.F("updated_orders", output.UpdatedOrders),
+		logx.F("skipped_orders", output.SkippedOrders),
+		logx.F("failed_orders", output.FailedOrders),
+	)
 
 	return output, nil
 }
@@ -110,6 +136,10 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		return false, false, err
 	}
 	if len(executions) == 0 {
+		logx.Warn("release_tracker", "sync_order_without_executions",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return false, true, nil
 	}
 
@@ -117,6 +147,13 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	if runningExecution == nil {
 		pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
 		if pendingExecution != nil {
+			logx.Info("release_tracker", "start_pending_execution",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", pendingExecution.ID),
+				logx.F("pipeline_scope", pendingExecution.PipelineScope),
+				logx.F("provider", pendingExecution.Provider),
+			)
 			orderParams, paramErr := uc.manager.ListParams(ctx, order.ID)
 			if paramErr != nil {
 				return false, false, paramErr
@@ -126,6 +163,10 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			}
 			return true, false, nil
 		}
+		logx.Info("release_tracker", "finalize_order_attempt",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
 		return uc.finalizeOrder(ctx, order, executions)
 	}
 
@@ -141,6 +182,12 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	queueURL := strings.TrimSpace(runningExecution.QueueURL)
 	buildURL := strings.TrimSpace(runningExecution.BuildURL)
 	if queueURL == "" && buildURL == "" {
+		logx.Warn("release_tracker", "jenkins_execution_missing_urls",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("pipeline_scope", runningExecution.PipelineScope),
+		)
 		if uc.now().Sub(order.UpdatedAt) < 2*time.Minute {
 			return false, true, nil
 		}
@@ -155,6 +202,11 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	}
 
 	if buildURL == "" && queueURL != "" {
+		logx.Info("release_tracker", "resolve_build_url_from_queue",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("queue_url", queueURL),
+		)
 		resolvedBuildURL, cancelled, why, queueErr := uc.jenkins.GetQueueItem(ctx, queueURL)
 		if queueErr != nil {
 			if isResourceNotFoundError(queueErr) {
@@ -173,6 +225,12 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 			return false, false, queueErr
 		}
 		if cancelled {
+			logx.Warn("release_tracker", "jenkins_queue_cancelled",
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", runningExecution.ID),
+				logx.F("queue_url", queueURL),
+				logx.F("why", why),
+			)
 			now := uc.now()
 			_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
 				Status:     domain.ExecutionStatusCancelled,
@@ -192,8 +250,19 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		}
 		buildURL = strings.TrimSpace(resolvedBuildURL)
 		if buildURL == "" {
+			logx.Info("release_tracker", "jenkins_queue_waiting_build_url",
+				logx.F("order_id", order.ID),
+				logx.F("execution_id", runningExecution.ID),
+				logx.F("queue_url", queueURL),
+			)
 			return false, false, nil
 		}
+		logx.Info("release_tracker", "jenkins_build_url_resolved",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("queue_url", queueURL),
+			logx.F("build_url", buildURL),
+		)
 		now := uc.now()
 		if _, err := uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
 			Status:    domain.ExecutionStatusRunning,
@@ -228,6 +297,11 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		return false, false, statusErr
 	}
 	if building {
+		logx.Info("release_tracker", "jenkins_build_still_running",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("build_url", buildURL),
+		)
 		return false, false, nil
 	}
 
@@ -238,6 +312,12 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 
 	switch result {
 	case "SUCCESS":
+		logx.Info("release_tracker", "jenkins_build_success",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("build_url", buildURL),
+			logx.F("result", result),
+		)
 		now := uc.now()
 		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
 			Status:     domain.ExecutionStatusSuccess,
@@ -261,6 +341,12 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 		}
 		return updated1 || updated2 || updated3, false, nil
 	case "FAILURE", "ABORTED", "UNSTABLE", "NOT_BUILT":
+		logx.Warn("release_tracker", "jenkins_build_failed",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("build_url", buildURL),
+			logx.F("result", result),
+		)
 		now := uc.now()
 		nextStatus := domain.ExecutionStatusFailed
 		if result == "ABORTED" {
@@ -301,6 +387,12 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 	if uc.manager.argocdRepo == nil || uc.manager.argocdFactory == nil {
 		return false, false, fmt.Errorf("%w: argocd executor is not configured", ErrInvalidInput)
 	}
+	logx.Info("release_tracker", "sync_argocd_execution_start",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("execution_id", runningExecution.ID),
+		logx.F("pipeline_scope", runningExecution.PipelineScope),
+	)
 
 	steps, err := uc.manager.ListSteps(ctx, order.ID)
 	if err != nil {
@@ -310,6 +402,12 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 	if syncStep == nil || syncStep.Status != domain.StepStatusSuccess {
 		// ArgoCD Sync 还没真正触发前，不能拿当前应用的旧 Healthy 状态来判这次发布成功。
 		// 同时 startArgoCDExecution 已经会把执行单元提早置为 running，避免 tracker 重复启动 CD。
+		logx.Info("release_tracker", "sync_argocd_waiting_sync_step",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("sync_step_found", syncStep != nil),
+			logx.F("sync_step_status", stepStatusValue(syncStep)),
+		)
 		return false, true, nil
 	}
 
@@ -362,6 +460,15 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 		)
 		return updated, false, finishErr
 	}
+	logx.Info("release_tracker", "sync_argocd_application",
+		logx.F("order_id", order.ID),
+		logx.F("execution_id", runningExecution.ID),
+		logx.F("app_name", appName),
+		logx.F("gitops_type", gitopsType),
+		logx.F("sync_status", app.GetSyncStatus()),
+		logx.F("health_status", app.GetHealthStatus()),
+		logx.F("operation_phase", app.GetOperationPhase()),
+	)
 
 	syncStatus := strings.ToLower(strings.TrimSpace(app.GetSyncStatus()))
 	healthStatus := strings.ToLower(strings.TrimSpace(app.GetHealthStatus()))
@@ -369,6 +476,13 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 
 	switch {
 	case (syncStatus == "synced" || syncStatus == "") && healthStatus == "healthy" && operationPhase != "running":
+		logx.Info("release_tracker", "sync_argocd_success",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("app_name", appName),
+			logx.F("sync_status", app.GetSyncStatus()),
+			logx.F("health_status", app.GetHealthStatus()),
+		)
 		now := uc.now()
 		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
 			Status:        domain.ExecutionStatusSuccess,
@@ -387,6 +501,14 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 		}
 		return updated1 || updated2, false, nil
 	case operationPhase == "failed" || healthStatus == "degraded":
+		logx.Warn("release_tracker", "sync_argocd_failed",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("app_name", appName),
+			logx.F("sync_status", app.GetSyncStatus()),
+			logx.F("health_status", app.GetHealthStatus()),
+			logx.F("operation_phase", app.GetOperationPhase()),
+		)
 		now := uc.now()
 		_, _ = uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, runningExecution.PipelineScope, domain.ExecutionUpdateInput{
 			Status:        domain.ExecutionStatusFailed,
@@ -406,8 +528,23 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 		}
 		return updated || updated2, false, nil
 	default:
+		logx.Info("release_tracker", "sync_argocd_running",
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", runningExecution.ID),
+			logx.F("app_name", appName),
+			logx.F("sync_status", app.GetSyncStatus()),
+			logx.F("health_status", app.GetHealthStatus()),
+			logx.F("operation_phase", app.GetOperationPhase()),
+		)
 		return false, false, nil
 	}
+}
+
+func stepStatusValue(step *domain.ReleaseOrderStep) string {
+	if step == nil {
+		return ""
+	}
+	return string(step.Status)
 }
 
 func findExecutionByStatus(items []domain.ReleaseOrderExecution, status domain.ExecutionStatus) *domain.ReleaseOrderExecution {

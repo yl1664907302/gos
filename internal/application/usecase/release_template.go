@@ -16,6 +16,7 @@ import (
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	releasedomain "gos/internal/domain/release"
+	"gos/internal/support/logx"
 )
 
 type ReleaseTemplateManager struct {
@@ -115,8 +116,21 @@ func (uc *ReleaseTemplateManager) Create(
 ) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
 	name := strings.TrimSpace(input.Name)
 	applicationID := strings.TrimSpace(input.ApplicationID)
+	logx.Info("release_template", "create_start",
+		logx.F("name", name),
+		logx.F("application_id", applicationID),
+		logx.F("ci_binding_id", input.CIBindingID),
+		logx.F("cd_binding_id", input.CDBindingID),
+		logx.F("cd_provider", input.CDProvider),
+		logx.F("gitops_type", input.GitOpsType),
+	)
 	if name == "" || applicationID == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, fmt.Errorf("%w: name and application_id are required", ErrInvalidInput)
+		err := fmt.Errorf("%w: name and application_id are required", ErrInvalidInput)
+		logx.Error("release_template", "create_failed", err,
+			logx.F("name", name),
+			logx.F("application_id", applicationID),
+		)
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
 	status := input.Status
@@ -124,6 +138,11 @@ func (uc *ReleaseTemplateManager) Create(
 		status = releasedomain.TemplateStatusActive
 	}
 	if !status.Valid() {
+		logx.Error("release_template", "create_failed", ErrInvalidStatus,
+			logx.F("name", name),
+			logx.F("application_id", applicationID),
+			logx.F("status", status),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
 	}
 
@@ -139,6 +158,10 @@ func (uc *ReleaseTemplateManager) Create(
 		input.GitOpsRules,
 	)
 	if err != nil {
+		logx.Error("release_template", "create_failed", err,
+			logx.F("name", name),
+			logx.F("application_id", applicationID),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
@@ -176,8 +199,21 @@ func (uc *ReleaseTemplateManager) Create(
 	}
 
 	if err := uc.repo.CreateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+		logx.Error("release_template", "create_failed", err,
+			logx.F("template_id", template.ID),
+			logx.F("name", template.Name),
+			logx.F("application_id", template.ApplicationID),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
+	logx.Info("release_template", "create_success",
+		logx.F("template_id", template.ID),
+		logx.F("name", template.Name),
+		logx.F("application_id", template.ApplicationID),
+		logx.F("bindings_count", len(templateBindings)),
+		logx.F("params_count", len(params)),
+		logx.F("gitops_rules_count", len(gitopsRules)),
+	)
 	return uc.repo.GetTemplateByID(ctx, template.ID)
 }
 
@@ -231,11 +267,19 @@ func (uc *ReleaseTemplateManager) Update(
 	input UpdateReleaseTemplateInput,
 ) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
 	id = strings.TrimSpace(id)
+	logx.Info("release_template", "update_start",
+		logx.F("template_id", id),
+		logx.F("ci_binding_id", input.CIBindingID),
+		logx.F("cd_binding_id", input.CDBindingID),
+		logx.F("cd_provider", input.CDProvider),
+		logx.F("gitops_type", input.GitOpsType),
+	)
 	if id == "" {
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidID
 	}
 	current, _, _, _, err := uc.repo.GetTemplateByID(ctx, id)
 	if err != nil {
+		logx.Error("release_template", "update_failed", err, logx.F("template_id", id))
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
@@ -249,6 +293,10 @@ func (uc *ReleaseTemplateManager) Update(
 		status = current.Status
 	}
 	if !status.Valid() {
+		logx.Error("release_template", "update_failed", ErrInvalidStatus,
+			logx.F("template_id", id),
+			logx.F("status", status),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
 	}
 
@@ -264,6 +312,10 @@ func (uc *ReleaseTemplateManager) Update(
 		input.GitOpsRules,
 	)
 	if err != nil {
+		logx.Error("release_template", "update_failed", err,
+			logx.F("template_id", id),
+			logx.F("application_id", current.ApplicationID),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
 
@@ -301,8 +353,20 @@ func (uc *ReleaseTemplateManager) Update(
 	}
 
 	if err := uc.repo.UpdateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+		logx.Error("release_template", "update_failed", err,
+			logx.F("template_id", template.ID),
+			logx.F("application_id", template.ApplicationID),
+		)
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
 	}
+	logx.Info("release_template", "update_success",
+		logx.F("template_id", template.ID),
+		logx.F("name", template.Name),
+		logx.F("application_id", template.ApplicationID),
+		logx.F("bindings_count", len(templateBindings)),
+		logx.F("params_count", len(params)),
+		logx.F("gitops_rules_count", len(gitopsRules)),
+	)
 	return uc.repo.GetTemplateByID(ctx, template.ID)
 }
 
@@ -311,7 +375,13 @@ func (uc *ReleaseTemplateManager) Delete(ctx context.Context, id string) error {
 	if id == "" {
 		return ErrInvalidID
 	}
-	return uc.repo.DeleteTemplate(ctx, id)
+	logx.Info("release_template", "delete_start", logx.F("template_id", id))
+	if err := uc.repo.DeleteTemplate(ctx, id); err != nil {
+		logx.Error("release_template", "delete_failed", err, logx.F("template_id", id))
+		return err
+	}
+	logx.Info("release_template", "delete_success", logx.F("template_id", id))
+	return nil
 }
 
 func (uc *ReleaseTemplateManager) buildTemplatePayload(

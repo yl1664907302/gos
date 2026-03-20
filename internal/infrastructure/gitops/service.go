@@ -17,6 +17,7 @@ import (
 	"time"
 
 	gitopsdomain "gos/internal/domain/gitops"
+	"gos/internal/support/logx"
 
 	yaml "gopkg.in/yaml.v2"
 )
@@ -600,6 +601,11 @@ func (s *Service) ApplyManifestRules(
 	if commitMessage == "" {
 		commitMessage = "chore(gitops): update manifest fields"
 	}
+	logx.Info("gitops_service", "apply_manifest_rules_start",
+		logx.F("repo_url", normalizeRepoURL(repoURL)),
+		logx.F("branch", branch),
+		logx.F("rules_count", len(rules)),
+	)
 	unlock := acquireRepoBranchLock(repoURL, branch)
 	defer unlock()
 
@@ -626,6 +632,11 @@ func (s *Service) ApplyManifestRules(
 		grouped[filePath] = append(grouped[filePath], item)
 	}
 	if len(grouped) == 0 {
+		logx.Warn("gitops_service", "apply_manifest_rules_skipped",
+			logx.F("repo_url", normalizeRepoURL(repoURL)),
+			logx.F("branch", branch),
+			logx.F("reason", "empty_file_groups"),
+		)
 		return workspacePath, []string{}, "", false, nil
 	}
 
@@ -657,6 +668,12 @@ func (s *Service) ApplyManifestRules(
 		if err != nil {
 			return workspacePath, []string{}, "", false, err
 		}
+		logx.Info("gitops_service", "apply_manifest_rules_noop",
+			logx.F("repo_url", normalizeRepoURL(repoURL)),
+			logx.F("branch", branch),
+			logx.F("workspace_path", workspacePath),
+			logx.F("commit_sha", commitSHA),
+		)
 		return workspacePath, []string{}, commitSHA, false, nil
 	}
 
@@ -675,6 +692,13 @@ func (s *Service) ApplyManifestRules(
 	if err != nil {
 		return workspacePath, nil, "", false, err
 	}
+	logx.Info("gitops_service", "apply_manifest_rules_success",
+		logx.F("repo_url", normalizeRepoURL(repoURL)),
+		logx.F("branch", branch),
+		logx.F("workspace_path", workspacePath),
+		logx.F("changed_files_count", len(relativeChanged)),
+		logx.F("commit_sha", commitSHA),
+	)
 	return workspacePath, append([]string(nil), relativeChanged...), commitSHA, true, nil
 }
 
@@ -702,6 +726,11 @@ func (s *Service) ApplyValuesRules(
 	if commitMessage == "" {
 		commitMessage = "chore(gitops): update helm values"
 	}
+	logx.Info("gitops_service", "apply_values_rules_start",
+		logx.F("repo_url", normalizeRepoURL(repoURL)),
+		logx.F("branch", branch),
+		logx.F("rules_count", len(rules)),
+	)
 	unlock := acquireRepoBranchLock(repoURL, branch)
 	defer unlock()
 
@@ -728,6 +757,11 @@ func (s *Service) ApplyValuesRules(
 		grouped[filePath] = append(grouped[filePath], item)
 	}
 	if len(grouped) == 0 {
+		logx.Warn("gitops_service", "apply_values_rules_skipped",
+			logx.F("repo_url", normalizeRepoURL(repoURL)),
+			logx.F("branch", branch),
+			logx.F("reason", "empty_file_groups"),
+		)
 		return workspacePath, []string{}, "", false, nil
 	}
 
@@ -759,6 +793,12 @@ func (s *Service) ApplyValuesRules(
 		if err != nil {
 			return workspacePath, []string{}, "", false, err
 		}
+		logx.Info("gitops_service", "apply_values_rules_noop",
+			logx.F("repo_url", normalizeRepoURL(repoURL)),
+			logx.F("branch", branch),
+			logx.F("workspace_path", workspacePath),
+			logx.F("commit_sha", commitSHA),
+		)
 		return workspacePath, []string{}, commitSHA, false, nil
 	}
 
@@ -777,6 +817,13 @@ func (s *Service) ApplyValuesRules(
 	if err != nil {
 		return workspacePath, nil, "", false, err
 	}
+	logx.Info("gitops_service", "apply_values_rules_success",
+		logx.F("repo_url", normalizeRepoURL(repoURL)),
+		logx.F("branch", branch),
+		logx.F("workspace_path", workspacePath),
+		logx.F("changed_files_count", len(relativeChanged)),
+		logx.F("commit_sha", commitSHA),
+	)
 	return workspacePath, append([]string(nil), relativeChanged...), commitSHA, true, nil
 }
 
@@ -806,6 +853,11 @@ func (s *Service) prepareWorkspace(ctx context.Context, repoURL string, branch s
 		return err
 	}
 	if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); statErr == nil {
+		logx.Info("gitops_service", "prepare_workspace_reuse",
+			logx.F("repo_url", normalizeRepoURL(repoURL)),
+			logx.F("branch", branch),
+			logx.F("workspace_path", workspacePath),
+		)
 		if _, err := s.runGit(ctx, workspacePath, "remote", "set-url", "origin", authURL); err != nil {
 			return err
 		}
@@ -820,6 +872,11 @@ func (s *Service) prepareWorkspace(ctx context.Context, repoURL string, branch s
 		}
 		return nil
 	}
+	logx.Info("gitops_service", "prepare_workspace_clone",
+		logx.F("repo_url", normalizeRepoURL(repoURL)),
+		logx.F("branch", branch),
+		logx.F("workspace_path", workspacePath),
+	)
 	if err := os.RemoveAll(workspacePath); err != nil {
 		return err
 	}
@@ -890,6 +947,11 @@ func (s *Service) pushWithRetry(ctx context.Context, workspacePath string, branc
 		if !isNonFastForwardPushError(err) {
 			return err
 		}
+		logx.Warn("gitops_service", "push_retry_rebase",
+			logx.F("workspace_path", workspacePath),
+			logx.F("branch", branch),
+			logx.F("reason", err.Error()),
+		)
 		if _, fetchErr := s.runGit(ctx, workspacePath, "fetch", "origin", branch); fetchErr != nil {
 			return fmt.Errorf("git push rejected and fetch retry failed: %w", fetchErr)
 		}
@@ -900,6 +962,10 @@ func (s *Service) pushWithRetry(ctx context.Context, workspacePath string, branc
 		if _, pushErr := s.runGit(ctx, workspacePath, "push", "origin", branch); pushErr != nil {
 			return fmt.Errorf("git push retry failed after rebasing onto latest origin/%s: %w", branch, pushErr)
 		}
+		logx.Info("gitops_service", "push_retry_success",
+			logx.F("workspace_path", workspacePath),
+			logx.F("branch", branch),
+		)
 	}
 	return nil
 }

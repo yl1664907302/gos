@@ -10,6 +10,7 @@ import (
 
 	domain "gos/internal/domain/gitops"
 	gitopsinfra "gos/internal/infrastructure/gitops"
+	"gos/internal/support/logx"
 )
 
 var gitopsInstanceCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
@@ -76,11 +77,37 @@ func (uc *GitOpsInstanceManager) Create(ctx context.Context, input CreateGitOpsI
 	if uc == nil || uc.repo == nil {
 		return domain.Instance{}, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
 	}
+	logx.Info("gitops_instance", "create_start",
+		logx.F("instance_code", input.InstanceCode),
+		logx.F("name", input.Name),
+		logx.F("local_root", input.LocalRoot),
+		logx.F("default_branch", input.DefaultBranch),
+		logx.F("status", input.Status),
+	)
 	item, err := uc.normalizeCreateInput(input)
 	if err != nil {
+		logx.Error("gitops_instance", "create_failed", err,
+			logx.F("instance_code", input.InstanceCode),
+			logx.F("name", input.Name),
+		)
 		return domain.Instance{}, err
 	}
-	return uc.repo.CreateInstance(ctx, item)
+	created, err := uc.repo.CreateInstance(ctx, item)
+	if err != nil {
+		logx.Error("gitops_instance", "create_failed", err,
+			logx.F("instance_id", item.ID),
+			logx.F("instance_code", item.InstanceCode),
+			logx.F("name", item.Name),
+		)
+		return domain.Instance{}, err
+	}
+	logx.Info("gitops_instance", "create_success",
+		logx.F("instance_id", created.ID),
+		logx.F("instance_code", created.InstanceCode),
+		logx.F("name", created.Name),
+		logx.F("local_root", created.LocalRoot),
+	)
+	return created, nil
 }
 
 func (uc *GitOpsInstanceManager) Update(ctx context.Context, id string, input UpdateGitOpsInstanceInput) (domain.Instance, error) {
@@ -91,15 +118,45 @@ func (uc *GitOpsInstanceManager) Update(ctx context.Context, id string, input Up
 	if id == "" {
 		return domain.Instance{}, ErrInvalidID
 	}
+	logx.Info("gitops_instance", "update_start",
+		logx.F("instance_id", id),
+		logx.F("instance_code", input.InstanceCode),
+		logx.F("name", input.Name),
+		logx.F("local_root", input.LocalRoot),
+		logx.F("default_branch", input.DefaultBranch),
+		logx.F("status", input.Status),
+	)
 	current, err := uc.repo.GetInstanceByID(ctx, id)
 	if err != nil {
+		logx.Error("gitops_instance", "update_failed", err, logx.F("instance_id", id))
 		return domain.Instance{}, err
 	}
 	item, err := uc.normalizeUpdateInput(current, input)
 	if err != nil {
+		logx.Error("gitops_instance", "update_failed", err,
+			logx.F("instance_id", id),
+			logx.F("instance_code", current.InstanceCode),
+			logx.F("name", current.Name),
+		)
 		return domain.Instance{}, err
 	}
-	return uc.repo.UpdateInstance(ctx, item)
+	updated, err := uc.repo.UpdateInstance(ctx, item)
+	if err != nil {
+		logx.Error("gitops_instance", "update_failed", err,
+			logx.F("instance_id", item.ID),
+			logx.F("instance_code", item.InstanceCode),
+			logx.F("name", item.Name),
+		)
+		return domain.Instance{}, err
+	}
+	logx.Info("gitops_instance", "update_success",
+		logx.F("instance_id", updated.ID),
+		logx.F("instance_code", updated.InstanceCode),
+		logx.F("name", updated.Name),
+		logx.F("local_root", updated.LocalRoot),
+		logx.F("status", updated.Status),
+	)
+	return updated, nil
 }
 
 func (uc *GitOpsInstanceManager) GetStatus(ctx context.Context, id string) (gitopsinfra.Status, domain.Instance, error) {
@@ -110,15 +167,38 @@ func (uc *GitOpsInstanceManager) GetStatus(ctx context.Context, id string) (gito
 	if id == "" {
 		return gitopsinfra.Status{}, domain.Instance{}, ErrInvalidID
 	}
+	logx.Info("gitops_instance", "status_check_start", logx.F("instance_id", id))
 	item, err := uc.repo.GetInstanceByID(ctx, id)
 	if err != nil {
+		logx.Error("gitops_instance", "status_check_failed", err, logx.F("instance_id", id))
 		return gitopsinfra.Status{}, domain.Instance{}, err
 	}
 	service := uc.factory.Build(item)
 	if service == nil {
-		return gitopsinfra.Status{}, domain.Instance{}, fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
+		err := fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
+		logx.Error("gitops_instance", "status_check_failed", err,
+			logx.F("instance_id", item.ID),
+			logx.F("instance_code", item.InstanceCode),
+		)
+		return gitopsinfra.Status{}, domain.Instance{}, err
 	}
 	status, err := service.GetStatus(ctx)
+	if err != nil {
+		logx.Error("gitops_instance", "status_check_failed", err,
+			logx.F("instance_id", item.ID),
+			logx.F("instance_code", item.InstanceCode),
+			logx.F("local_root", item.LocalRoot),
+		)
+		return gitopsinfra.Status{}, domain.Instance{}, err
+	}
+	logx.Info("gitops_instance", "status_check_success",
+		logx.F("instance_id", item.ID),
+		logx.F("instance_code", item.InstanceCode),
+		logx.F("local_root", item.LocalRoot),
+		logx.F("path_exists", status.PathExists),
+		logx.F("is_git_repo", status.IsGitRepo),
+		logx.F("remote_reachable", status.RemoteReachable),
+	)
 	return status, item, err
 }
 

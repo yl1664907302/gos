@@ -266,6 +266,35 @@ npm run dev
 
 服务启动时会自动初始化和迁移当前需要的表结构。
 
+## 日志规范
+
+当前后端业务日志统一采用结构化 `key=value` 风格，优先覆盖发布、模板、认证、ArgoCD、GitOps 等主链路。
+
+- 统一字段：
+  - `level`：日志级别
+  - `component`：业务组件，例如 `release_order`、`argocd_cd`、`gitops_service`
+  - `action`：动作名称，例如 `create_start`、`sync_application_success`
+- 推荐打印时机：
+  - 用例入口：`*_start`
+  - 外部依赖调用成功：`*_success`
+  - 外部依赖调用失败：`*_failed`
+  - 可接受但需要关注的分支：`*_skipped` / `*_noop`
+- 推荐补充字段：
+  - 发布链路：`order_id`、`order_no`、`template_id`、`execution_id`、`pipeline_scope`
+  - 配置链路：`instance_id`、`instance_code`、`binding_id`
+  - GitOps 链路：`repo_url`、`branch`、`commit_sha`、`changed_files_count`
+- 安全约束：
+  - 不打印密码、Token、完整凭据
+  - 会话 token 只允许打印脱敏后的尾缀
+  - 不在日志中输出带鉴权信息的 Git remote URL
+
+日志示例：
+
+```text
+level="INFO" component="release_order" action="create_success" order_id="ro-xxx" order_no="RO-20260320-xxxx" template_id="rt-xxx" env_code="dev"
+level="ERROR" component="argocd_cd" action="sync_application_failed" error="argocd request failed: status=404 message=Not Found" order_id="ro-xxx" app_name="java-nantong-test-dev-gateway"
+```
+
 ## 文档索引
 
 - 后端需求文档：`docs/后端/`
