@@ -1,0 +1,298 @@
+package usecase
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	domain "gos/internal/domain/gitops"
+	gitopsinfra "gos/internal/infrastructure/gitops"
+)
+
+var gitopsInstanceCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
+
+type GitOpsServiceFactory interface {
+	Build(instance domain.Instance) *gitopsinfra.Service
+}
+
+type GitOpsInstanceManager struct {
+	repo    domain.Repository
+	factory GitOpsServiceFactory
+	now     func() time.Time
+}
+
+type CreateGitOpsInstanceInput struct {
+	InstanceCode          string
+	Name                  string
+	LocalRoot             string
+	DefaultBranch         string
+	Username              string
+	Password              string
+	Token                 string
+	AuthorName            string
+	AuthorEmail           string
+	CommitMessageTemplate string
+	CommandTimeoutSec     int
+	Status                domain.Status
+	Remark                string
+}
+
+type UpdateGitOpsInstanceInput = CreateGitOpsInstanceInput
+
+func NewGitOpsInstanceManager(repo domain.Repository, factory GitOpsServiceFactory) *GitOpsInstanceManager {
+	return &GitOpsInstanceManager{repo: repo, factory: factory, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (uc *GitOpsInstanceManager) List(ctx context.Context, filter domain.InstanceListFilter) ([]domain.Instance, int64, error) {
+	if uc == nil || uc.repo == nil {
+		return nil, 0, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, 0, ErrInvalidStatus
+	}
+	if filter.Page <= 0 {
+		filter.Page = 1
+	}
+	if filter.PageSize <= 0 {
+		filter.PageSize = 20
+	}
+	if filter.PageSize > 100 {
+		filter.PageSize = 100
+	}
+	return uc.repo.ListInstances(ctx, filter)
+}
+
+func (uc *GitOpsInstanceManager) ListActive(ctx context.Context) ([]domain.Instance, error) {
+	if uc == nil || uc.repo == nil {
+		return nil, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	return uc.repo.ListActiveInstances(ctx)
+}
+
+func (uc *GitOpsInstanceManager) Create(ctx context.Context, input CreateGitOpsInstanceInput) (domain.Instance, error) {
+	if uc == nil || uc.repo == nil {
+		return domain.Instance{}, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	item, err := uc.normalizeCreateInput(input)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	return uc.repo.CreateInstance(ctx, item)
+}
+
+func (uc *GitOpsInstanceManager) Update(ctx context.Context, id string, input UpdateGitOpsInstanceInput) (domain.Instance, error) {
+	if uc == nil || uc.repo == nil {
+		return domain.Instance{}, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return domain.Instance{}, ErrInvalidID
+	}
+	current, err := uc.repo.GetInstanceByID(ctx, id)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	item, err := uc.normalizeUpdateInput(current, input)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	return uc.repo.UpdateInstance(ctx, item)
+}
+
+func (uc *GitOpsInstanceManager) GetStatus(ctx context.Context, id string) (gitopsinfra.Status, domain.Instance, error) {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
+		return gitopsinfra.Status{}, domain.Instance{}, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return gitopsinfra.Status{}, domain.Instance{}, ErrInvalidID
+	}
+	item, err := uc.repo.GetInstanceByID(ctx, id)
+	if err != nil {
+		return gitopsinfra.Status{}, domain.Instance{}, err
+	}
+	service := uc.factory.Build(item)
+	if service == nil {
+		return gitopsinfra.Status{}, domain.Instance{}, fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
+	}
+	status, err := service.GetStatus(ctx)
+	return status, item, err
+}
+
+func (uc *GitOpsInstanceManager) BuildServiceByID(ctx context.Context, id string) (domain.Instance, *gitopsinfra.Service, error) {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
+		return domain.Instance{}, nil, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	item, err := uc.repo.GetInstanceByID(ctx, strings.TrimSpace(id))
+	if err != nil {
+		return domain.Instance{}, nil, err
+	}
+	service := uc.factory.Build(item)
+	if service == nil {
+		return domain.Instance{}, nil, fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
+	}
+	return item, service, nil
+}
+
+func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstanceInput) (domain.Instance, error) {
+	code, err := normalizeGitOpsInstanceCode(input.InstanceCode)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return domain.Instance{}, fmt.Errorf("%w: name is required", ErrInvalidInput)
+	}
+	localRoot, err := normalizeGitOpsLocalRoot(input.LocalRoot)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	defaultBranch := strings.TrimSpace(input.DefaultBranch)
+	if defaultBranch == "" {
+		defaultBranch = "master"
+	}
+	authorName := strings.TrimSpace(input.AuthorName)
+	if authorName == "" {
+		authorName = "gos-bot"
+	}
+	authorEmail := strings.TrimSpace(input.AuthorEmail)
+	if authorEmail == "" {
+		authorEmail = "gos@example.com"
+	}
+	commandTimeoutSec := input.CommandTimeoutSec
+	if commandTimeoutSec <= 0 {
+		commandTimeoutSec = 30
+	}
+	status := input.Status
+	if status == "" {
+		status = domain.StatusActive
+	}
+	if !status.Valid() {
+		return domain.Instance{}, ErrInvalidStatus
+	}
+	now := uc.now()
+	return domain.Instance{
+		ID:                    generateID("gitops"),
+		InstanceCode:          code,
+		Name:                  name,
+		LocalRoot:             localRoot,
+		DefaultBranch:         defaultBranch,
+		Username:              strings.TrimSpace(input.Username),
+		Password:              strings.TrimSpace(input.Password),
+		Token:                 strings.TrimSpace(input.Token),
+		AuthorName:            authorName,
+		AuthorEmail:           authorEmail,
+		CommitMessageTemplate: gitopsinfra.NormalizeCommitMessageTemplate(input.CommitMessageTemplate),
+		CommandTimeoutSec:     commandTimeoutSec,
+		Status:                status,
+		Remark:                strings.TrimSpace(input.Remark),
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}, nil
+}
+
+func (uc *GitOpsInstanceManager) normalizeUpdateInput(current domain.Instance, input UpdateGitOpsInstanceInput) (domain.Instance, error) {
+	code, err := normalizeGitOpsInstanceCode(input.InstanceCode)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		return domain.Instance{}, fmt.Errorf("%w: name is required", ErrInvalidInput)
+	}
+	localRoot, err := normalizeGitOpsLocalRoot(input.LocalRoot)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	defaultBranch := strings.TrimSpace(input.DefaultBranch)
+	if defaultBranch == "" {
+		defaultBranch = current.DefaultBranch
+	}
+	if defaultBranch == "" {
+		defaultBranch = "master"
+	}
+	authorName := strings.TrimSpace(input.AuthorName)
+	if authorName == "" {
+		authorName = current.AuthorName
+	}
+	if authorName == "" {
+		authorName = "gos-bot"
+	}
+	authorEmail := strings.TrimSpace(input.AuthorEmail)
+	if authorEmail == "" {
+		authorEmail = current.AuthorEmail
+	}
+	if authorEmail == "" {
+		authorEmail = "gos@example.com"
+	}
+	commandTimeoutSec := input.CommandTimeoutSec
+	if commandTimeoutSec <= 0 {
+		commandTimeoutSec = current.CommandTimeoutSec
+	}
+	if commandTimeoutSec <= 0 {
+		commandTimeoutSec = 30
+	}
+	status := input.Status
+	if status == "" {
+		status = current.Status
+	}
+	if !status.Valid() {
+		return domain.Instance{}, ErrInvalidStatus
+	}
+	password := strings.TrimSpace(input.Password)
+	if password == "" {
+		password = current.Password
+	}
+	token := strings.TrimSpace(input.Token)
+	if token == "" {
+		token = current.Token
+	}
+	username := strings.TrimSpace(input.Username)
+	if username == "" {
+		username = current.Username
+	}
+	return domain.Instance{
+		ID:                    current.ID,
+		InstanceCode:          code,
+		Name:                  name,
+		LocalRoot:             localRoot,
+		DefaultBranch:         defaultBranch,
+		Username:              username,
+		Password:              password,
+		Token:                 token,
+		AuthorName:            authorName,
+		AuthorEmail:           authorEmail,
+		CommitMessageTemplate: gitopsinfra.NormalizeCommitMessageTemplate(firstNonEmpty(strings.TrimSpace(input.CommitMessageTemplate), current.CommitMessageTemplate)),
+		CommandTimeoutSec:     commandTimeoutSec,
+		Status:                status,
+		Remark:                strings.TrimSpace(input.Remark),
+		CreatedAt:             current.CreatedAt,
+		UpdatedAt:             uc.now(),
+	}, nil
+}
+
+func normalizeGitOpsInstanceCode(value string) (string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "", fmt.Errorf("%w: instance_code is required", ErrInvalidInput)
+	}
+	if !gitopsInstanceCodePattern.MatchString(value) {
+		return "", fmt.Errorf("%w: instance_code 格式无效", ErrInvalidInput)
+	}
+	return value, nil
+}
+
+func normalizeGitOpsLocalRoot(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%w: local_root is required", ErrInvalidInput)
+	}
+	cleaned := filepath.Clean(value)
+	if strings.TrimSpace(cleaned) == "" || cleaned == "." {
+		return "", fmt.Errorf("%w: local_root 格式无效", ErrInvalidInput)
+	}
+	return cleaned, nil
+}

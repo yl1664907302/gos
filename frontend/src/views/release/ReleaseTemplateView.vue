@@ -33,6 +33,7 @@ import type {
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 type FormMode = 'create' | 'edit'
+type CDMode = 'pipeline' | 'argocd'
 
 type ScopeState = {
   enabled: boolean
@@ -125,6 +126,7 @@ const gitOpsValuesCandidates = ref<GitOpsValuesCandidate[]>([])
 const loadingGitOpsFieldCandidates = ref(false)
 const gitopsRules = ref<GitOpsRuleFormItem[]>([])
 const gitOpsType = ref<ReleaseTemplateGitOpsType>('kustomize')
+const cdMode = ref<CDMode>('argocd')
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -133,7 +135,7 @@ const scopeTitles: Record<ReleasePipelineScope, string> = {
 
 const scopeDescriptions: Record<ReleasePipelineScope, string> = {
   ci: 'CI 固定使用 Jenkins；参数仅允许来自 CI 绑定管线，并且必须已完成平台标准 Key 映射。',
-  cd: 'CD 默认走 ArgoCD；如果额外选择了 CD 绑定管线，则当前模板会改为走 Jenkins。',
+  cd: '先明确当前模板的 CD 方式：选择管线时只配置 CD 绑定管线；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
 }
 
 const initialColumns: TableColumnsType<ReleaseTemplate> = [
@@ -209,7 +211,11 @@ function selectedBinding(scope: ReleasePipelineScope) {
 }
 
 function isCDUsingArgoCD() {
-  return scopeStates.cd.enabled && !selectedBinding('cd')
+  return scopeStates.cd.enabled && cdMode.value === 'argocd'
+}
+
+function isCDUsingPipeline() {
+  return scopeStates.cd.enabled && cdMode.value === 'pipeline'
 }
 
 function normalizedGitOpsType(type?: string): ReleaseTemplateGitOpsType {
@@ -488,6 +494,7 @@ function resetFormState() {
   gitOpsValuesCandidates.value = []
   gitopsRules.value = []
   gitOpsType.value = 'kustomize'
+  cdMode.value = 'argocd'
 }
 
 function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGitOpsRulePayload {
@@ -526,15 +533,15 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     name: formState.name.trim(),
     ...(modalMode.value === 'create' ? { application_id: formState.application_id.trim() } : {}),
     ci_binding_id: scopeStates.ci.enabled ? scopeStates.ci.binding_id.trim() || undefined : undefined,
-    cd_binding_id: scopeStates.cd.enabled ? scopeStates.cd.binding_id.trim() || undefined : undefined,
-    cd_provider: scopeStates.cd.enabled ? (selectedBinding('cd')?.provider || 'argocd') : undefined,
-    gitops_type: scopeStates.cd.enabled && !selectedBinding('cd') ? normalizedGitOpsType(gitOpsType.value) : undefined,
+    cd_binding_id: scopeStates.cd.enabled && isCDUsingPipeline() ? scopeStates.cd.binding_id.trim() || undefined : undefined,
+    cd_provider: scopeStates.cd.enabled ? (isCDUsingPipeline() ? (selectedBinding('cd')?.provider || 'jenkins') : 'argocd') : undefined,
+    gitops_type: scopeStates.cd.enabled && isCDUsingArgoCD() ? normalizedGitOpsType(gitOpsType.value) : undefined,
     status: formState.status,
     remark: formState.remark.trim() || undefined,
     ci_param_def_ids: scopeStates.ci.enabled ? [...scopeStates.ci.selected_param_def_ids] : [],
-    cd_param_def_ids: scopeStates.cd.enabled ? [...scopeStates.cd.selected_param_def_ids] : [],
+    cd_param_def_ids: [],
     gitops_rules:
-      scopeStates.cd.enabled && !selectedBinding('cd')
+      scopeStates.cd.enabled && isCDUsingArgoCD()
         ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item))
         : [],
   }
@@ -660,6 +667,14 @@ async function loadSelectableParams(scope: ReleasePipelineScope, preserveSelecti
   const appID = formState.application_id.trim()
   const binding = selectedBinding(scope)
 
+  if (scope === 'cd') {
+    state.selectable_params = []
+    if (!preserveSelection) {
+      state.selected_param_def_ids = []
+    }
+    return
+  }
+
   if (!state.enabled || !appID || !binding) {
     state.selectable_params = []
     if (!preserveSelection) {
@@ -713,6 +728,22 @@ async function handleScopeBindingChange(scope: ReleasePipelineScope, value: stri
   await loadSelectableParams(scope)
 }
 
+function handleCDModeChange(value: string | number) {
+  const nextMode = String(value || '').trim() === 'pipeline' ? 'pipeline' : 'argocd'
+  if (cdMode.value === nextMode) {
+    return
+  }
+  cdMode.value = nextMode
+  if (nextMode === 'argocd') {
+    scopeStates.cd.binding_id = ''
+    scopeStates.cd.selected_param_def_ids = []
+    scopeStates.cd.selectable_params = []
+    scopeStates.cd.loading_params = false
+    return
+  }
+  scopeStates.cd.selected_param_def_ids = []
+}
+
 async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: boolean) {
   scopeStates[scope].enabled = checked
   if (!checked) {
@@ -720,6 +751,7 @@ async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: bo
     if (scope === 'cd') {
       gitopsRules.value = []
       gitOpsType.value = 'kustomize'
+      cdMode.value = 'argocd'
     }
     return
   }
@@ -859,7 +891,11 @@ function applyBindingsToForm(bindings: ReleaseTemplateBinding[]) {
   scopeStates.ci.enabled = Boolean(ciBinding)
   scopeStates.ci.binding_id = ciBinding?.binding_id || ''
   scopeStates.cd.enabled = Boolean(cdBinding)
-  scopeStates.cd.binding_id = cdBinding?.binding_id || ''
+  cdMode.value = cdBinding && cdBinding.provider === 'jenkins' ? 'pipeline' : 'argocd'
+  scopeStates.cd.binding_id = cdMode.value === 'pipeline' ? (cdBinding?.binding_id || '') : ''
+  scopeStates.cd.selected_param_def_ids = []
+  scopeStates.cd.selectable_params = []
+  scopeStates.cd.loading_params = false
 }
 
 async function openEditModal(record: ReleaseTemplate) {
@@ -893,7 +929,7 @@ async function openEditModal(record: ReleaseTemplate) {
 
     await Promise.all([
       loadSelectableParams('ci', true),
-      loadSelectableParams('cd', true),
+      Promise.resolve(),
     ])
 
     gitopsRules.value = (gitops_rules || []).map((item: ReleaseTemplateGitOpsRule) =>
@@ -934,7 +970,13 @@ function validateScopeState() {
     throw new Error('请至少启用一个执行单元')
   }
   for (const scope of enabledScopes) {
-    if (scope === 'cd' && !scopeStates[scope].binding_id.trim()) {
+    if (scope === 'cd') {
+      if (isCDUsingArgoCD()) {
+        continue
+      }
+      if (!scopeStates[scope].binding_id.trim()) {
+        throw new Error('请选择 CD 绑定管线')
+      }
       continue
     }
     if (!scopeStates[scope].binding_id.trim()) {
@@ -1216,14 +1258,26 @@ onMounted(async () => {
 
               <a-alert class="scope-alert" type="info" show-icon :message="scopeDescriptions.cd" />
 
-              <a-form-item label="CD 绑定管线">
+              <a-form-item label="CD 类型">
+                <a-segmented
+                  :value="cdMode"
+                  :disabled="!scopeStates.cd.enabled"
+                  :options="[
+                    { label: '管线', value: 'pipeline' },
+                    { label: 'ArgoCD', value: 'argocd' },
+                  ]"
+                  @change="handleCDModeChange"
+                />
+              </a-form-item>
+
+              <a-form-item v-if="isCDUsingPipeline()" label="CD 绑定管线">
                 <a-select
                   v-model:value="scopeStates.cd.binding_id"
                   :disabled="!scopeStates.cd.enabled"
                   show-search
                   allow-clear
                   option-filter-prop="label"
-                  placeholder="留空则走 ArgoCD，可选 Jenkins 管线"
+                  placeholder="请选择 CD 绑定管线"
                   :loading="loadingBindings"
                   :options="bindingOptionsByScope.cd"
                   @change="(value: string | undefined) => handleScopeBindingChange('cd', value)"
@@ -1235,13 +1289,13 @@ onMounted(async () => {
                 class="scope-binding-alert"
                 type="warning"
                 show-icon
-                message="当前未选择 CD 绑定管线，将按 ArgoCD 执行。"
+                message="当前模板的 CD 方式为 ArgoCD。"
                 :description="isHelmGitOps()
-                  ? '当前 GitOps 类型为 Helm。平台会按规则修改 Helm values 文件并触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
-                  : '当前 GitOps 类型为 Kustomize。先从左侧 CI 已勾选的标准字段中选择要引用的 Key，再为它绑定 GitOps YAML 字段；系统内置字段也可以直接引用。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'"
+                  ? '当前 GitOps 类型为 Helm。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例，并按规则修改 Helm values 文件后触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
+                  : '当前 GitOps 类型为 Kustomize。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例；你只需要从左侧 CI 已勾选的标准字段中选择要引用的 Key，再为它绑定 GitOps YAML 字段。系统内置字段也可以直接引用。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'"
               />
               <a-alert
-                v-else-if="scopeStates.cd.enabled && selectedBinding('cd')"
+                v-else-if="isCDUsingPipeline() && selectedBinding('cd')"
                 class="scope-binding-alert"
                 type="success"
                 show-icon
@@ -1266,8 +1320,8 @@ onMounted(async () => {
                     <div class="gitops-rule-subtitle">
                       {{
                         isHelmGitOps()
-                          ? '先选可引用的标准字段和定位字段，再直接下拉选择目标 values 文件与路径；推荐优先落到平台专用 values 文件里，运行时平台只负责写回这些受控键路径。'
-                          : '先选可引用的标准字段和定位字段，再直接下拉选择目标文件、资源和字段；运行时平台会按定位字段的真实值渲染最终目标。'
+                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；推荐优先落到 platform.values-{env}.yaml，运行时平台只负责写回这些受控键路径。'
+                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；发布执行时平台会结合 env 自动命中对应的 ArgoCD 实例。'
                       }}
                     </div>
                   </div>
@@ -1403,36 +1457,12 @@ onMounted(async () => {
                     <a-input
                       v-model:value="rule.value_template"
                       allow-clear
-                      :placeholder="isHelmGitOps() ? '默认会使用 {标准Key}，例如 {image_version}' : '默认会使用 {标准Key}，例如 {project_name}-config'"
+                      :placeholder="isHelmGitOps() ? '默认会使用 {标准Key}，例如 {image_version}' : '默认会使用 {标准Key}，例如 {param_key}-config'"
                     />
                   </a-form-item>
                 </div>
               </div>
 
-              <div v-else class="scope-table-wrapper">
-                <a-table
-                  row-key="id"
-                  size="small"
-                  :columns="selectableParamColumns"
-                  :data-source="scopeStates.cd.selectable_params"
-                  :loading="scopeStates.cd.loading_params"
-                  :pagination="false"
-                  :row-selection="getRowSelection('cd')"
-                  :scroll="{ x: 860, y: 300 }"
-                >
-                  <template #bodyCell="{ column, record }">
-                    <template v-if="column.key === 'param_name'">
-                      <div class="param-name-cell">
-                        <span class="param-name">{{ resolvePlatformParamName(record.param_key) }}</span>
-                        <span class="param-executor">{{ record.executor_param_name }}</span>
-                      </div>
-                    </template>
-                    <template v-else-if="column.key === 'required'">
-                      <a-tag :color="record.required ? 'orange' : 'default'">{{ record.required ? '是' : '否' }}</a-tag>
-                    </template>
-                  </template>
-                </a-table>
-              </div>
             </a-card>
           </a-col>
         </a-row>

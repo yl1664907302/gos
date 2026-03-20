@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appdomain "gos/internal/domain/application"
+	argocddomain "gos/internal/domain/argocdapp"
 	pipelineparamdomain "gos/internal/domain/executorparam"
 	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
@@ -23,6 +24,7 @@ type ReleaseTemplateManager struct {
 	pipelineRepo pipelinedomain.Repository
 	paramRepo    pipelineparamdomain.Repository
 	platformRepo platformparamdomain.Repository
+	argocdRepo   argocddomain.Repository
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader
 	now          func() time.Time
 }
@@ -90,6 +92,7 @@ func NewReleaseTemplateManager(
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
+	argocdRepo argocddomain.Repository,
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader,
 ) *ReleaseTemplateManager {
 	return &ReleaseTemplateManager{
@@ -98,6 +101,7 @@ func NewReleaseTemplateManager(
 		pipelineRepo: pipelineRepo,
 		paramRepo:    paramRepo,
 		platformRepo: platformRepo,
+		argocdRepo:   argocdRepo,
 		gitopsReader: gitopsReader,
 		now: func() time.Time {
 			return time.Now().UTC()
@@ -921,7 +925,32 @@ func (uc *ReleaseTemplateManager) validateArgoCDTemplateConfig(
 	if gitopsType != "" && !gitopsType.Valid() {
 		return fmt.Errorf("%w: gitops_type 无效", ErrInvalidInput)
 	}
-	_ = ctx
+	if uc.argocdRepo != nil {
+		instances, _, err := uc.argocdRepo.ListInstances(ctx, argocddomain.InstanceListFilter{
+			Status:   argocddomain.StatusActive,
+			Page:     1,
+			PageSize: 200,
+		})
+		if err != nil {
+			return err
+		}
+		if len(instances) == 0 {
+			return fmt.Errorf("%w: cd 选择 argocd 时，请先在组件管理中配置可用的 ArgoCD 实例", ErrInvalidInput)
+		}
+		bindings, err := uc.argocdRepo.ListEnvBindings(ctx)
+		if err != nil {
+			return err
+		}
+		activeBindingCount := 0
+		for _, item := range bindings {
+			if item.Status == argocddomain.StatusActive {
+				activeBindingCount++
+			}
+		}
+		if len(instances) > 1 && activeBindingCount == 0 {
+			return fmt.Errorf("%w: 当前存在多个 ArgoCD 实例，请先配置环境与 ArgoCD 的绑定关系", ErrInvalidInput)
+		}
+	}
 	_ = params
 	return nil
 }

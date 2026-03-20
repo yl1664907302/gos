@@ -10,6 +10,7 @@ import (
 	"time"
 
 	appdomain "gos/internal/domain/application"
+	argocddomain "gos/internal/domain/argocdapp"
 	pipelineparamdomain "gos/internal/domain/executorparam"
 	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
@@ -18,15 +19,18 @@ import (
 )
 
 type ReleaseOrderManager struct {
-	repo         domain.Repository
-	appRepo      appdomain.Repository
-	pipelineRepo pipelinedomain.Repository
-	paramRepo    pipelineparamdomain.Repository
-	platformRepo platformparamdomain.Repository
-	jenkins      JenkinsReleaseExecutor
-	argocd       ArgoCDReleaseExecutor
-	gitops       GitOpsReleaseService
-	now          func() time.Time
+	repo          domain.Repository
+	appRepo       appdomain.Repository
+	pipelineRepo  pipelinedomain.Repository
+	paramRepo     pipelineparamdomain.Repository
+	platformRepo  platformparamdomain.Repository
+	jenkins       JenkinsReleaseExecutor
+	argocdRepo    argocddomain.Repository
+	gitopsRepo    gitopsdomain.Repository
+	argocdFactory ArgoCDClientFactory
+	gitopsFactory GitOpsServiceFactory
+	gitops        GitOpsReleaseService
+	now           func() time.Time
 }
 
 type CreateReleaseOrderInput struct {
@@ -127,18 +131,24 @@ func NewReleaseOrderManager(
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
 	jenkins JenkinsReleaseExecutor,
-	argocd ArgoCDReleaseExecutor,
+	argocdRepo argocddomain.Repository,
+	argocdFactory ArgoCDClientFactory,
+	gitopsRepo gitopsdomain.Repository,
+	gitopsFactory GitOpsServiceFactory,
 	gitops GitOpsReleaseService,
 ) *ReleaseOrderManager {
 	return &ReleaseOrderManager{
-		repo:         repo,
-		appRepo:      appRepo,
-		pipelineRepo: pipelineRepo,
-		paramRepo:    paramRepo,
-		platformRepo: platformRepo,
-		jenkins:      jenkins,
-		argocd:       argocd,
-		gitops:       gitops,
+		repo:          repo,
+		appRepo:       appRepo,
+		pipelineRepo:  pipelineRepo,
+		paramRepo:     paramRepo,
+		platformRepo:  platformRepo,
+		jenkins:       jenkins,
+		argocdRepo:    argocdRepo,
+		gitopsRepo:    gitopsRepo,
+		argocdFactory: argocdFactory,
+		gitopsFactory: gitopsFactory,
+		gitops:        gitops,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -722,7 +732,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
-	if uc.jenkins == nil && uc.argocd == nil && uc.gitops == nil {
+	if uc.jenkins == nil && uc.argocdFactory == nil && uc.gitops == nil {
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
 	}
 
@@ -780,10 +790,117 @@ func (uc *ReleaseOrderManager) ListExecutions(ctx context.Context, orderID strin
 	if orderID == "" {
 		return nil, ErrInvalidID
 	}
-	if _, err := uc.repo.GetByID(ctx, orderID); err != nil {
+	order, err := uc.repo.GetByID(ctx, orderID)
+	if err != nil {
 		return nil, err
 	}
-	return uc.repo.ListExecutions(ctx, orderID)
+	items, err := uc.repo.ListExecutions(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	return uc.reconcileExecutionStates(ctx, order, items)
+}
+
+func (uc *ReleaseOrderManager) reconcileExecutionStates(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	items []domain.ReleaseOrderExecution,
+) ([]domain.ReleaseOrderExecution, error) {
+	if len(items) == 0 {
+		return items, nil
+	}
+
+	steps, err := uc.repo.ListSteps(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+	stages, err := uc.repo.ListPipelineStages(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	changed := false
+	for idx := range items {
+		nextStatus, finishedAt, ok := uc.deriveExecutionTerminalState(order, items[idx], steps, stages)
+		if !ok || nextStatus == items[idx].Status {
+			continue
+		}
+		updated, updateErr := uc.repo.UpdateExecutionByScope(ctx, order.ID, items[idx].PipelineScope, domain.ExecutionUpdateInput{
+			Status:        nextStatus,
+			QueueURL:      items[idx].QueueURL,
+			BuildURL:      items[idx].BuildURL,
+			ExternalRunID: items[idx].ExternalRunID,
+			StartedAt:     items[idx].StartedAt,
+			FinishedAt:    finishedAt,
+			UpdatedAt:     uc.now(),
+		})
+		if updateErr != nil {
+			return nil, updateErr
+		}
+		items[idx] = updated
+		changed = true
+	}
+
+	if !changed {
+		return items, nil
+	}
+	return uc.repo.ListExecutions(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) deriveExecutionTerminalState(
+	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
+	steps []domain.ReleaseOrderStep,
+	stages []domain.ReleaseOrderPipelineStage,
+) (domain.ExecutionStatus, *time.Time, bool) {
+	if execution.Status != domain.ExecutionStatusPending && execution.Status != domain.ExecutionStatusRunning {
+		return "", nil, false
+	}
+
+	healthStep := findStepByCode(steps, scopeStepCode(execution.PipelineScope, "health_check"))
+	switch {
+	case healthStep != nil && healthStep.Status == domain.StepStatusSuccess:
+		return domain.ExecutionStatusSuccess, firstNonNilTime(healthStep.FinishedAt, order.FinishedAt, ptrTime(uc.now())), true
+	case healthStep != nil && healthStep.Status == domain.StepStatusFailed:
+		return domain.ExecutionStatusFailed, firstNonNilTime(healthStep.FinishedAt, order.FinishedAt, ptrTime(uc.now())), true
+	}
+
+	healthStage := findPipelineStageByScopeAndKey(stages, execution.PipelineScope, "health_check")
+	switch {
+	case healthStage != nil && healthStage.Status == domain.PipelineStageStatusSuccess:
+		return domain.ExecutionStatusSuccess, firstNonNilTime(healthStage.FinishedAt, order.FinishedAt, ptrTime(uc.now())), true
+	case healthStage != nil && healthStage.Status == domain.PipelineStageStatusFailed:
+		return domain.ExecutionStatusFailed, firstNonNilTime(healthStage.FinishedAt, order.FinishedAt, ptrTime(uc.now())), true
+	}
+
+	return "", nil, false
+}
+
+func findPipelineStageByScopeAndKey(
+	stages []domain.ReleaseOrderPipelineStage,
+	scope domain.PipelineScope,
+	stageKey string,
+) *domain.ReleaseOrderPipelineStage {
+	for idx := range stages {
+		if strings.EqualFold(strings.TrimSpace(stages[idx].PipelineScope), string(scope)) &&
+			strings.EqualFold(strings.TrimSpace(stages[idx].StageKey), strings.TrimSpace(stageKey)) {
+			return &stages[idx]
+		}
+	}
+	return nil
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
+}
+
+func firstNonNilTime(values ...*time.Time) *time.Time {
+	for _, item := range values {
+		if item != nil {
+			return item
+		}
+	}
+	return nil
 }
 
 func (uc *ReleaseOrderManager) startNextPendingExecution(
@@ -792,6 +909,12 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 	executions []domain.ReleaseOrderExecution,
 	orderParams []domain.ReleaseOrderParam,
 ) error {
+	for _, execution := range executions {
+		if execution.Status == domain.ExecutionStatusRunning {
+			return nil
+		}
+	}
+
 	for _, execution := range orderExecutionsByScope(executions) {
 		if execution.Status != domain.ExecutionStatusPending {
 			continue
@@ -894,6 +1017,12 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 		_ = uc.markStepRunning(ctx, order.ID, runningCode, "管线已触发，等待执行结果回传，queue: "+strings.TrimSpace(queueURL))
 		_ = uc.markStep(ctx, order.ID, successCode, domain.StepStatusPending, "", nil, nil)
 		return nil
+	}
+
+	for _, execution := range executions {
+		if execution.Status == domain.ExecutionStatusRunning {
+			return nil
+		}
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, "global:release_finish", "所有执行单元已完成")
@@ -1017,10 +1146,100 @@ func (uc *ReleaseOrderManager) ListSteps(ctx context.Context, orderID string) ([
 	if orderID == "" {
 		return nil, ErrInvalidID
 	}
-	if _, err := uc.repo.GetByID(ctx, orderID); err != nil {
+	order, err := uc.repo.GetByID(ctx, orderID)
+	if err != nil {
 		return nil, err
 	}
-	return uc.repo.ListSteps(ctx, orderID)
+	items, err := uc.repo.ListSteps(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	return uc.reconcileTerminalSteps(ctx, order, items)
+}
+
+func (uc *ReleaseOrderManager) reconcileTerminalSteps(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	steps []domain.ReleaseOrderStep,
+) ([]domain.ReleaseOrderStep, error) {
+	if len(steps) == 0 {
+		return steps, nil
+	}
+
+	executions, err := uc.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	changed := false
+	now := uc.now()
+	for _, execution := range executions {
+		if !isArgoCDExecution(execution) || !execution.Status.IsTerminal() {
+			continue
+		}
+		healthCode := scopeStepCode(execution.PipelineScope, "health_check")
+		current := findStepByCode(steps, healthCode)
+		if current == nil || (current.Status != domain.StepStatusPending && current.Status != domain.StepStatusRunning) {
+			continue
+		}
+
+		nextStatus := domain.StepStatusFailed
+		nextMessage := strings.TrimSpace(current.Message)
+		if execution.Status == domain.ExecutionStatusSuccess {
+			nextStatus = domain.StepStatusSuccess
+			if nextMessage == "" {
+				nextMessage = "ArgoCD 部署完成"
+			}
+		} else if nextMessage == "" {
+			nextMessage = "ArgoCD 部署失败"
+		}
+
+		startedAt := current.StartedAt
+		if startedAt == nil {
+			startedAt = firstNonNilTime(execution.StartedAt, order.StartedAt, ptrTime(now))
+		}
+		finishedAt := firstNonNilTime(execution.FinishedAt, order.FinishedAt, ptrTime(now))
+		if _, updateErr := uc.repo.UpdateStep(ctx, order.ID, healthCode, domain.StepUpdateInput{
+			Status:     nextStatus,
+			Message:    nextMessage,
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+		}); updateErr != nil {
+			return nil, updateErr
+		}
+		changed = true
+	}
+
+	globalStep := findStepByCode(steps, "global:release_finish")
+	if globalStep != nil &&
+		(globalStep.Status == domain.StepStatusPending || globalStep.Status == domain.StepStatusRunning) &&
+		order.Status.IsTerminal() {
+		globalStatus := domain.StepStatusSuccess
+		globalMessage := "发布完成"
+		if order.Status != domain.OrderStatusSuccess {
+			globalStatus = domain.StepStatusFailed
+			globalMessage = "发布结束"
+		}
+		startedAt := globalStep.StartedAt
+		if startedAt == nil {
+			startedAt = firstNonNilTime(order.StartedAt, ptrTime(now))
+		}
+		finishedAt := firstNonNilTime(order.FinishedAt, ptrTime(now))
+		if _, updateErr := uc.repo.UpdateStep(ctx, order.ID, "global:release_finish", domain.StepUpdateInput{
+			Status:     globalStatus,
+			Message:    globalMessage,
+			StartedAt:  startedAt,
+			FinishedAt: finishedAt,
+		}); updateErr != nil {
+			return nil, updateErr
+		}
+		changed = true
+	}
+
+	if !changed {
+		return steps, nil
+	}
+	return uc.repo.ListSteps(ctx, order.ID)
 }
 
 func (uc *ReleaseOrderManager) StartStep(

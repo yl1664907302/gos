@@ -31,19 +31,16 @@ type TrackReleaseExecutionOutput struct {
 type TrackReleaseExecution struct {
 	manager *ReleaseOrderManager
 	jenkins JenkinsReleaseStatusClient
-	argocd  ArgoCDReleaseExecutor
 	now     func() time.Time
 }
 
 func NewTrackReleaseExecution(
 	manager *ReleaseOrderManager,
 	jenkins JenkinsReleaseStatusClient,
-	argocd ArgoCDReleaseExecutor,
 ) *TrackReleaseExecution {
 	return &TrackReleaseExecution{
 		manager: manager,
 		jenkins: jenkins,
-		argocd:  argocd,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -54,7 +51,7 @@ func (uc *TrackReleaseExecution) Execute(ctx context.Context) (TrackReleaseExecu
 	if uc == nil || uc.manager == nil {
 		return TrackReleaseExecutionOutput{}, nil
 	}
-	if uc.jenkins == nil && uc.argocd == nil {
+	if uc.jenkins == nil && (uc.manager.argocdRepo == nil || uc.manager.argocdFactory == nil) {
 		return TrackReleaseExecutionOutput{}, nil
 	}
 
@@ -91,11 +88,7 @@ func (uc *TrackReleaseExecution) listRunningOrders(ctx context.Context) ([]domai
 	result := make([]domain.ReleaseOrder, 0)
 	page := 1
 	for {
-		items, total, err := uc.manager.List(ctx, ListReleaseOrderInput{
-			Status:   domain.OrderStatusRunning,
-			Page:     page,
-			PageSize: pageSize,
-		})
+		items, total, err := uc.manager.repo.ListTrackableOrders(ctx, page, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -305,11 +298,22 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 	runningExecution domain.ReleaseOrderExecution,
 	executions []domain.ReleaseOrderExecution,
 ) (bool, bool, error) {
-	if uc.argocd == nil {
+	if uc.manager.argocdRepo == nil || uc.manager.argocdFactory == nil {
 		return false, false, fmt.Errorf("%w: argocd executor is not configured", ErrInvalidInput)
 	}
 
-	binding, err := uc.manager.resolveExecutionBinding(ctx, order, runningExecution)
+	steps, err := uc.manager.ListSteps(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+	syncStep := findStepByCode(steps, scopeStepCode(runningExecution.PipelineScope, "argocd_sync"))
+	if syncStep == nil || syncStep.Status != domain.StepStatusSuccess {
+		// ArgoCD Sync 还没真正触发前，不能拿当前应用的旧 Healthy 状态来判这次发布成功。
+		// 同时 startArgoCDExecution 已经会把执行单元提早置为 running，避免 tracker 重复启动 CD。
+		return false, true, nil
+	}
+
+	binding, _, client, err := uc.manager.resolveArgoCDExecutionContext(ctx, order, runningExecution, nil)
 	if err != nil {
 		return false, false, err
 	}
@@ -321,7 +325,7 @@ func (uc *TrackReleaseExecution) syncArgoCDExecution(
 		// 阶段刷新失败不直接打断主状态同步，避免短暂接口抖动影响发布闭环。
 	}
 
-	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, client, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
 	if err != nil {
 		if errors.Is(err, ErrInvalidInput) {
 			updated, finishErr := uc.finishStep(

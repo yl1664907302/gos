@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined, RollbackOutlined } from '@ant-design/icons-vue'
+import { ExclamationCircleOutlined, PlusOutlined, QuestionCircleOutlined, RollbackOutlined } from '@ant-design/icons-vue'
 import { Modal, message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
@@ -24,6 +24,7 @@ const dataSource = ref<Application[]>([])
 const total = ref(0)
 const loadingTemplateAvailability = ref(false)
 const templateApplicationIDs = ref<Set<string>>(new Set())
+const introVisible = ref(false)
 
 const initialColumns: TableColumnsType<Application> = [
   { title: '应用名称', dataIndex: 'name', key: 'name', width: 180 },
@@ -106,6 +107,14 @@ function handlePageChange(page: number, pageSize: number) {
 
 function toCreate() {
   void router.push('/applications/new')
+}
+
+function openIntroDrawer() {
+  introVisible.value = true
+}
+
+function closeIntroDrawer() {
+  introVisible.value = false
 }
 
 function toDetail(id: string) {
@@ -201,12 +210,20 @@ onMounted(() => {
         <h2 class="page-title">我的应用</h2>
         <p class="page-subtitle">管理应用基础信息，支持筛选、分页、编辑与删除。</p>
       </div>
-      <a-button v-if="canManageApplication" type="primary" @click="toCreate">
-        <template #icon>
-          <PlusOutlined />
-        </template>
-        新增应用
-      </a-button>
+      <a-space>
+        <a-button @click="openIntroDrawer">
+          <template #icon>
+            <QuestionCircleOutlined />
+          </template>
+          发布流程介绍
+        </a-button>
+        <a-button v-if="canManageApplication" type="primary" @click="toCreate">
+          <template #icon>
+            <PlusOutlined />
+          </template>
+          新增应用
+        </a-button>
+      </a-space>
     </div>
 
     <a-card class="filter-card" :bordered="true">
@@ -325,6 +342,68 @@ onMounted(() => {
         />
       </div>
     </a-card>
+
+    <a-drawer :open="introVisible" title="发布流程介绍" width="620" @close="closeIntroDrawer">
+      <a-space direction="vertical" size="large" class="intro-drawer-content">
+        <a-alert
+          type="info"
+          show-icon
+          message="这张图用于帮助用户理解应用、CI、参数、ArgoCD 与 GitOps 之间的关系。"
+          description="应用是发布对象；CI 管线负责构建与产出动态值；发布参数负责在 CI/CD 之间传递上下文；ArgoCD 与 GitOps 实例一起决定最终修改哪份 Git 声明并部署到哪个集群。"
+        />
+
+        <div class="flow-section">
+          <div class="flow-node primary">
+            <div class="flow-title">应用 App</div>
+            <div class="flow-desc">应用是整条发布链路的中心对象，模板、绑定和发布单都围绕当前应用展开。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node">
+            <div class="flow-title">CI 管线</div>
+            <div class="flow-desc">负责拉代码、构建、推镜像，并产出镜像版本等动态值。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node">
+            <div class="flow-title">发布参数</div>
+            <div class="flow-desc">包含基础环境、标准字段映射值和 CI 运行期产出，是后续 CD 的输入上下文。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-branch">
+            <div class="flow-branch-title">CD 方式</div>
+            <div class="flow-branch-grid">
+              <div class="flow-node">
+                <div class="flow-title">CD 管线</div>
+                <div class="flow-desc">直接走绑定的 CD 管线，适合已有 Jenkins/CD 流程。</div>
+              </div>
+              <div class="flow-node accent">
+                <div class="flow-title">ArgoCD</div>
+                <div class="flow-desc">平台先修改 GitOps 配置，再触发 ArgoCD，同步到目标集群。</div>
+              </div>
+            </div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node accent">
+            <div class="flow-title">ArgoCD 实例</div>
+            <div class="flow-desc">发布时会根据基础环境 env 命中具体的 ArgoCD 实例，决定使用哪套集群入口与应用视图。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node accent">
+            <div class="flow-title">GitOps 实例</div>
+            <div class="flow-desc">ArgoCD 实例会关联一个 GitOps 实例，GitOps 实例负责提供本地工作目录、Git 凭据和提交身份。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node accent">
+            <div class="flow-title">Git 仓库</div>
+            <div class="flow-desc">具体仓库与路径由 ArgoCD Application 解析，平台在这里更新 values 或 YAML，再提交推送。</div>
+          </div>
+          <div class="flow-arrow">↓</div>
+          <div class="flow-node accent">
+            <div class="flow-title">目标集群</div>
+            <div class="flow-desc">Git 变更推送后，由 ArgoCD Sync 与健康检查完成最终部署落地。</div>
+          </div>
+        </div>
+      </a-space>
+    </a-drawer>
   </div>
 </template>
 
@@ -364,6 +443,74 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
+.intro-drawer-content {
+  width: 100%;
+}
+
+.flow-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.flow-arrow {
+  color: #1677ff;
+  font-size: 20px;
+  line-height: 1;
+  text-align: center;
+}
+
+.flow-node {
+  border: 1px solid #d9e2f2;
+  border-radius: 16px;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  padding: 16px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+
+.flow-node.primary {
+  border-color: #91caff;
+  background: linear-gradient(180deg, #f0f7ff 0%, #ffffff 100%);
+}
+
+.flow-node.accent {
+  border-color: #b7eb8f;
+  background: linear-gradient(180deg, #f6ffed 0%, #ffffff 100%);
+}
+
+.flow-title {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.flow-desc {
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.flow-branch {
+  border: 1px dashed #cbd5e1;
+  border-radius: 18px;
+  padding: 16px;
+  background: #fafcff;
+}
+
+.flow-branch-title {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.flow-branch-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
 @media (max-width: 1024px) {
   .page-header {
     flex-direction: column;
@@ -388,6 +535,12 @@ onMounted(() => {
 
   .pagination-area {
     justify-content: center;
+  }
+}
+
+@media (min-width: 640px) {
+  .flow-branch-grid {
+    grid-template-columns: 1fr 1fr;
   }
 }
 </style>

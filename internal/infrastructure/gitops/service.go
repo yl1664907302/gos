@@ -87,6 +87,7 @@ type BindingTarget struct {
 const defaultCommitMessageTemplate = "chore(release): {env} -> {image_version}"
 
 var commitTemplateTokenPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
+var repoBranchLocks sync.Map
 
 func NewService(cfg Config) *Service {
 	return &Service{
@@ -176,25 +177,28 @@ func (s *Service) GetStatus(ctx context.Context) (Status, error) {
 	remoteOrigin, err := s.remoteOriginURL(ctx, status.LocalRoot)
 	if err == nil {
 		status.RemoteOrigin = strings.TrimSpace(remoteOrigin)
+	} else {
+		status.StatusSummary = append(status.StatusSummary, fmt.Sprintf("warning: 读取 Git remote 失败: %v", err))
 	}
 
 	if status.CurrentBranch, err = s.gitSingleLine(ctx, status.LocalRoot, "rev-parse", "--abbrev-ref", "HEAD"); err != nil {
-		return status, err
+		status.StatusSummary = append(status.StatusSummary, fmt.Sprintf("warning: 读取当前分支失败: %v", err))
 	}
 	if status.HeadCommit, err = s.gitSingleLine(ctx, status.LocalRoot, "rev-parse", "HEAD"); err != nil {
-		return status, err
+		status.StatusSummary = append(status.StatusSummary, fmt.Sprintf("warning: 读取 HEAD 提交失败: %v", err))
 	}
 	if status.HeadCommitSubject, err = s.gitSingleLine(ctx, status.LocalRoot, "log", "-1", "--pretty=%s"); err != nil {
-		return status, err
+		status.StatusSummary = append(status.StatusSummary, fmt.Sprintf("warning: 读取提交摘要失败: %v", err))
 	}
 
 	worktreeOutput, err := s.runGit(ctx, status.LocalRoot, "status", "--short")
 	if err != nil {
-		return status, err
+		status.StatusSummary = append(status.StatusSummary, fmt.Sprintf("warning: 读取工作区状态失败: %v", err))
+	} else {
+		lines := splitNonEmptyLines(worktreeOutput)
+		status.WorktreeDirty = len(lines) > 0
+		status.StatusSummary = append(status.StatusSummary, lines...)
 	}
-	lines := splitNonEmptyLines(worktreeOutput)
-	status.WorktreeDirty = len(lines) > 0
-	status.StatusSummary = lines
 
 	if status.RemoteOrigin != "" {
 		status.RemoteReachable = s.checkRemoteReachable(ctx, status.RemoteOrigin)
@@ -511,6 +515,8 @@ func (s *Service) UpdateKustomizationImage(
 			"source_path":   sourcePath,
 		})
 	}
+	unlock := acquireRepoBranchLock(repoURL, branch)
+	defer unlock()
 
 	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
 	if err != nil {
@@ -553,7 +559,7 @@ func (s *Service) UpdateKustomizationImage(
 		if _, cmdErr := s.runGit(ctx, workspacePath, "commit", "-m", commitMessage); cmdErr != nil {
 			return "", "", "", "", false, cmdErr
 		}
-		if _, cmdErr := s.runGit(ctx, workspacePath, "push", "origin", branch); cmdErr != nil {
+		if cmdErr := s.pushWithRetry(ctx, workspacePath, branch); cmdErr != nil {
 			return "", "", "", "", false, cmdErr
 		}
 	}
@@ -594,6 +600,8 @@ func (s *Service) ApplyManifestRules(
 	if commitMessage == "" {
 		commitMessage = "chore(gitops): update manifest fields"
 	}
+	unlock := acquireRepoBranchLock(repoURL, branch)
+	defer unlock()
 
 	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
 	if err != nil {
@@ -660,7 +668,7 @@ func (s *Service) ApplyManifestRules(
 	if _, err := s.runGit(ctx, workspacePath, "commit", "-m", commitMessage); err != nil {
 		return workspacePath, nil, "", false, err
 	}
-	if _, err := s.runGit(ctx, workspacePath, "push", "origin", branch); err != nil {
+	if err := s.pushWithRetry(ctx, workspacePath, branch); err != nil {
 		return workspacePath, nil, "", false, err
 	}
 	commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
@@ -694,6 +702,8 @@ func (s *Service) ApplyValuesRules(
 	if commitMessage == "" {
 		commitMessage = "chore(gitops): update helm values"
 	}
+	unlock := acquireRepoBranchLock(repoURL, branch)
+	defer unlock()
 
 	workspacePath, err = s.resolveWorkspacePath(ctx, repoURL)
 	if err != nil {
@@ -760,7 +770,7 @@ func (s *Service) ApplyValuesRules(
 	if _, err := s.runGit(ctx, workspacePath, "commit", "-m", commitMessage); err != nil {
 		return workspacePath, nil, "", false, err
 	}
-	if _, err := s.runGit(ctx, workspacePath, "push", "origin", branch); err != nil {
+	if err := s.pushWithRetry(ctx, workspacePath, branch); err != nil {
 		return workspacePath, nil, "", false, err
 	}
 	commitSHA, err = s.currentCommitSHA(ctx, workspacePath)
@@ -875,6 +885,25 @@ func (s *Service) runGit(ctx context.Context, workspacePath string, args ...stri
 	return s.runCommand(ctx, workspacePath, "git", args...)
 }
 
+func (s *Service) pushWithRetry(ctx context.Context, workspacePath string, branch string) error {
+	if _, err := s.runGit(ctx, workspacePath, "push", "origin", branch); err != nil {
+		if !isNonFastForwardPushError(err) {
+			return err
+		}
+		if _, fetchErr := s.runGit(ctx, workspacePath, "fetch", "origin", branch); fetchErr != nil {
+			return fmt.Errorf("git push rejected and fetch retry failed: %w", fetchErr)
+		}
+		if _, rebaseErr := s.runGit(ctx, workspacePath, "rebase", "origin/"+branch); rebaseErr != nil {
+			_, _ = s.runGit(context.Background(), workspacePath, "rebase", "--abort")
+			return fmt.Errorf("git push rejected because remote branch advanced; automatic rebase failed: %w", rebaseErr)
+		}
+		if _, pushErr := s.runGit(ctx, workspacePath, "push", "origin", branch); pushErr != nil {
+			return fmt.Errorf("git push retry failed after rebasing onto latest origin/%s: %w", branch, pushErr)
+		}
+	}
+	return nil
+}
+
 func (s *Service) gitSingleLine(ctx context.Context, workspacePath string, args ...string) (string, error) {
 	output, err := s.runGit(ctx, workspacePath, args...)
 	if err != nil {
@@ -963,6 +992,25 @@ func resolveBranch(candidate string, fallback string) string {
 		return "master"
 	}
 	return candidate
+}
+
+func acquireRepoBranchLock(repoURL string, branch string) func() {
+	key := normalizeRepoURL(repoURL) + "::" + resolveBranch(branch, "")
+	actual, _ := repoBranchLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := actual.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+func isNonFastForwardPushError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "[rejected]") ||
+		strings.Contains(message, "fetch first") ||
+		strings.Contains(message, "non-fast-forward") ||
+		strings.Contains(message, "failed to push some refs")
 }
 
 func (s *Service) resolveAppDirectory(localRoot string, appKey string) (string, error) {

@@ -1,15 +1,45 @@
 import { http } from './http'
-import type { GitOpsFieldCandidate, GitOpsStatus, GitOpsTemplateField, GitOpsValuesCandidate } from '../types/gitops'
+import type {
+  GitOpsFieldCandidate,
+  GitOpsInstanceDataResponse,
+  GitOpsInstanceListParams,
+  GitOpsInstanceListResponse,
+  GitOpsInstanceStatusDataResponse,
+  GitOpsStatus,
+  GitOpsTemplateField,
+  GitOpsValuesCandidate,
+  UpsertGitOpsInstancePayload,
+} from '../types/gitops'
 
 export async function getGitOpsStatus() {
   const response = await http.get<{ data: GitOpsStatus }>('/gitops/status')
   return response.data
 }
 
-export async function updateGitOpsCommitMessageTemplate(template: string) {
-  const response = await http.put<{ data: GitOpsStatus }>('/gitops/settings/commit-message-template', {
-    template,
-  })
+export async function listGitOpsInstances(
+  params: GitOpsInstanceListParams = {},
+): Promise<GitOpsInstanceListResponse> {
+  const response = await http.get<GitOpsInstanceListResponse>('/gitops/instances', { params })
+  return response.data
+}
+
+export async function createGitOpsInstance(
+  payload: UpsertGitOpsInstancePayload,
+): Promise<GitOpsInstanceDataResponse> {
+  const response = await http.post<GitOpsInstanceDataResponse>('/gitops/instances', payload)
+  return response.data
+}
+
+export async function updateGitOpsInstance(
+  id: string,
+  payload: UpsertGitOpsInstancePayload,
+): Promise<GitOpsInstanceDataResponse> {
+  const response = await http.put<GitOpsInstanceDataResponse>(`/gitops/instances/${id}`, payload)
+  return response.data
+}
+
+export async function getGitOpsInstanceStatus(id: string): Promise<GitOpsInstanceStatusDataResponse> {
+  const response = await http.get<GitOpsInstanceStatusDataResponse>(`/gitops/instances/${id}/status`)
   return response.data
 }
 

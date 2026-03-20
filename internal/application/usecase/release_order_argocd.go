@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	argocddomain "gos/internal/domain/argocdapp"
 	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
@@ -20,11 +21,8 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	orderParams []domain.ReleaseOrderParam,
 	executions []domain.ReleaseOrderExecution,
 ) error {
-	if uc.argocd == nil {
+	if uc.argocdRepo == nil || uc.argocdFactory == nil {
 		return fmt.Errorf("%w: argocd executor is not configured", ErrInvalidInput)
-	}
-	if uc.gitops == nil {
-		return fmt.Errorf("%w: gitops service is not configured", ErrInvalidInput)
 	}
 
 	template, _, _, templateGitOpsRules, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
@@ -42,11 +40,29 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	syncCode := scopeStepCode(execution.PipelineScope, "argocd_sync")
 	healthCode := scopeStepCode(execution.PipelineScope, "health_check")
 
+	startedAt := execution.StartedAt
+	if startedAt == nil {
+		now := uc.now()
+		startedAt = &now
+	}
+	if _, err := uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+		Status:    domain.ExecutionStatusRunning,
+		StartedAt: startedAt,
+		UpdatedAt: uc.now(),
+	}); err != nil {
+		return err
+	}
+
 	_ = uc.markStepRunning(ctx, order.ID, updateCode, "开始更新 GitOps 配置")
 
-	binding, err := uc.resolveExecutionBinding(ctx, order, execution)
+	binding, argocdInstance, client, err := uc.resolveArgoCDExecutionContext(ctx, order, execution, orderParams)
 	if err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "解析 ArgoCD 绑定失败: "+err.Error())
+		return err
+	}
+	gitopsService, err := uc.resolveGitOpsService(ctx, argocdInstance)
+	if err != nil {
+		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "解析 GitOps 实例失败: "+err.Error())
 		return err
 	}
 	appKey := ""
@@ -57,7 +73,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		}
 	}
 	environment := uc.resolveArgoCDEnvironment(order, orderParams)
-	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, environment, gitopsType)
+	appName, app, err := resolveArgoCDApplicationByRef(ctx, client, binding.ExternalRef, environment, gitopsType)
 	if err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "加载 ArgoCD Application 失败: "+err.Error())
 		return fmt.Errorf("%w: get argocd application failed: %v", ErrInvalidInput, err)
@@ -76,7 +92,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		return fmt.Errorf("%w: image_version is required when cd executor is argocd", ErrInvalidInput)
 	}
 	commitFields := buildGitOpsCommitMessageFields(order, orderParams, appKey, environment, imageVersion, sourcePath)
-	commitMessage := uc.gitops.BuildCommitMessage(commitFields)
+	commitMessage := gitopsService.BuildCommitMessage(commitFields)
 
 	manifestChangedFiles := make([]string, 0)
 	commitSHA := ""
@@ -86,12 +102,12 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	changed := false
 	switch gitopsType {
 	case domain.GitOpsTypeHelm:
-		valuesRules, buildErr := uc.buildArgoCDValuesRules(templateGitOpsRules, commitFields)
+		valuesRules, buildErr := uc.buildArgoCDValuesRules(gitopsService, templateGitOpsRules, commitFields)
 		if buildErr != nil {
 			_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "GitOps 规则渲染失败: "+buildErr.Error())
 			return buildErr
 		}
-		_, valuesFiles, valuesCommitSHA, valuesChanged, applyErr := uc.gitops.ApplyValuesRules(
+		_, valuesFiles, valuesCommitSHA, valuesChanged, applyErr := gitopsService.ApplyValuesRules(
 			ctx,
 			repoURL,
 			strings.TrimSpace(app.GetTargetRevision()),
@@ -109,13 +125,13 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		manifestChanged = valuesChanged
 	default:
 		if len(templateGitOpsRules) > 0 {
-			manifestRules, buildErr := uc.buildArgoCDManifestRules(templateGitOpsRules, commitFields)
+			manifestRules, buildErr := uc.buildArgoCDManifestRules(gitopsService, templateGitOpsRules, commitFields)
 			if buildErr != nil {
 				_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "GitOps 规则渲染失败: "+buildErr.Error())
 				return buildErr
 			}
 			if len(manifestRules) > 0 {
-				_, manifestFiles, manifestCommitSHA, changed, applyErr := uc.gitops.ApplyManifestRules(
+				_, manifestFiles, manifestCommitSHA, changed, applyErr := gitopsService.ApplyManifestRules(
 					ctx,
 					repoURL,
 					strings.TrimSpace(app.GetTargetRevision()),
@@ -138,7 +154,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		var imagePreviousTag string
 		var imageChanged bool
 		var updateErr error
-		_, manifestPath, imageCommitSHA, imagePreviousTag, imageChanged, updateErr = uc.gitops.UpdateKustomizationImage(
+		_, manifestPath, imageCommitSHA, imagePreviousTag, imageChanged, updateErr = gitopsService.UpdateKustomizationImage(
 			ctx,
 			repoURL,
 			sourcePath,
@@ -193,7 +209,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, syncCode, "开始触发 ArgoCD Sync")
-	if err := uc.argocd.SyncApplication(ctx, appName); err != nil {
+	if err := client.SyncApplication(ctx, appName); err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, syncCode, domain.StepStatusFailed, "触发 ArgoCD Sync 失败: "+err.Error())
 		return fmt.Errorf("%w: trigger argocd sync failed: %v", ErrInvalidInput, err)
 	}
@@ -202,7 +218,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	if _, err := uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
 		Status:        domain.ExecutionStatusRunning,
 		ExternalRunID: commitSHA,
-		StartedAt:     &now,
+		StartedAt:     startedAt,
 		UpdatedAt:     now,
 	}); err != nil {
 		return err
@@ -404,6 +420,7 @@ func buildGitOpsCommitMessageFields(
 }
 
 func (uc *ReleaseOrderManager) buildArgoCDManifestRules(
+	gitopsService GitOpsReleaseService,
 	rules []domain.ReleaseTemplateGitOpsRule,
 	fields map[string]string,
 ) ([]gitopsdomain.ManifestRule, error) {
@@ -418,9 +435,9 @@ func (uc *ReleaseOrderManager) buildArgoCDManifestRules(
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少定位字段 %s", ErrInvalidInput, locatorKey)
 		}
 
-		filePath := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.FilePathTemplate), fields))
-		documentName := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.DocumentName), fields))
-		value := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.ValueTemplate), fields))
+		filePath := strings.TrimSpace(gitopsService.RenderTemplate(strings.TrimSpace(item.FilePathTemplate), fields))
+		documentName := strings.TrimSpace(gitopsService.RenderTemplate(strings.TrimSpace(item.DocumentName), fields))
+		value := strings.TrimSpace(gitopsService.RenderTemplate(strings.TrimSpace(item.ValueTemplate), fields))
 		if filePath == "" {
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少目标文件路径", ErrInvalidInput)
 		}
@@ -442,6 +459,7 @@ func (uc *ReleaseOrderManager) buildArgoCDManifestRules(
 }
 
 func (uc *ReleaseOrderManager) buildArgoCDValuesRules(
+	gitopsService GitOpsReleaseService,
 	rules []domain.ReleaseTemplateGitOpsRule,
 	fields map[string]string,
 ) ([]gitopsdomain.ValuesRule, error) {
@@ -456,8 +474,8 @@ func (uc *ReleaseOrderManager) buildArgoCDValuesRules(
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少定位字段 %s", ErrInvalidInput, locatorKey)
 		}
 
-		filePath := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.FilePathTemplate), fields))
-		value := strings.TrimSpace(uc.gitops.RenderTemplate(strings.TrimSpace(item.ValueTemplate), fields))
+		filePath := strings.TrimSpace(gitopsService.RenderTemplate(strings.TrimSpace(item.FilePathTemplate), fields))
+		value := strings.TrimSpace(gitopsService.RenderTemplate(strings.TrimSpace(item.ValueTemplate), fields))
 		if filePath == "" {
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少目标 values 文件路径", ErrInvalidInput)
 		}
@@ -484,6 +502,71 @@ func unresolvedGitOpsTemplate(value string) bool {
 	return gitopsTemplatePlaceholderPattern.MatchString(strings.TrimSpace(value))
 }
 
+func (uc *ReleaseOrderManager) resolveArgoCDExecutionContext(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
+	orderParams []domain.ReleaseOrderParam,
+) (pipelinedomain.PipelineBinding, argocddomain.Instance, ArgoCDApplicationClient, error) {
+	binding, err := uc.resolveExecutionBinding(ctx, order, execution)
+	if err != nil {
+		return pipelinedomain.PipelineBinding{}, argocddomain.Instance{}, nil, err
+	}
+	instance, err := uc.resolveArgoCDInstance(ctx, order, orderParams)
+	if err != nil {
+		return pipelinedomain.PipelineBinding{}, argocddomain.Instance{}, nil, err
+	}
+	client := uc.argocdFactory.Build(instance)
+	if client == nil {
+		return pipelinedomain.PipelineBinding{}, argocddomain.Instance{}, nil, fmt.Errorf("%w: argocd client is not configured", ErrInvalidInput)
+	}
+	return binding, instance, client, nil
+}
+
+func (uc *ReleaseOrderManager) resolveArgoCDInstance(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	orderParams []domain.ReleaseOrderParam,
+) (argocddomain.Instance, error) {
+	if uc.argocdRepo == nil {
+		return argocddomain.Instance{}, fmt.Errorf("%w: argocd repository is not configured", ErrInvalidInput)
+	}
+	envCode := uc.resolveArgoCDEnvironment(order, orderParams)
+	if envCode == "" {
+		envCode = strings.TrimSpace(order.EnvCode)
+	}
+	if envCode == "" {
+		return argocddomain.Instance{}, fmt.Errorf("%w: env_code is required to resolve argocd instance", ErrInvalidInput)
+	}
+	instance, err := uc.argocdRepo.ResolveInstanceByEnv(ctx, envCode)
+	if err != nil {
+		return argocddomain.Instance{}, err
+	}
+	return instance, nil
+}
+
+func (uc *ReleaseOrderManager) resolveGitOpsService(
+	ctx context.Context,
+	argocdInstance argocddomain.Instance,
+) (GitOpsReleaseService, error) {
+	gitopsInstanceID := strings.TrimSpace(argocdInstance.GitOpsInstanceID)
+	if gitopsInstanceID != "" && uc.gitopsRepo != nil && uc.gitopsFactory != nil {
+		item, err := uc.gitopsRepo.GetInstanceByID(ctx, gitopsInstanceID)
+		if err != nil {
+			return nil, err
+		}
+		service := uc.gitopsFactory.Build(item)
+		if service == nil {
+			return nil, fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
+		}
+		return service, nil
+	}
+	if uc.gitops != nil {
+		return uc.gitops, nil
+	}
+	return nil, fmt.Errorf("%w: gitops service is not configured", ErrInvalidInput)
+}
+
 // resolveArgoCDApplicationByRef 兼容两种 external_ref：
 // 1. 历史数据：直接填写 ArgoCD Application 名称；
 // 2. 当前推荐：选择 GitOps 应用目录（apps/<应用目录>）。
@@ -492,7 +575,7 @@ func unresolvedGitOpsTemplate(value string) bool {
 // 自动拼成 apps/<应用目录>/overlays/<env> 来定位真正的 ArgoCD Application。
 func resolveArgoCDApplicationByRef(
 	ctx context.Context,
-	client ArgoCDReleaseExecutor,
+	client ArgoCDApplicationClient,
 	externalRef string,
 	environment string,
 	gitopsType domain.GitOpsType,

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"time"
 
 	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
@@ -32,7 +33,7 @@ func (uc *ReleaseOrderManager) ListPipelineStagesView(
 		return ReleaseOrderPipelineStageView{}, err
 	}
 
-	executions, err := uc.repo.ListExecutions(ctx, order.ID)
+	executions, err := uc.ListExecutions(ctx, order.ID)
 	if err != nil {
 		return ReleaseOrderPipelineStageView{}, err
 	}
@@ -316,78 +317,88 @@ func (uc *ReleaseOrderManager) refreshArgoCDStages(
 	execution domain.ReleaseOrderExecution,
 	binding pipelinedomain.PipelineBinding,
 ) (string, error) {
-	if uc.argocd == nil {
+	if uc.argocdRepo == nil || uc.argocdFactory == nil {
 		return "ArgoCD 阶段同步未配置", fmt.Errorf("argocd executor is not configured")
 	}
 	gitopsType, err := uc.resolveOrderGitOpsType(ctx, order)
 	if err != nil {
 		return "ArgoCD 阶段同步失败：" + trimPipelineStageError(err), err
 	}
-	appName, app, err := resolveArgoCDApplicationByRef(ctx, uc.argocd, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
+	steps, err := uc.ListSteps(ctx, order.ID)
 	if err != nil {
-		if isResourceNotFoundError(err) {
-			return "ArgoCD Application 暂不可用，稍后自动重试", nil
-		}
-		if strings.TrimSpace(binding.ExternalRef) == "" {
-			return "ArgoCD 绑定未配置 GitOps 子目录", nil
-		}
-		return "ArgoCD 阶段同步失败：" + trimPipelineStageError(err), err
+		return "", err
 	}
-	if appName == "" || app == nil {
-		return "ArgoCD 绑定未配置应用标识", nil
+
+	var app ArgoCDApplicationSnapshot
+	syncMessage := ""
+	if syncStep := findStepByCode(steps, scopeStepCode(execution.PipelineScope, "argocd_sync")); syncStep != nil &&
+		(syncStep.Status == domain.StepStatusRunning || syncStep.Status == domain.StepStatusSuccess) {
+		_, _, client, resolveErr := uc.resolveArgoCDExecutionContext(ctx, order, execution, nil)
+		if resolveErr != nil {
+			return "ArgoCD 阶段同步失败：" + trimPipelineStageError(resolveErr), resolveErr
+		}
+		_, loadedApp, appErr := resolveArgoCDApplicationByRef(ctx, client, binding.ExternalRef, strings.TrimSpace(order.EnvCode), gitopsType)
+		if appErr != nil {
+			if isResourceNotFoundError(appErr) {
+				syncMessage = "ArgoCD Application 暂不可用，稍后自动重试"
+			} else if strings.TrimSpace(binding.ExternalRef) == "" {
+				syncMessage = "ArgoCD 绑定未配置 GitOps 子目录"
+			} else {
+				return "ArgoCD 阶段同步失败：" + trimPipelineStageError(appErr), appErr
+			}
+		} else {
+			app = loadedApp
+		}
 	}
 
 	now := uc.now()
-	commitStatus := domain.PipelineStageStatusSuccess
-	if strings.TrimSpace(execution.ExternalRunID) == "" {
-		commitStatus = domain.PipelineStageStatusPending
+	stageDefs := []struct {
+		key         string
+		defaultName string
+	}{
+		{key: "gitops_update", defaultName: argoCDUpdateStageName(gitopsType)},
+		{key: "git_commit", defaultName: "CD Git 提交"},
+		{key: "git_push", defaultName: "CD Git 推送"},
+		{key: "argocd_sync", defaultName: "CD 触发 ArgoCD"},
+		{key: "health_check", defaultName: "CD 健康检查"},
 	}
-	syncStatus := mapArgoCDSyncStageStatus(app.GetSyncStatus(), app.GetOperationPhase())
-	healthStatus := mapArgoCDHealthStageStatus(app.GetHealthStatus(), app.GetOperationPhase())
 
-	persisted := []domain.ReleaseOrderPipelineStage{
-		{
-			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "gitops_commit"),
+	persisted := make([]domain.ReleaseOrderPipelineStage, 0, len(stageDefs))
+	for idx, def := range stageDefs {
+		step := findStepByCode(steps, scopeStepCode(execution.PipelineScope, def.key))
+		stageStatus := pipelineStageStatusFromStep(step)
+		rawStatus := pipelineStageRawStatusFromStep(step)
+		if app != nil {
+			switch def.key {
+			case "argocd_sync":
+				if stageStatus == domain.PipelineStageStatusPending || stageStatus == domain.PipelineStageStatusRunning {
+					stageStatus = mapArgoCDSyncStageStatus(app.GetSyncStatus(), app.GetOperationPhase())
+				}
+				rawStatus = firstNonEmpty(strings.TrimSpace(app.GetOperationPhase()), strings.TrimSpace(app.GetSyncStatus()), rawStatus)
+			case "health_check":
+				if stageStatus == domain.PipelineStageStatusPending || stageStatus == domain.PipelineStageStatusRunning {
+					stageStatus = mapArgoCDHealthStageStatus(app.GetHealthStatus(), app.GetOperationPhase())
+				}
+				rawStatus = firstNonEmpty(strings.TrimSpace(app.GetHealthStatus()), rawStatus)
+			}
+		}
+		persisted = append(persisted, domain.ReleaseOrderPipelineStage{
+			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), def.key),
 			ReleaseOrderID: order.ID,
 			ExecutionID:    execution.ID,
 			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
 			ExecutorType:   strings.TrimSpace(execution.Provider),
-			StageKey:       "gitops_commit",
-			StageName:      "GitOps 写回",
-			Status:         commitStatus,
-			RawStatus:      strings.TrimSpace(execution.ExternalRunID),
-			SortNo:         1,
+			StageKey:       def.key,
+			StageName:      firstNonEmpty(stageNameFromStep(step), def.defaultName),
+			Status:         stageStatus,
+			RawStatus:      rawStatus,
+			SortNo:         idx + 1,
+			DurationMillis: computePipelineStageDuration(step, now),
+			StartedAt:      stageStartedAt(step),
+			FinishedAt:     stageFinishedAt(step),
 			CreatedAt:      now,
 			UpdatedAt:      now,
-		},
-		{
-			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "argocd_sync"),
-			ReleaseOrderID: order.ID,
-			ExecutionID:    execution.ID,
-			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
-			ExecutorType:   strings.TrimSpace(execution.Provider),
-			StageKey:       "argocd_sync",
-			StageName:      "ArgoCD Sync",
-			Status:         syncStatus,
-			RawStatus:      firstNonEmpty(app.GetOperationPhase(), app.GetSyncStatus()),
-			SortNo:         2,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		},
-		{
-			ID:             stablePipelineStageID(order.ID, string(binding.Provider), string(execution.PipelineScope), "health_check"),
-			ReleaseOrderID: order.ID,
-			ExecutionID:    execution.ID,
-			PipelineScope:  strings.TrimSpace(string(execution.PipelineScope)),
-			ExecutorType:   strings.TrimSpace(execution.Provider),
-			StageKey:       "health_check",
-			StageName:      "健康检查",
-			Status:         healthStatus,
-			RawStatus:      strings.TrimSpace(app.GetHealthStatus()),
-			SortNo:         3,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		},
+		})
 	}
 
 	existing, err := uc.repo.ListPipelineStages(ctx, order.ID)
@@ -406,7 +417,72 @@ func (uc *ReleaseOrderManager) refreshArgoCDStages(
 	if err := uc.repo.ReplacePipelineStages(ctx, order.ID, merged); err != nil {
 		return "", err
 	}
-	return "", nil
+	return syncMessage, nil
+}
+
+func argoCDUpdateStageName(gitopsType domain.GitOpsType) string {
+	if normalizeTemplateGitOpsType(gitopsType, true) == domain.GitOpsTypeHelm {
+		return "CD 更新 Helm Values"
+	}
+	return "CD 更新 GitOps 配置"
+}
+
+func pipelineStageStatusFromStep(step *domain.ReleaseOrderStep) domain.PipelineStageStatus {
+	if step == nil {
+		return domain.PipelineStageStatusPending
+	}
+	switch step.Status {
+	case domain.StepStatusSuccess:
+		return domain.PipelineStageStatusSuccess
+	case domain.StepStatusFailed:
+		return domain.PipelineStageStatusFailed
+	case domain.StepStatusRunning:
+		return domain.PipelineStageStatusRunning
+	default:
+		return domain.PipelineStageStatusPending
+	}
+}
+
+func pipelineStageRawStatusFromStep(step *domain.ReleaseOrderStep) string {
+	if step == nil {
+		return ""
+	}
+	return strings.TrimSpace(step.Message)
+}
+
+func stageNameFromStep(step *domain.ReleaseOrderStep) string {
+	if step == nil {
+		return ""
+	}
+	return strings.TrimSpace(step.StepName)
+}
+
+func stageStartedAt(step *domain.ReleaseOrderStep) *time.Time {
+	if step == nil {
+		return nil
+	}
+	return step.StartedAt
+}
+
+func stageFinishedAt(step *domain.ReleaseOrderStep) *time.Time {
+	if step == nil {
+		return nil
+	}
+	return step.FinishedAt
+}
+
+func computePipelineStageDuration(step *domain.ReleaseOrderStep, now time.Time) int64 {
+	if step == nil || step.StartedAt == nil {
+		return 0
+	}
+	end := step.FinishedAt
+	if end == nil && step.Status == domain.StepStatusRunning {
+		end = &now
+	}
+	if end == nil || end.Before(*step.StartedAt) {
+		return 0
+	}
+	return end.Sub(*step.StartedAt).Milliseconds()
 }
 
 func mapArgoCDSyncStageStatus(syncStatus string, operationPhase string) domain.PipelineStageStatus {

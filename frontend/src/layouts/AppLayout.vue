@@ -96,7 +96,15 @@ const canManagePlatformParam = computed(() => authStore.hasPermission('platform_
 const canViewComponent = computed(() => authStore.hasPermission('component.view'))
 const canManagePipelineParam = computed(() => authStore.hasPermission('pipeline_param.manage'))
 const canViewArgoCD = computed(
-  () => authStore.hasPermission('component.argocd.view') || authStore.hasPermission('component.argocd.manage'),
+  () =>
+    [
+      'component.argocd.view',
+      'component.argocd.manage',
+      'component.argocd.instance.view',
+      'component.argocd.instance.manage',
+      'component.argocd.binding.view',
+      'component.argocd.binding.manage',
+    ].some((code) => authStore.hasPermission(code)),
 )
 const canViewGitOps = computed(
   () => authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage'),
@@ -105,14 +113,7 @@ const canManageReleaseTemplate = computed(() => authStore.hasPermission('release
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
 const canManagePermission = computed(() => authStore.hasPermission('system.permission.manage'))
 
-const showApplicationMenu = computed(
-  () =>
-    canViewApplications.value ||
-    canManageApplications.value ||
-    canCreateRelease.value ||
-    canViewPipeline.value ||
-    canManagePlatformParam.value,
-)
+const showApplicationMenu = computed(() => true)
 const showComponentMenu = computed(
   () => canViewComponent.value || canManagePipelineParam.value || canViewArgoCD.value || canViewGitOps.value,
 )
@@ -202,11 +203,7 @@ async function handleLogout() {
           </template>
           <template #title>应用管理</template>
 
-          <a-menu-item
-            v-if="canViewApplications || canManageApplications || canCreateRelease"
-            key="my-applications"
-            @click="goToApplications"
-          >
+          <a-menu-item key="my-applications" @click="goToApplications">
             我的应用
           </a-menu-item>
           <a-menu-item v-if="canViewPipeline" key="pipeline-bindings" @click="goToPipelineBindings">

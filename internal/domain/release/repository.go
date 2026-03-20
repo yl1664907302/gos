@@ -16,6 +16,7 @@ type Repository interface {
 	) error
 	GetByID(ctx context.Context, id string) (ReleaseOrder, error)
 	List(ctx context.Context, filter ListFilter) ([]ReleaseOrder, int64, error)
+	ListTrackableOrders(ctx context.Context, page int, pageSize int) ([]ReleaseOrder, int64, error)
 	UpdateStatus(
 		ctx context.Context,
 		id string,

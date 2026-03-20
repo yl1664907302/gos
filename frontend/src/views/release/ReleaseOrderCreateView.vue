@@ -632,7 +632,7 @@ function buildParamsPayload(): CreateReleaseOrderParamPayload[] {
         throw new Error(`参数 ${label} 为必填，请填写发布值`)
       }
       if (isSingleValueProjectName(scope, item) && /,|，|\r|\n/.test(value)) {
-        throw new Error('当前模板的 CD 使用 ArgoCD，project_name 仅支持单值，请只选择一个项目')
+        throw new Error(`当前模板的 CD 使用 ArgoCD，参数 ${label} 当前仅支持单值，请只填写一个值`)
       }
       if (!value) {
         continue
@@ -696,7 +696,7 @@ function scopeHint(scope: ReleasePipelineScope) {
     return ''
   }
   if (binding.provider === 'argocd') {
-    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会优先沿用 CI 中已取到的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。环境统一来自基础参数“环境”，当前版本如果使用 project_name，会按单值场景处理。`
+    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会优先沿用 CI 中已取到的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。环境统一来自基础参数“环境”。`
   }
   if (binding.provider !== 'jenkins') {
     return `${scope.toUpperCase()} 当前使用 ${binding.provider}，当前版本暂不开放额外参数表单。`
@@ -887,7 +887,7 @@ onMounted(async () => {
                       @update:value="handleParamValueInput(param, String($event || ''))"
                     />
                     <div v-if="isSingleValueProjectName(item.scope, param)" class="param-helper">
-                      当前模板的 CD 使用 ArgoCD，project_name 先按单值场景处理。
+                      当前模板的 CD 使用 ArgoCD，该参数当前按单值方式填写。
                     </div>
                   </a-form-item>
                 </a-col>

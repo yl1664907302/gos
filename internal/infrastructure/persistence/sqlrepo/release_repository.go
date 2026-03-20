@@ -907,6 +907,71 @@ FROM release_order`
 	return items, total, nil
 }
 
+func (r *ReleaseRepository) ListTrackableOrders(
+	ctx context.Context,
+	page int,
+	pageSize int,
+) ([]domain.ReleaseOrder, int64, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+
+	const countQuery = `
+SELECT COUNT(DISTINCT ro.id)
+FROM release_order ro
+JOIN release_order_execution roe ON roe.release_order_id = ro.id
+WHERE roe.status IN (?, ?);`
+
+	var total int64
+	if err := r.db.QueryRowContext(
+		ctx,
+		countQuery,
+		string(domain.ExecutionStatusPending),
+		string(domain.ExecutionStatusRunning),
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	const listQuery = `
+SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
+	ro.trigger_type, ro.status, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
+FROM release_order ro
+JOIN release_order_execution roe ON roe.release_order_id = ro.id
+WHERE roe.status IN (?, ?)
+ORDER BY ro.created_at DESC
+LIMIT ? OFFSET ?;`
+
+	offset := (page - 1) * pageSize
+	rows, err := r.db.QueryContext(
+		ctx,
+		listQuery,
+		string(domain.ExecutionStatusPending),
+		string(domain.ExecutionStatusRunning),
+		pageSize,
+		offset,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrder, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrder(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func (r *ReleaseRepository) UpdateStatus(
 	ctx context.Context,
 	id string,

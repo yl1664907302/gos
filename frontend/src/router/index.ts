@@ -73,7 +73,7 @@ export const router = createRouter({
           path: 'applications',
           name: 'application-list',
           component: ApplicationListView,
-          meta: { title: '我的应用', permission: ['application.view', 'application.manage', 'release.create'] },
+          meta: { title: '我的应用' },
         },
         {
           path: 'applications/new',
@@ -115,7 +115,17 @@ export const router = createRouter({
           path: 'components/argocd',
           name: 'argocd-management',
           component: ArgoCDManagementView,
-          meta: { title: 'ArgoCD管理', permission: ['component.argocd.view', 'component.argocd.manage'] },
+          meta: {
+            title: 'ArgoCD管理',
+            permission: [
+              'component.argocd.view',
+              'component.argocd.manage',
+              'component.argocd.instance.view',
+              'component.argocd.instance.manage',
+              'component.argocd.binding.view',
+              'component.argocd.binding.manage',
+            ],
+          },
         },
         {
           path: 'components/gitops',

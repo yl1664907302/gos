@@ -19,6 +19,10 @@ type ArgoCDApplicationClient interface {
 	BuildApplicationURL(name string) string
 }
 
+type ArgoCDClientFactory interface {
+	Build(instance domain.Instance) ArgoCDApplicationClient
+}
+
 type ArgoCDApplicationSnapshot interface {
 	GetName() string
 	GetProject() string
@@ -34,9 +38,9 @@ type ArgoCDApplicationSnapshot interface {
 }
 
 type SyncArgoCDApplications struct {
-	repo   domain.Repository
-	client ArgoCDApplicationClient
-	now    func() time.Time
+	repo    domain.Repository
+	factory ArgoCDClientFactory
+	now     func() time.Time
 }
 
 type SyncArgoCDApplicationsOutput struct {
@@ -47,9 +51,7 @@ type SyncArgoCDApplicationsOutput struct {
 }
 
 type QueryArgoCDApplications struct {
-	repo    domain.Repository
-	client  ArgoCDApplicationClient
-	baseURL string
+	repo domain.Repository
 }
 
 type ArgoCDApplicationOriginalLinkOutput struct {
@@ -57,81 +59,114 @@ type ArgoCDApplicationOriginalLinkOutput struct {
 	OriginalLink string             `json:"original_link"`
 }
 
-func NewSyncArgoCDApplications(repo domain.Repository, client ArgoCDApplicationClient) *SyncArgoCDApplications {
+func NewSyncArgoCDApplications(repo domain.Repository, factory ArgoCDClientFactory) *SyncArgoCDApplications {
 	return &SyncArgoCDApplications{
-		repo:   repo,
-		client: client,
+		repo:    repo,
+		factory: factory,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
 	}
 }
 
-func NewQueryArgoCDApplications(repo domain.Repository, client ArgoCDApplicationClient, baseURL string) *QueryArgoCDApplications {
-	return &QueryArgoCDApplications{
-		repo:    repo,
-		client:  client,
-		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-	}
+func NewQueryArgoCDApplications(repo domain.Repository) *QueryArgoCDApplications {
+	return &QueryArgoCDApplications{repo: repo}
 }
 
 func (uc *SyncArgoCDApplications) Execute(ctx context.Context) (SyncArgoCDApplicationsOutput, error) {
-	if uc == nil || uc.repo == nil || uc.client == nil {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
 		return SyncArgoCDApplicationsOutput{}, fmt.Errorf("%w: argocd syncer is not configured", ErrInvalidInput)
 	}
-	items, err := uc.client.ListApplications(ctx)
+	instances, err := uc.repo.ListActiveInstances(ctx)
 	if err != nil {
 		return SyncArgoCDApplicationsOutput{}, err
 	}
+	if len(instances) == 0 {
+		return SyncArgoCDApplicationsOutput{}, nil
+	}
+
+	result := SyncArgoCDApplicationsOutput{}
 	now := uc.now()
-	models := make([]domain.Application, 0, len(items))
-	keepNames := make([]string, 0, len(items))
-	for _, item := range items {
-		name := strings.TrimSpace(item.GetName())
-		if name == "" {
+	var firstErr error
+	for _, instance := range instances {
+		client := uc.factory.Build(instance)
+		if client == nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("argocd client factory returned nil for instance %s", strings.TrimSpace(instance.InstanceCode))
+			}
+			_ = uc.repo.UpdateInstanceHealth(ctx, instance.ID, "unreachable", now)
 			continue
 		}
-		keepNames = append(keepNames, name)
-		models = append(models, domain.Application{
-			ID:             argocdApplicationID(name),
-			AppName:        name,
-			Project:        strings.TrimSpace(item.GetProject()),
-			RepoURL:        strings.TrimSpace(item.GetRepoURL()),
-			SourcePath:     strings.TrimSpace(item.GetSourcePath()),
-			TargetRevision: strings.TrimSpace(item.GetTargetRevision()),
-			DestServer:     strings.TrimSpace(item.GetDestServer()),
-			DestNamespace:  strings.TrimSpace(item.GetDestNamespace()),
-			SyncStatus:     strings.TrimSpace(item.GetSyncStatus()),
-			HealthStatus:   strings.TrimSpace(item.GetHealthStatus()),
-			OperationPhase: strings.TrimSpace(item.GetOperationPhase()),
-			ArgoCDURL:      uc.client.BuildApplicationURL(name),
-			Status:         domain.StatusActive,
-			RawMeta:        strings.TrimSpace(item.GetRawMeta()),
-			LastSyncedAt:   now,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		})
+		items, listErr := client.ListApplications(ctx)
+		if listErr != nil {
+			if firstErr == nil {
+				firstErr = listErr
+			}
+			_ = uc.repo.UpdateInstanceHealth(ctx, instance.ID, "unreachable", now)
+			continue
+		}
+		_ = uc.repo.UpdateInstanceHealth(ctx, instance.ID, "healthy", now)
+
+		models := make([]domain.Application, 0, len(items))
+		keepNames := make([]string, 0, len(items))
+		for _, item := range items {
+			name := strings.TrimSpace(item.GetName())
+			if name == "" {
+				continue
+			}
+			keepNames = append(keepNames, name)
+			models = append(models, domain.Application{
+				ID:               argocdApplicationID(instance.ID, name),
+				ArgoCDInstanceID: instance.ID,
+				InstanceCode:     strings.TrimSpace(instance.InstanceCode),
+				InstanceName:     strings.TrimSpace(instance.Name),
+				ClusterName:      strings.TrimSpace(instance.ClusterName),
+				InstanceBaseURL:  strings.TrimSpace(instance.BaseURL),
+				AppName:          name,
+				Project:          strings.TrimSpace(item.GetProject()),
+				RepoURL:          strings.TrimSpace(item.GetRepoURL()),
+				SourcePath:       strings.TrimSpace(item.GetSourcePath()),
+				TargetRevision:   strings.TrimSpace(item.GetTargetRevision()),
+				DestServer:       strings.TrimSpace(item.GetDestServer()),
+				DestNamespace:    strings.TrimSpace(item.GetDestNamespace()),
+				SyncStatus:       strings.TrimSpace(item.GetSyncStatus()),
+				HealthStatus:     strings.TrimSpace(item.GetHealthStatus()),
+				OperationPhase:   strings.TrimSpace(item.GetOperationPhase()),
+				ArgoCDURL:        client.BuildApplicationURL(name),
+				Status:           domain.StatusActive,
+				RawMeta:          strings.TrimSpace(item.GetRawMeta()),
+				LastSyncedAt:     now,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			})
+		}
+		created, updated, upsertErr := uc.repo.UpsertApplications(ctx, models)
+		if upsertErr != nil {
+			if firstErr == nil {
+				firstErr = upsertErr
+			}
+			continue
+		}
+		inactivated, markErr := uc.repo.MarkMissingApplicationsInactive(ctx, instance.ID, keepNames, now)
+		if markErr != nil {
+			if firstErr == nil {
+				firstErr = markErr
+			}
+			continue
+		}
+		result.Total += len(models)
+		result.Created += created
+		result.Updated += updated
+		result.Inactivated += inactivated
 	}
-	created, updated, err := uc.repo.UpsertApplications(ctx, models)
-	if err != nil {
-		return SyncArgoCDApplicationsOutput{}, err
-	}
-	inactivated, err := uc.repo.MarkMissingApplicationsInactive(ctx, keepNames, now)
-	if err != nil {
-		return SyncArgoCDApplicationsOutput{}, err
-	}
-	return SyncArgoCDApplicationsOutput{
-		Total:       len(models),
-		Created:     created,
-		Updated:     updated,
-		Inactivated: inactivated,
-	}, nil
+	return result, firstErr
 }
 
 func (uc *QueryArgoCDApplications) List(ctx context.Context, filter domain.ListFilter) ([]domain.Application, int64, error) {
 	if uc == nil || uc.repo == nil {
 		return nil, 0, fmt.Errorf("%w: argocd query service is not configured", ErrInvalidInput)
 	}
+	filter.ArgoCDInstanceID = strings.TrimSpace(filter.ArgoCDInstanceID)
 	filter.AppName = strings.TrimSpace(filter.AppName)
 	filter.Project = strings.TrimSpace(filter.Project)
 	filter.SyncStatus = strings.TrimSpace(filter.SyncStatus)
@@ -166,14 +201,11 @@ func (uc *QueryArgoCDApplications) GetOriginalLink(ctx context.Context, id strin
 	if err != nil {
 		return ArgoCDApplicationOriginalLinkOutput{}, err
 	}
-	link := ""
-	if uc.client != nil {
-		link = uc.client.BuildApplicationURL(item.AppName)
+	link := strings.TrimSpace(item.ArgoCDURL)
+	if link == "" && strings.TrimSpace(item.InstanceBaseURL) != "" {
+		link = strings.TrimRight(strings.TrimSpace(item.InstanceBaseURL), "/") + "/applications/" + strings.TrimSpace(item.AppName)
 	}
-	if strings.TrimSpace(link) == "" && strings.TrimSpace(uc.baseURL) != "" {
-		link = strings.TrimRight(uc.baseURL, "/") + "/applications/" + item.AppName
-	}
-	if strings.TrimSpace(link) == "" {
+	if link == "" {
 		return ArgoCDApplicationOriginalLinkOutput{}, fmt.Errorf("%w: argocd original link is unavailable", ErrInvalidInput)
 	}
 	return ArgoCDApplicationOriginalLinkOutput{Application: item, OriginalLink: link}, nil
@@ -205,7 +237,7 @@ func (a argoCDApplicationSnapshotAdapter) GetHealthStatus() string   { return a.
 func (a argoCDApplicationSnapshotAdapter) GetOperationPhase() string { return a.OperationPhase }
 func (a argoCDApplicationSnapshotAdapter) GetRawMeta() string        { return a.RawMeta }
 
-func argocdApplicationID(name string) string {
-	hash := sha1.Sum([]byte(strings.TrimSpace(name)))
+func argocdApplicationID(instanceID string, name string) string {
+	hash := sha1.Sum([]byte(strings.TrimSpace(instanceID) + ":" + strings.TrimSpace(name)))
 	return "argocd-app-" + hex.EncodeToString(hash[:])[:24]
 }

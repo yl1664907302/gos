@@ -506,20 +506,19 @@ func validateConfig(cfg Config) error {
 		}
 	}
 	if cfg.ArgoCD.Enabled {
-		if cfg.ArgoCD.BaseURL == "" {
-			return errors.New("argocd.base_url is required when argocd.enabled=true")
-		}
-		switch cfg.ArgoCD.AuthMode {
-		case "token":
-			if cfg.ArgoCD.Token == "" {
-				return errors.New("argocd.token is required when argocd.auth_mode=token")
+		if cfg.ArgoCD.BaseURL != "" {
+			switch cfg.ArgoCD.AuthMode {
+			case "token":
+				if cfg.ArgoCD.Token == "" {
+					return errors.New("argocd.token is required when argocd.auth_mode=token")
+				}
+			case "password", "basic", "session":
+				if cfg.ArgoCD.Username == "" || cfg.ArgoCD.Password == "" {
+					return fmt.Errorf("argocd.username and argocd.password are required when argocd.auth_mode=%s", cfg.ArgoCD.AuthMode)
+				}
+			default:
+				return fmt.Errorf("unsupported argocd.auth_mode %q", cfg.ArgoCD.AuthMode)
 			}
-		case "password", "basic", "session":
-			if cfg.ArgoCD.Username == "" || cfg.ArgoCD.Password == "" {
-				return fmt.Errorf("argocd.username and argocd.password are required when argocd.auth_mode=%s", cfg.ArgoCD.AuthMode)
-			}
-		default:
-			return fmt.Errorf("unsupported argocd.auth_mode %q", cfg.ArgoCD.AuthMode)
 		}
 	}
 	if cfg.GitOps.Enabled {

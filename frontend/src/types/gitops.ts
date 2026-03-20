@@ -1,3 +1,5 @@
+export type GitOpsRecordStatus = 'active' | 'inactive'
+
 export interface GitOpsStatus {
   enabled: boolean
   local_root: string
@@ -18,6 +20,66 @@ export interface GitOpsStatus {
   head_commit_subject: string
   worktree_dirty: boolean
   status_summary: string[]
+}
+
+export interface GitOpsInstance {
+  id: string
+  instance_code: string
+  name: string
+  local_root: string
+  default_branch: string
+  username: string
+  author_name: string
+  author_email: string
+  commit_message_template: string
+  command_timeout_sec: number
+  status: GitOpsRecordStatus
+  remark: string
+  created_at: string
+  updated_at: string
+}
+
+export interface GitOpsInstanceListParams {
+  keyword?: string
+  status?: GitOpsRecordStatus
+  page?: number
+  page_size?: number
+}
+
+export interface GitOpsInstanceListResponse {
+  data: GitOpsInstance[]
+  page: number
+  page_size: number
+  total: number
+}
+
+export interface GitOpsInstanceDataResponse {
+  data: GitOpsInstance
+}
+
+export interface GitOpsInstanceStatusData {
+  instance: GitOpsInstance
+  status: GitOpsStatus
+}
+
+export interface GitOpsInstanceStatusDataResponse {
+  data: GitOpsInstanceStatusData
+}
+
+export interface UpsertGitOpsInstancePayload {
+  instance_code: string
+  name: string
+  local_root: string
+  default_branch: string
+  username?: string
+  password?: string
+  token?: string
+  author_name?: string
+  author_email?: string
+  commit_message_template?: string
+  command_timeout_sec?: number
+  status?: GitOpsRecordStatus
+  remark?: string
 }
 
 export interface GitOpsTemplateField {

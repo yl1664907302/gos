@@ -17,6 +17,10 @@ func CheckArgoCDConnection(cfg Config) error {
 		log.Println("argocd is enabled, startup check is disabled")
 		return nil
 	}
+	if cfg.ArgoCD.BaseURL == "" {
+		log.Println("argocd is enabled, startup check skipped because base_url is empty; expecting DB-managed instances")
+		return nil
+	}
 	log.Println("argocd:", cfg.ArgoCD.BaseURL)
 
 	client := argocdclient.NewClient(argocdclient.Config{

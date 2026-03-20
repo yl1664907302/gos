@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"gos/internal/application/usecase"
 	"gos/internal/bootstrap"
+	argocddomain "gos/internal/domain/argocdapp"
+	gitopsdomain "gos/internal/domain/gitops"
 	argocdinfra "gos/internal/infrastructure/argocd"
 	configstore "gos/internal/infrastructure/configstore"
 	gitopsinfra "gos/internal/infrastructure/gitops"
@@ -72,6 +75,19 @@ func main() {
 	if err := bootstrap.InitSchema(argocdAppRepo); err != nil {
 		log.Fatalf("init argocd schema: %v", err)
 	}
+	gitopsRepo := sqlrepo.NewGitOpsRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(gitopsRepo); err != nil {
+		log.Fatalf("init gitops schema: %v", err)
+	}
+	if err := ensureDefaultGitOpsInstance(context.Background(), gitopsRepo, cfg); err != nil {
+		log.Fatalf("ensure default gitops instance: %v", err)
+	}
+	if err := ensureDefaultArgoCDInstance(context.Background(), argocdAppRepo, cfg); err != nil {
+		log.Fatalf("ensure default argocd instance: %v", err)
+	}
+	if err := argocdAppRepo.CleanupLegacyApplications(context.Background()); err != nil {
+		log.Fatalf("cleanup legacy argocd applications: %v", err)
+	}
 	userRepo := sqlrepo.NewUserRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(userRepo); err != nil {
 		log.Fatalf("init user schema: %v", err)
@@ -82,15 +98,6 @@ func main() {
 		Username:   cfg.Jenkins.Username,
 		APIToken:   cfg.Jenkins.APIToken,
 		TimeoutSec: cfg.Jenkins.TimeoutSec,
-	})
-	argocdClient := argocdinfra.NewClient(argocdinfra.Config{
-		BaseURL:            cfg.ArgoCD.BaseURL,
-		InsecureSkipVerify: cfg.ArgoCD.InsecureSkipVerify,
-		AuthMode:           cfg.ArgoCD.AuthMode,
-		Token:              cfg.ArgoCD.Token,
-		Username:           cfg.ArgoCD.Username,
-		Password:           cfg.ArgoCD.Password,
-		TimeoutSec:         cfg.ArgoCD.TimeoutSec,
 	})
 	gitopsService := gitopsinfra.NewService(gitopsinfra.Config{
 		Enabled:               cfg.GitOps.Enabled,
@@ -104,10 +111,13 @@ func main() {
 		CommitMessageTemplate: cfg.GitOps.CommitMessageTemplate,
 		CommandTimeoutSec:     cfg.GitOps.CommandTimeoutSec,
 	})
-	argocdUsecaseClient := argoCDUsecaseClient{client: argocdClient}
+	gitopsServiceFactory := gitOpsServiceFactory{}
+	argocdClientFactory := argoCDClientFactory{}
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
 	syncExecutorParamDefs := usecase.NewSyncExecutorParamDefs(executorParamRepo, jenkinsClient)
-	syncArgoCDApplications := usecase.NewSyncArgoCDApplications(argocdAppRepo, argocdUsecaseClient)
+	syncArgoCDApplications := usecase.NewSyncArgoCDApplications(argocdAppRepo, argocdClientFactory)
+	gitopsInstanceManager := usecase.NewGitOpsInstanceManager(gitopsRepo, gitopsServiceFactory)
+	argocdInstanceManager := usecase.NewArgoCDInstanceManager(argocdAppRepo, gitopsRepo, argocdClientFactory)
 	userManagement := usecase.NewUserManagement(userRepo)
 	authSessionManager := usecase.NewAuthSessionManager(
 		userRepo,
@@ -152,7 +162,8 @@ func main() {
 	)
 	argocdHandler := httpapi.NewArgoCDHandler(
 		syncArgoCDApplications,
-		usecase.NewQueryArgoCDApplications(argocdAppRepo, argocdUsecaseClient, cfg.ArgoCD.BaseURL),
+		usecase.NewQueryArgoCDApplications(argocdAppRepo),
+		argocdInstanceManager,
 		authSessionManager,
 	)
 	gitopsStatusQuery := usecase.NewQueryGitOpsStatus(gitopsService)
@@ -167,6 +178,7 @@ func main() {
 			gitopsService,
 			gitopsStatusQuery,
 		),
+		gitopsInstanceManager,
 		authSessionManager,
 	)
 	platformParamHandler := httpapi.NewPlatformParamHandler(
@@ -186,10 +198,13 @@ func main() {
 		executorParamRepo,
 		platformParamRepo,
 		jenkinsClient,
-		argocdUsecaseClient,
+		argocdAppRepo,
+		argocdClientFactory,
+		gitopsRepo,
+		gitopsServiceFactory,
 		gitopsService,
 	)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, gitopsService)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, gitopsService)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,
@@ -204,7 +219,6 @@ func main() {
 	releaseTracker := usecase.NewTrackReleaseExecution(
 		releaseOrderManager,
 		jenkinsClient,
-		argocdUsecaseClient,
 	)
 
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
@@ -334,6 +348,98 @@ func main() {
 func contextWithTimeout(timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	return ctx, cancel
+}
+
+type argoCDClientFactory struct{}
+
+type gitOpsServiceFactory struct{}
+
+func (argoCDClientFactory) Build(instance argocddomain.Instance) usecase.ArgoCDApplicationClient {
+	client := argocdinfra.NewClient(argocdinfra.Config{
+		BaseURL:            strings.TrimSpace(instance.BaseURL),
+		InsecureSkipVerify: instance.InsecureSkipVerify,
+		AuthMode:           strings.TrimSpace(instance.AuthMode),
+		Token:              strings.TrimSpace(instance.Token),
+		Username:           strings.TrimSpace(instance.Username),
+		Password:           strings.TrimSpace(instance.Password),
+		TimeoutSec:         30,
+	})
+	return argoCDUsecaseClient{client: client}
+}
+
+func (gitOpsServiceFactory) Build(instance gitopsdomain.Instance) *gitopsinfra.Service {
+	return gitopsinfra.NewService(gitopsinfra.Config{
+		Enabled:               instance.Status == gitopsdomain.StatusActive && strings.TrimSpace(instance.LocalRoot) != "",
+		LocalRoot:             strings.TrimSpace(instance.LocalRoot),
+		DefaultBranch:         strings.TrimSpace(instance.DefaultBranch),
+		Username:              strings.TrimSpace(instance.Username),
+		Password:              strings.TrimSpace(instance.Password),
+		Token:                 strings.TrimSpace(instance.Token),
+		AuthorName:            strings.TrimSpace(instance.AuthorName),
+		AuthorEmail:           strings.TrimSpace(instance.AuthorEmail),
+		CommitMessageTemplate: strings.TrimSpace(instance.CommitMessageTemplate),
+		CommandTimeoutSec:     instance.CommandTimeoutSec,
+	})
+}
+
+func ensureDefaultGitOpsInstance(ctx context.Context, repo gitopsdomain.Repository, cfg bootstrap.Config) error {
+	if repo == nil || !cfg.GitOps.Enabled || strings.TrimSpace(cfg.GitOps.LocalRoot) == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := repo.UpsertInstance(ctx, gitopsdomain.Instance{
+		ID:                    "gitops-instance-default",
+		InstanceCode:          "default",
+		Name:                  "默认 GitOps",
+		LocalRoot:             strings.TrimSpace(cfg.GitOps.LocalRoot),
+		DefaultBranch:         strings.TrimSpace(cfg.GitOps.DefaultBranch),
+		Username:              strings.TrimSpace(cfg.GitOps.Username),
+		Password:              strings.TrimSpace(cfg.GitOps.Password),
+		Token:                 strings.TrimSpace(cfg.GitOps.Token),
+		AuthorName:            strings.TrimSpace(cfg.GitOps.AuthorName),
+		AuthorEmail:           strings.TrimSpace(cfg.GitOps.AuthorEmail),
+		CommitMessageTemplate: strings.TrimSpace(cfg.GitOps.CommitMessageTemplate),
+		CommandTimeoutSec:     cfg.GitOps.CommandTimeoutSec,
+		Status:                gitopsdomain.StatusActive,
+		Remark:                "由配置文件自动同步的默认 GitOps 实例",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	})
+	return err
+}
+
+func ensureDefaultArgoCDInstance(ctx context.Context, repo argocddomain.Repository, cfg bootstrap.Config) error {
+	if repo == nil || !cfg.ArgoCD.Enabled || strings.TrimSpace(cfg.ArgoCD.BaseURL) == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	_, err := repo.UpsertInstance(ctx, argocddomain.Instance{
+		ID:                 "argocd-instance-default",
+		InstanceCode:       "default",
+		Name:               "默认 ArgoCD",
+		BaseURL:            strings.TrimSpace(cfg.ArgoCD.BaseURL),
+		InsecureSkipVerify: cfg.ArgoCD.InsecureSkipVerify,
+		AuthMode:           strings.TrimSpace(cfg.ArgoCD.AuthMode),
+		Token:              strings.TrimSpace(cfg.ArgoCD.Token),
+		Username:           strings.TrimSpace(cfg.ArgoCD.Username),
+		Password:           strings.TrimSpace(cfg.ArgoCD.Password),
+		GitOpsInstanceID:   defaultGitOpsInstanceID(cfg),
+		ClusterName:        "default",
+		DefaultNamespace:   "",
+		Status:             argocddomain.StatusActive,
+		HealthStatus:       "unknown",
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		Remark:             "由配置文件自动同步的默认 ArgoCD 实例",
+	})
+	return err
+}
+
+func defaultGitOpsInstanceID(cfg bootstrap.Config) string {
+	if cfg.GitOps.Enabled && strings.TrimSpace(cfg.GitOps.LocalRoot) != "" {
+		return "gitops-instance-default"
+	}
+	return ""
 }
 
 type argoCDUsecaseClient struct {
