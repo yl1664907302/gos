@@ -500,7 +500,7 @@ onMounted(() => {
   <div class="page-wrap">
     <a-card :bordered="false" class="toolbar-card">
       <div class="toolbar">
-        <div>
+        <div class="page-header-copy">
           <div class="page-title">ArgoCD 管理</div>
           <div class="page-subtitle">统一维护多个 ArgoCD 实例、环境绑定和平台同步到本地的 Application 快照。</div>
         </div>
@@ -839,18 +839,8 @@ onMounted(() => {
   margin-bottom: 16px;
 }
 
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.page-subtitle,
 .muted-text {
   color: var(--ant-color-text-description, #8c8c8c);
-}
-
-.page-subtitle {
-  margin-top: 4px;
 }
 
 .pagination-wrap {

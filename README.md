@@ -216,8 +216,6 @@ npm run dev
 
 当前发布单详情页已经按“执行单元”来组织查看体验，便于快速判断问题落在 CI 还是 CD：
 
-![发布单详情](images/1.png)
-
 - 基础信息：发布单号、创建时间、应用、模板、环境、Git 版本、镜像版本
 - 执行单元：分别展示 `CI 执行单元` 和 `CD 执行单元` 的执行器、状态、开始/结束时间
 - 取值进度：展示标准 Key 的当前值、来源、状态、说明
@@ -237,6 +235,30 @@ npm run dev
 - Git push 发生非 fast-forward 冲突
 
 页面会直接在发布详情里展示失败原因，而不是只显示空白进度。
+
+## 图例：状态与进度含义（驾驶舱式详情）
+
+状态会在发布单详情页与列表页中用统一的“颜色/图标”表达：成功/执行中/待执行/失败/已取消。
+
+下面截图为“图例”的实际呈现（以发布相关页面为例）：
+
+发布单详情页（整体进度圆形图标 + CI/CD 执行单元状态）  
+![发布单详情图例](images/release-order-detail-legend.png)
+
+发布单列表页（状态筛选与状态标识）  
+![发布列表图例](images/release-order-list-legend.png)
+
+发布执行过程（CI/CD 阶段/取值进度状态标签）  
+![执行过程图例](images/release-order-execution-legend.png)
+
+新建发布单页（选择应用、CI/CD、环境与基础参数）  
+![新建发布单图例](images/new-release-order-page-legend.png)
+
+我的应用页（环境状态与发布入口）  
+![我的应用图例](images/my-applications-page-legend.png)
+
+发布模板弹窗（CI 配置 / CD 配置切换与关键参数）  
+![发布模板图例](images/release-template-modal-legend.png)
 
 ## 数据库说明
 

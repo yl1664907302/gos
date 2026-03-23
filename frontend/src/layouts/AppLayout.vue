@@ -78,7 +78,6 @@ const openMenuKeys = computed(() => {
   return []
 })
 
-const pageTitle = computed(() => String(route.meta.title || '应用管理'))
 const displayName = computed(() => {
   const name = String(authStore.profile?.display_name || '').trim()
   if (name) {
@@ -189,7 +188,13 @@ async function handleLogout() {
 <template>
   <a-layout class="app-layout">
     <a-layout-sider class="app-sider" theme="dark" :width="220">
-      <div class="sider-brand" @click="goToApplications">GOS Platform</div>
+      <div class="sider-brand" @click="goToApplications">
+        <div class="brand-mark">G</div>
+        <div class="brand-copy">
+          <div class="brand-title">GOS Platform</div>
+          <div class="brand-subtitle">发布工作台</div>
+        </div>
+      </div>
       <a-menu
         mode="inline"
         theme="dark"
@@ -268,26 +273,22 @@ async function handleLogout() {
           </a-menu-item>
         </a-sub-menu>
       </a-menu>
+      <div class="sider-footer">
+        <div class="sider-footer-role">{{ roleText }}</div>
+        <div class="sider-footer-user">
+          <UserOutlined />
+          <span>{{ displayName }}</span>
+        </div>
+        <a-button type="text" class="sider-footer-logout" @click="handleLogout">
+          <template #icon>
+            <LogoutOutlined />
+          </template>
+          退出登录
+        </a-button>
+      </div>
     </a-layout-sider>
 
     <a-layout>
-      <a-layout-header class="app-header">
-        <div class="header-title">{{ pageTitle }}</div>
-        <a-space class="header-right">
-          <a-tag color="blue">{{ roleText }}</a-tag>
-          <span class="username">
-            <UserOutlined />
-            {{ displayName }}
-          </span>
-          <a-button type="text" @click="handleLogout">
-            <template #icon>
-              <LogoutOutlined />
-            </template>
-            退出
-          </a-button>
-        </a-space>
-      </a-layout-header>
-
       <a-layout-content class="app-content">
         <router-view />
       </a-layout-content>
@@ -298,64 +299,244 @@ async function handleLogout() {
 <style scoped>
 .app-layout {
   min-height: 100vh;
-  background: #f5f7fa;
+  background:
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.12), transparent 24%),
+    radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 22%),
+    linear-gradient(180deg, #eaf0f8 0%, #edf2f8 18%, #f3f6fb 100%);
 }
 
 .app-sider {
+  position: sticky;
+  top: 0;
+  align-self: flex-start;
+  height: 100vh;
   min-height: 100vh;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.2), transparent 30%),
+    linear-gradient(180deg, #0d1728 0%, #101b2d 52%, #0b1424 100%) !important;
+  border-inline-end: 1px solid rgba(96, 165, 250, 0.1);
+  box-shadow: 18px 0 44px rgba(15, 23, 42, 0.14);
 }
 
 .sider-brand {
   display: flex;
   align-items: center;
-  height: 64px;
-  padding: 0 20px;
-  background: #001529;
+  gap: 14px;
+  min-height: 88px;
+  padding: 20px 22px 18px;
   color: #fff;
-  font-size: 15px;
-  font-weight: 600;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
   cursor: pointer;
-  white-space: nowrap;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 14px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.3), rgba(15, 23, 42, 0.18)),
+    rgba(59, 130, 246, 0.08);
+  color: #eff6ff;
+  font-size: 18px;
+  font-weight: 800;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-title {
+  color: #f8fafc;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.brand-subtitle {
+  margin-top: 4px;
+  color: rgba(191, 219, 254, 0.72);
+  font-size: 12px;
+  letter-spacing: 0.08em;
 }
 
 .sider-menu {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   border-inline-end: none;
-}
-
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: 64px;
-  padding: 0 24px;
-  background: #fff;
-  border-bottom: 1px solid #f0f0f0;
-}
-
-.header-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: #1f1f1f;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-}
-
-.username {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #595959;
+  padding: 14px 10px 18px;
+  background: transparent !important;
 }
 
 .app-content {
   width: 100%;
-  max-width: 1440px;
+  max-width: 1520px;
   margin: 0 auto;
-  padding: 24px;
+  padding: 28px 28px 32px;
+  position: relative;
+}
+
+.app-content::before {
+  content: '';
+  position: absolute;
+  inset: 0 24px auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(96, 165, 250, 0.16), transparent);
+  pointer-events: none;
+}
+
+.app-sider :deep(.ant-layout-sider-children) {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: transparent;
+}
+
+.sider-menu :deep(.ant-menu),
+.sider-menu :deep(.ant-menu-dark),
+.sider-menu :deep(.ant-menu-inline) {
+  background: transparent !important;
+}
+
+.sider-menu :deep(.ant-menu-submenu-title),
+.sider-menu :deep(.ant-menu-item) {
+  height: 46px;
+  margin: 6px 0;
+  border-radius: 14px;
+  color: rgba(226, 232, 240, 0.82) !important;
+  transition: all 0.2s ease;
+}
+
+.sider-menu :deep(.ant-menu-submenu-title:hover),
+.sider-menu :deep(.ant-menu-item:hover) {
+  color: #f8fafc !important;
+  background: rgba(51, 65, 85, 0.58) !important;
+}
+
+.sider-menu :deep(.ant-menu-submenu-title .ant-menu-title-content),
+.sider-menu :deep(.ant-menu-item .ant-menu-title-content) {
+  font-weight: 600;
+}
+
+.sider-menu :deep(.ant-menu-submenu-title .anticon),
+.sider-menu :deep(.ant-menu-item .anticon) {
+  color: rgba(191, 219, 254, 0.76);
+}
+
+.sider-menu :deep(.ant-menu-submenu-open > .ant-menu-submenu-title) {
+  color: #f8fafc !important;
+  background: rgba(30, 41, 59, 0.66) !important;
+}
+
+.sider-menu :deep(.ant-menu-submenu-selected > .ant-menu-submenu-title) {
+  color: #f8fafc !important;
+}
+
+.sider-menu :deep(.ant-menu-item-selected) {
+  color: #eff6ff !important;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  background:
+    linear-gradient(135deg, rgba(29, 78, 216, 0.62), rgba(37, 99, 235, 0.34)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 8px 18px rgba(15, 23, 42, 0.16);
+}
+
+.sider-menu :deep(.ant-menu-item-selected .anticon),
+.sider-menu :deep(.ant-menu-item-selected .ant-menu-title-content) {
+  color: #eff6ff !important;
+}
+
+.sider-menu :deep(.ant-menu-sub.ant-menu-inline) {
+  margin-top: 4px;
+  padding: 2px 0 8px;
+  background: transparent !important;
+}
+
+.sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item) {
+  margin-inline: 8px 0;
+  padding-inline-start: 18px !important;
+  color: rgba(203, 213, 225, 0.84) !important;
+  border-radius: 12px;
+}
+
+.sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item::before) {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.62);
+  transform: translateY(-50%);
+}
+
+.sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item-selected::before) {
+  background: rgba(239, 246, 255, 0.92);
+}
+
+.sider-footer {
+  margin-top: auto;
+  flex: 0 0 auto;
+  padding: 16px 14px 18px;
+  border-top: 1px solid rgba(148, 163, 184, 0.12);
+  background: linear-gradient(180deg, rgba(9, 14, 24, 0), rgba(9, 14, 24, 0.34));
+}
+
+.sider-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sider-menu::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.24);
+}
+
+.sider-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sider-footer-role {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  background: rgba(59, 130, 246, 0.12);
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sider-footer-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sider-footer-logout {
+  margin-top: 12px;
+  width: 100%;
+  justify-content: flex-start;
+  border-radius: 12px;
+  color: rgba(226, 232, 240, 0.82);
+}
+
+.sider-footer-logout:hover,
+.sider-footer-logout:focus {
+  color: #eff6ff;
+  background: rgba(51, 65, 85, 0.72);
 }
 
 @media (max-width: 1024px) {
@@ -364,10 +545,6 @@ async function handleLogout() {
     min-width: 200px !important;
     max-width: 200px !important;
     flex: 0 0 200px !important;
-  }
-
-  .app-header {
-    padding: 0 20px;
   }
 
   .app-content {
@@ -385,23 +562,12 @@ async function handleLogout() {
 
   .sider-brand {
     padding: 0 12px;
-    font-size: 14px;
+    min-height: 76px;
+    gap: 10px;
   }
 
-  .app-header {
-    padding: 0 16px;
-    gap: 8px;
-  }
-
-  .header-right {
-    gap: 8px;
-  }
-
-  .username {
-    max-width: 120px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .brand-title {
+    font-size: 16px;
   }
 
   .app-content {

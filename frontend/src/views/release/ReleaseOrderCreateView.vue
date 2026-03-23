@@ -716,7 +716,7 @@ onMounted(async () => {
           </template>
           返回发布单
         </a-button>
-        <div>
+        <div class="page-header-copy">
           <h2 class="page-title">新建发布单</h2>
           <p class="page-subtitle">先选择发布模板，再按模板拆分填写 CI / CD 参数；平台会自动按模板结构执行发布。</p>
         </div>
@@ -792,7 +792,7 @@ onMounted(async () => {
 
         <a-alert
           v-if="selectedTemplate"
-          class="template-alert"
+          class="template-alert template-alert-success"
           type="success"
           show-icon
           :message="`当前模板：${selectedTemplate.name}`"
@@ -800,7 +800,7 @@ onMounted(async () => {
         />
         <a-alert
           v-else-if="templateWarning"
-          class="template-alert"
+          class="template-alert template-alert-warning"
           type="warning"
           show-icon
           :message="templateWarning"
@@ -812,13 +812,13 @@ onMounted(async () => {
           <template #title>{{ item.title }}</template>
           <template #extra>
             <a-space>
-              <a-tag color="processing">{{ item.binding?.provider || '-' }}</a-tag>
-              <a-tag>{{ item.binding?.binding_name || '-' }}</a-tag>
+              <a-tag class="dashboard-chip dashboard-chip-running">{{ item.binding?.provider || '-' }}</a-tag>
+              <a-tag class="dashboard-chip dashboard-chip-neutral">{{ item.binding?.binding_name || '-' }}</a-tag>
             </a-space>
           </template>
 
-          <a-alert class="scope-alert" type="info" show-icon :message="scopeHint(item.scope)" />
-          <a-alert v-if="item.error" class="scope-alert" type="error" show-icon :message="item.error" />
+          <a-alert class="scope-alert scope-alert-info" type="info" show-icon :message="scopeHint(item.scope)" />
+          <a-alert v-if="item.error" class="scope-alert scope-alert-error" type="error" show-icon :message="item.error" />
 
           <a-spin :spinning="item.loading" tip="正在加载额外参数...">
             <a-empty
@@ -897,18 +897,105 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
 .form-card {
   border-radius: var(--radius-xl);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 14px 30px rgba(15, 23, 42, 0.05);
+}
+
+.form-card :deep(.ant-card-head) {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  min-height: 60px;
+}
+
+.form-card :deep(.ant-card-head-title) {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--color-dashboard-900);
+}
+
+.form-card :deep(.ant-form-item-label > label) {
+  color: var(--color-text-soft);
+  font-weight: 700;
 }
 
 .scope-card {
-  margin-top: 16px;
+  margin-top: 0;
 }
 
 .template-alert,
 .scope-alert {
   margin-top: 8px;
   margin-bottom: 16px;
+  border-radius: 16px;
+  border-width: 1px;
+  border-style: solid;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.84),
+    0 10px 24px rgba(15, 23, 42, 0.04);
+}
+
+.template-alert :deep(.ant-alert-message),
+.scope-alert :deep(.ant-alert-message) {
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.template-alert :deep(.ant-alert-description),
+.scope-alert :deep(.ant-alert-description) {
+  color: var(--color-text-secondary);
+  line-height: 1.8;
+}
+
+.template-alert-success {
+  background: linear-gradient(180deg, #f0fdf4 0%, #ecfdf5 100%);
+  border-color: #86efac;
+}
+
+.template-alert-success :deep(.ant-alert-message),
+.template-alert-success :deep(.ant-alert-icon) {
+  color: #15803d;
+}
+
+.template-alert-warning {
+  background: linear-gradient(180deg, #fff7ed 0%, #fffbeb 100%);
+  border-color: #fdba74;
+}
+
+.template-alert-warning :deep(.ant-alert-message),
+.template-alert-warning :deep(.ant-alert-icon) {
+  color: #b45309;
+}
+
+.scope-alert-info {
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fbff 100%);
+  border-color: #93c5fd;
+}
+
+.scope-alert-info :deep(.ant-alert-message),
+.scope-alert-info :deep(.ant-alert-icon) {
+  color: #1d4ed8;
+}
+
+.scope-alert-error {
+  background: linear-gradient(180deg, #fff1f2 0%, #fff5f5 100%);
+  border-color: #fda4af;
+}
+
+.scope-alert-error :deep(.ant-alert-message),
+.scope-alert-error :deep(.ant-alert-icon) {
+  color: #b91c1c;
 }
 
 .scope-param-form {
@@ -917,6 +1004,36 @@ onMounted(async () => {
 
 .param-value-control {
   width: 100%;
+}
+
+.create-form :deep(.ant-input),
+.create-form :deep(.ant-select-selector) {
+  border-radius: 14px !important;
+  border-color: rgba(148, 163, 184, 0.24) !important;
+  background: rgba(255, 255, 255, 0.94) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+.create-form :deep(.ant-input:hover),
+.create-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector) {
+  border-color: rgba(51, 65, 85, 0.34) !important;
+}
+
+.create-form :deep(.ant-input:focus),
+.create-form :deep(.ant-input-focused),
+.create-form :deep(.ant-select-focused .ant-select-selector) {
+  border-color: rgba(37, 99, 235, 0.44) !important;
+  box-shadow:
+    0 0 0 3px rgba(37, 99, 235, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82) !important;
+}
+
+.create-form :deep(.ant-empty) {
+  padding: 12px 0;
+}
+
+.create-form :deep(.ant-empty-description) {
+  color: var(--color-text-soft);
 }
 
 .param-helper {
@@ -932,6 +1049,10 @@ onMounted(async () => {
   justify-content: flex-end;
 }
 
+.action-area :deep(.ant-space) {
+  gap: 10px;
+}
+
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
@@ -941,6 +1062,10 @@ onMounted(async () => {
   .header-left {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .create-form {
+    gap: 14px;
   }
 }
 </style>

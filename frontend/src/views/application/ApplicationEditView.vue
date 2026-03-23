@@ -103,13 +103,18 @@ onMounted(async () => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <a-button type="link" @click="goBack">
-        <template #icon>
-          <ArrowLeftOutlined />
-        </template>
-        返回详情
-      </a-button>
-      <h2 class="page-title">编辑应用</h2>
+      <div class="page-header-main">
+        <a-button type="link" class="page-header-back" @click="goBack">
+          <template #icon>
+            <ArrowLeftOutlined />
+          </template>
+          返回详情
+        </a-button>
+        <div class="page-header-copy">
+          <h2 class="page-title">编辑应用</h2>
+          <p class="page-subtitle">维护应用基础信息与归属配置，修改完成后会立即影响后续模板绑定与发布入口展示。</p>
+        </div>
+      </div>
     </div>
 
     <a-skeleton v-if="loading" active :paragraph="{ rows: 8 }" />
@@ -129,14 +134,18 @@ onMounted(async () => {
 <style scoped>
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+}
+
+.page-header-main {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
 @media (max-width: 768px) {
   .page-header {
-    flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
   }
 }
 </style>

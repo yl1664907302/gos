@@ -241,7 +241,7 @@ onUnmounted(() => {
   <div class="page-wrap">
     <a-card :bordered="false" class="toolbar-card">
       <div class="toolbar">
-        <div>
+        <div class="page-header-copy">
           <div class="page-title">GitOps管理</div>
           <div class="page-subtitle">统一维护多个 GitOps 实例，并将它们关联到不同的 ArgoCD 集群。</div>
         </div>
@@ -475,16 +475,6 @@ onUnmounted(() => {
   margin-bottom: 16px;
 }
 
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.page-subtitle {
-  margin-top: 4px;
-  color: var(--ant-color-text-description, #8c8c8c);
-}
-
 .summary-card,
 .detail-card,
 .toolbar-card {
@@ -493,7 +483,7 @@ onUnmounted(() => {
 
 .summary-label {
   font-size: 13px;
-  color: #6b7280;
+  color: var(--color-text-soft);
 }
 
 .summary-value {
@@ -501,7 +491,7 @@ onUnmounted(() => {
   min-height: 44px;
   font-size: 16px;
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text-main);
   word-break: break-all;
 }
 
@@ -514,8 +504,8 @@ onUnmounted(() => {
 .template-block {
   padding: 10px 12px;
   border-radius: 10px;
-  background: #f6f8fa;
-  color: #1f2329;
+  background: var(--color-bg-subtle);
+  color: var(--color-text-main);
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   word-break: break-word;
 }
@@ -524,8 +514,8 @@ onUnmounted(() => {
   margin: 0;
   padding: 14px 16px;
   border-radius: 12px;
-  background: #111827;
-  color: #f9fafb;
+  background: var(--color-dashboard-900);
+  color: var(--color-dashboard-text);
   overflow: auto;
   font-size: 12px;
   line-height: 1.65;
@@ -537,7 +527,7 @@ onUnmounted(() => {
 }
 
 .selected-row > td {
-  background: #f0f7ff !important;
+  background: rgba(59, 130, 246, 0.08) !important;
 }
 
 @media (max-width: 768px) {

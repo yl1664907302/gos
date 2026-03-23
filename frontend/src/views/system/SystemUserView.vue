@@ -166,6 +166,7 @@ function handleReset() {
   void loadUsers()
 }
 
+
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
@@ -238,7 +239,7 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">用户管理</h2>
         <p class="page-subtitle">管理平台用户，支持账号创建、编辑与状态控制。</p>
       </div>
@@ -251,44 +252,46 @@ onMounted(() => {
     </div>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="用户名">
-          <a-input v-model:value="filters.username" allow-clear placeholder="按用户名查询" />
-        </a-form-item>
-        <a-form-item label="姓名">
-          <a-input v-model:value="filters.name" allow-clear placeholder="按姓名查询" />
-        </a-form-item>
-        <a-form-item label="角色">
-          <a-select
-            v-model:value="filters.role"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: '管理员', value: 'admin' },
-              { label: '普通用户', value: 'normal' },
-            ]"
-            class="filter-select"
-          />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="filters.status"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: 'active', value: 'active' },
-              { label: 'inactive', value: 'inactive' },
-            ]"
-            class="filter-select"
-          />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="用户名">
+            <a-input v-model:value="filters.username" allow-clear placeholder="按用户名查询" />
+          </a-form-item>
+          <a-form-item label="姓名">
+            <a-input v-model:value="filters.name" allow-clear placeholder="按姓名查询" />
+          </a-form-item>
+          <a-form-item label="角色">
+            <a-select
+              v-model:value="filters.role"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: '管理员', value: 'admin' },
+                { label: '普通用户', value: 'normal' },
+              ]"
+              class="filter-select"
+            />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select
+              v-model:value="filters.status"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: 'active', value: 'active' },
+                { label: 'inactive', value: 'inactive' },
+              ]"
+              class="filter-select"
+            />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">

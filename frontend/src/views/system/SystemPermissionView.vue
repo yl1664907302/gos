@@ -368,7 +368,7 @@ onMounted(async () => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">权限授权</h2>
         <p class="page-subtitle">按用户授权模块权限与应用权限。</p>
       </div>
@@ -463,16 +463,17 @@ onMounted(async () => {
 }
 
 .group-card {
-  border: 1px solid #f0f0f0;
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 10px;
   padding: 14px 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
 }
 
 .group-title {
   margin-bottom: 10px;
   font-size: 14px;
   font-weight: 600;
-  color: #1f1f1f;
+  color: var(--color-text-main);
 }
 
 .permission-checkbox-group {
@@ -480,12 +481,12 @@ onMounted(async () => {
 }
 
 .permission-code {
-  color: #8c8c8c;
+  color: var(--color-text-soft);
 }
 
 .save-tip {
   margin: 12px 0 0;
-  color: #8c8c8c;
+  color: var(--color-text-soft);
   font-size: 12px;
 }
 

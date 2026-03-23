@@ -328,6 +328,7 @@ function handleReset() {
   void loadExecutorParams()
 }
 
+
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
@@ -426,7 +427,7 @@ onMounted(async () => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">执行器参数</h2>
         <p class="page-subtitle">{{ pageSubtitle }}</p>
       </div>
@@ -442,77 +443,79 @@ onMounted(async () => {
     </div>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="应用">
-          <a-select
-            v-model:value="filters.application_id"
-            class="application-select"
-            show-search
-            allow-clear
-            option-filter-prop="label"
-            placeholder="请选择应用"
-            :loading="applicationsLoading"
-            :options="applicationOptions"
-            @change="handleApplicationChange"
-          />
-        </a-form-item>
-        <a-form-item label="绑定类型">
-          <a-select
-            v-model:value="filters.binding_type"
-            class="filter-select"
-            :options="[
-              { label: 'ci', value: 'ci' },
-              { label: 'cd', value: 'cd' },
-            ]"
-            @change="handleBindingTypeChange"
-          />
-        </a-form-item>
-        <a-form-item label="平台标准 Key">
-          <a-input v-model:value="filters.param_key" allow-clear placeholder="按平台标准 Key 查询" />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="filters.status"
-            class="filter-select"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: 'active', value: 'active' },
-              { label: 'inactive', value: 'inactive' },
-            ]"
-          />
-        </a-form-item>
-        <a-form-item label="展示">
-          <a-select
-            v-model:value="filters.visible"
-            class="filter-select"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: '是', value: 'true' },
-              { label: '否', value: 'false' },
-            ]"
-          />
-        </a-form-item>
-        <a-form-item label="可编辑">
-          <a-select
-            v-model:value="filters.editable"
-            class="filter-select"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: '是', value: 'true' },
-              { label: '否', value: 'false' },
-            ]"
-          />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="应用">
+            <a-select
+              v-model:value="filters.application_id"
+              class="application-select"
+              show-search
+              allow-clear
+              option-filter-prop="label"
+              placeholder="请选择应用"
+              :loading="applicationsLoading"
+              :options="applicationOptions"
+              @change="handleApplicationChange"
+            />
+          </a-form-item>
+          <a-form-item label="绑定类型">
+            <a-select
+              v-model:value="filters.binding_type"
+              class="filter-select"
+              :options="[
+                { label: 'ci', value: 'ci' },
+                { label: 'cd', value: 'cd' },
+              ]"
+              @change="handleBindingTypeChange"
+            />
+          </a-form-item>
+          <a-form-item label="平台标准 Key">
+            <a-input v-model:value="filters.param_key" allow-clear placeholder="按平台标准 Key 查询" />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select
+              v-model:value="filters.status"
+              class="filter-select"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: 'active', value: 'active' },
+                { label: 'inactive', value: 'inactive' },
+              ]"
+            />
+          </a-form-item>
+          <a-form-item label="展示">
+            <a-select
+              v-model:value="filters.visible"
+              class="filter-select"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: '是', value: 'true' },
+                { label: '否', value: 'false' },
+              ]"
+            />
+          </a-form-item>
+          <a-form-item label="可编辑">
+            <a-select
+              v-model:value="filters.editable"
+              class="filter-select"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: '是', value: 'true' },
+                { label: '否', value: 'false' },
+              ]"
+            />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">

@@ -20,6 +20,13 @@ import type {
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 type FormMode = 'create' | 'edit'
+type AbilityKind = 'builtin' | 'custom' | 'required' | 'gitops' | 'cd-self-fill'
+
+interface AbilityTag {
+  key: string
+  label: string
+  kind: AbilityKind
+}
 
 interface FormState extends PlatformParamDictPayload {
   id: string
@@ -64,9 +71,7 @@ const initialColumns: TableColumnsType<PlatformParamDict> = [
   { title: '字段名称', dataIndex: 'name', key: 'name', width: 180 },
   { title: '字段说明', dataIndex: 'description', key: 'description', width: 260, ellipsis: true },
   { title: '字段类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
-  { title: '默认必填', dataIndex: 'required', key: 'required', width: 110 },
-  { title: 'GitOps定位', dataIndex: 'gitops_locator', key: 'gitops_locator', width: 120 },
-  { title: 'CD自填字段', dataIndex: 'cd_self_fill', key: 'cd_self_fill', width: 130 },
+  { title: '字段能力', key: 'abilities', width: 280 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 110 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
   { title: '操作', key: 'actions', width: 220, fixed: 'right' },
@@ -86,7 +91,6 @@ const statusOptions = [
 ] as const
 
 const modalTitle = computed(() => (modalMode.value === 'create' ? '新增标准字段' : '编辑标准字段'))
-
 function formatTime(value: string) {
   if (!value) {
     return '-'
@@ -104,6 +108,21 @@ function statusColor(status: PlatformParamStatus) {
 
 function boolText(value: boolean) {
   return value ? '是' : '否'
+}
+
+function abilityTags(item: Pick<PlatformParamDict, 'builtin' | 'required' | 'gitops_locator' | 'cd_self_fill'>): AbilityTag[] {
+  const tags: AbilityTag[] = []
+  tags.push(item.builtin ? { key: 'builtin', label: '内置', kind: 'builtin' } : { key: 'custom', label: '自定义', kind: 'custom' })
+  if (item.required) {
+    tags.push({ key: 'required', label: '必填', kind: 'required' })
+  }
+  if (item.gitops_locator) {
+    tags.push({ key: 'gitops', label: 'GitOps 定位', kind: 'gitops' })
+  }
+  if (item.cd_self_fill) {
+    tags.push({ key: 'cd-self-fill', label: 'CD 自填', kind: 'cd-self-fill' })
+  }
+  return tags
 }
 
 function normalizeParamKey(value: string) {
@@ -169,6 +188,7 @@ function handleReset() {
   filters.pageSize = 20
   void loadPlatformParams()
 }
+
 
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
@@ -279,9 +299,9 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
-        <h2 class="page-title">标准字库</h2>
-        <p class="page-subtitle">统一维护平台标准字段，为执行器参数映射提供下拉数据源。</p>
+      <div class="page-header-copy">
+        <h2 class="page-title">平台字段中心</h2>
+        <p class="page-subtitle">沉淀发布链路中的标准字段，让 CI 映射、GitOps 定位与 CD 填值始终使用同一套语言。</p>
       </div>
       <a-button type="primary" @click="openCreateModal">
         <template #icon>
@@ -292,29 +312,31 @@ onMounted(() => {
     </div>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="标准 Key">
-          <a-input v-model:value="filters.param_key" allow-clear placeholder="按 param_key 查询" />
-        </a-form-item>
-        <a-form-item label="字段名称">
-          <a-input v-model:value="filters.name" allow-clear placeholder="按字段名称查询" />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="filters.status"
-            class="filter-select"
-            allow-clear
-            placeholder="全部"
-            :options="statusOptions"
-          />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="标准 Key">
+            <a-input v-model:value="filters.param_key" allow-clear placeholder="按 param_key 查询" />
+          </a-form-item>
+          <a-form-item label="字段名称">
+            <a-input v-model:value="filters.name" allow-clear placeholder="按字段名称查询" />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select
+              v-model:value="filters.status"
+              class="filter-select"
+              allow-clear
+              placeholder="全部"
+              :options="statusOptions"
+            />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">
@@ -344,6 +366,18 @@ onMounted(() => {
           <template v-else-if="column.key === 'cd_self_fill'">
             {{ boolText(record.cd_self_fill) }}
           </template>
+          <template v-else-if="column.key === 'abilities'">
+            <div class="ability-tags">
+              <a-tag
+                v-for="tag in abilityTags(record)"
+                :key="tag.key"
+                class="ability-tag"
+                :class="`ability-tag--${tag.kind}`"
+              >
+                {{ tag.label }}
+              </a-tag>
+            </div>
+          </template>
           <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ statusText(record.status) }}</a-tag>
           </template>
@@ -352,9 +386,9 @@ onMounted(() => {
           </template>
           <template v-else-if="column.key === 'actions'">
             <a-space>
-              <a-button type="link" size="small" @click="openDetailDrawer(record)">查看</a-button>
+              <a-button type="link" size="small" class="table-action-button" @click="openDetailDrawer(record)">查看</a-button>
               <template v-if="!record.builtin">
-                <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
+                <a-button type="link" size="small" class="table-action-button" @click="openEditModal(record)">编辑</a-button>
                 <a-popconfirm
                   title="确认删除当前标准字段吗？"
                   ok-text="删除"
@@ -364,7 +398,7 @@ onMounted(() => {
                   <template #icon>
                     <ExclamationCircleOutlined class="danger-icon" />
                   </template>
-                  <a-button type="link" size="small" danger :loading="deletingID === record.id">删除</a-button>
+                  <a-button type="link" size="small" class="table-action-button table-action-button-danger" danger :loading="deletingID === record.id">删除</a-button>
                 </a-popconfirm>
               </template>
             </a-space>
@@ -471,28 +505,44 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-drawer :open="detailVisible" title="标准字段详情" width="640" @close="closeDetailDrawer">
+    <a-drawer :open="detailVisible" title="字段说明" width="680" @close="closeDetailDrawer">
       <a-skeleton v-if="detailLoading" active :paragraph="{ rows: 8 }" />
-      <a-descriptions v-else-if="detailData" :column="1" bordered>
-        <a-descriptions-item label="字段 ID">{{ detailData.id }}</a-descriptions-item>
-        <a-descriptions-item label="标准 Key">
-          <span class="param-key-cell">
+      <template v-else-if="detailData">
+        <div class="detail-hero">
+          <div class="detail-hero-label">平台字段</div>
+          <div class="detail-hero-title-row">
+            <div class="detail-hero-title">{{ detailData.name }}</div>
+            <a-tag :color="statusColor(detailData.status)">{{ statusText(detailData.status) }}</a-tag>
+          </div>
+          <div class="detail-hero-key">
             <span>{{ detailData.param_key }}</span>
             <a-tooltip v-if="detailData.builtin" title="系统内置字段">
               <SafetyCertificateOutlined class="builtin-icon" />
             </a-tooltip>
-          </span>
-        </a-descriptions-item>
-        <a-descriptions-item label="字段名称">{{ detailData.name }}</a-descriptions-item>
-        <a-descriptions-item label="字段说明">{{ detailData.description || '-' }}</a-descriptions-item>
-        <a-descriptions-item label="字段类型">{{ detailData.param_type }}</a-descriptions-item>
-        <a-descriptions-item label="默认必填">{{ boolText(detailData.required) }}</a-descriptions-item>
-        <a-descriptions-item label="GitOps 定位字段">{{ boolText(detailData.gitops_locator) }}</a-descriptions-item>
-        <a-descriptions-item label="CD 自填字段">{{ boolText(detailData.cd_self_fill) }}</a-descriptions-item>
-        <a-descriptions-item label="状态">{{ statusText(detailData.status) }}</a-descriptions-item>
-        <a-descriptions-item label="创建时间">{{ formatTime(detailData.created_at) }}</a-descriptions-item>
-        <a-descriptions-item label="更新时间">{{ formatTime(detailData.updated_at) }}</a-descriptions-item>
-      </a-descriptions>
+          </div>
+          <div class="detail-hero-description">{{ detailData.description || '暂无字段说明' }}</div>
+          <div class="ability-tags">
+            <a-tag
+              v-for="tag in abilityTags(detailData)"
+              :key="tag.key"
+              class="ability-tag"
+              :class="`ability-tag--${tag.kind}`"
+            >
+              {{ tag.label }}
+            </a-tag>
+          </div>
+        </div>
+
+        <a-descriptions :column="1" bordered class="detail-descriptions">
+          <a-descriptions-item label="字段 ID">{{ detailData.id }}</a-descriptions-item>
+          <a-descriptions-item label="字段类型">{{ detailData.param_type }}</a-descriptions-item>
+          <a-descriptions-item label="默认必填">{{ boolText(detailData.required) }}</a-descriptions-item>
+          <a-descriptions-item label="GitOps 定位字段">{{ boolText(detailData.gitops_locator) }}</a-descriptions-item>
+          <a-descriptions-item label="CD 自填字段">{{ boolText(detailData.cd_self_fill) }}</a-descriptions-item>
+          <a-descriptions-item label="创建时间">{{ formatTime(detailData.created_at) }}</a-descriptions-item>
+          <a-descriptions-item label="更新时间">{{ formatTime(detailData.updated_at) }}</a-descriptions-item>
+        </a-descriptions>
+      </template>
     </a-drawer>
   </div>
 </template>
@@ -510,6 +560,28 @@ onMounted(() => {
   border-radius: var(--radius-xl);
 }
 
+.filter-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.filter-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
+}
+
+.table-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.table-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
+}
+
 .filter-form {
   display: flex;
   gap: 8px;
@@ -519,8 +591,40 @@ onMounted(() => {
   width: 140px;
 }
 
+.page-header :deep(.ant-btn-primary),
+.filter-card :deep(.ant-btn-primary) {
+  background: var(--color-dashboard-900);
+  border-color: var(--color-dashboard-900);
+  color: var(--color-dashboard-text);
+  box-shadow: 0 8px 18px rgba(30, 41, 59, 0.16);
+}
+
+.page-header :deep(.ant-btn-primary:hover),
+.filter-card :deep(.ant-btn-primary:hover),
+.page-header :deep(.ant-btn-primary:focus),
+.filter-card :deep(.ant-btn-primary:focus) {
+  background: var(--color-dashboard-800);
+  border-color: var(--color-dashboard-800);
+  color: var(--color-dashboard-text);
+}
+
+.page-header :deep(.ant-btn-default),
+.filter-card :deep(.ant-btn-default) {
+  background: var(--color-bg-card);
+  border-color: rgba(148, 163, 184, 0.28);
+  color: var(--color-dashboard-800);
+}
+
+.page-header :deep(.ant-btn-default:hover),
+.filter-card :deep(.ant-btn-default:hover),
+.page-header :deep(.ant-btn-default:focus),
+.filter-card :deep(.ant-btn-default:focus) {
+  border-color: var(--color-dashboard-800);
+  color: var(--color-dashboard-900);
+}
+
 .danger-icon {
-  color: #ff4d4f;
+  color: var(--color-danger);
 }
 
 .param-key-cell {
@@ -529,18 +633,134 @@ onMounted(() => {
   gap: 6px;
 }
 
+.ability-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ability-tag {
+  margin-inline-end: 0;
+  border-radius: 999px;
+  border: none;
+  padding-inline: 10px;
+  font-weight: 600;
+}
+
+.ability-tag--builtin {
+  background: var(--color-primary-50);
+  color: var(--color-primary-600);
+}
+
+.ability-tag--custom {
+  background: var(--color-bg-subtle);
+  color: var(--color-dashboard-800);
+}
+
+.ability-tag--required {
+  background: #fff7ed;
+  color: var(--color-warning);
+}
+
+.ability-tag--gitops {
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.ability-tag--cd-self-fill {
+  background: #f5f3ff;
+  color: #7c3aed;
+}
+
 .builtin-icon {
-  color: #1677ff;
+  color: var(--color-primary-500);
+}
+
+.table-action-button {
+  padding: 0 6px;
+  color: var(--color-dashboard-800);
+  font-weight: 600;
+}
+
+.table-action-button:hover,
+.table-action-button:focus {
+  color: var(--color-dashboard-900);
+}
+
+.table-action-button-danger,
+.table-action-button-danger:hover,
+.table-action-button-danger:focus {
+  color: var(--color-danger);
 }
 
 .modal-alert {
   margin-bottom: var(--space-4);
 }
 
+.detail-hero {
+  margin-bottom: 16px;
+  padding: 18px;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, var(--color-primary-glow), transparent 34%),
+    linear-gradient(180deg, var(--color-bg-card) 0%, var(--color-bg-subtle) 100%);
+  border: 1px solid var(--color-panel-border);
+}
+
+.detail-hero-label {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-soft);
+}
+
+.detail-hero-title-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detail-hero-title {
+  color: var(--color-text-main);
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.detail-hero-key {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-dashboard-800);
+  font-size: 14px;
+  font-weight: 700;
+  word-break: break-all;
+}
+
+.detail-hero-description {
+  margin-top: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.7;
+}
+
+.detail-descriptions {
+  margin-top: 16px;
+}
+
 .pagination-area {
   margin-top: var(--space-6);
   display: flex;
   justify-content: flex-end;
+}
+
+.table-card :deep(.ant-table-thead > tr > th) {
+  background: var(--color-dashboard-900);
+  color: var(--color-dashboard-text);
+  font-weight: 700;
+  border-bottom: 1px solid rgba(59, 130, 246, 0.24);
 }
 
 @media (max-width: 768px) {

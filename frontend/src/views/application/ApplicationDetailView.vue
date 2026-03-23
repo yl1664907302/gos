@@ -134,13 +134,19 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <a-space>
-        <a-button @click="goBack">
+      <div class="page-header-main">
+        <a-button class="page-header-back" @click="goBack">
           <template #icon>
             <ArrowLeftOutlined />
           </template>
           返回列表
         </a-button>
+        <div class="page-header-copy">
+          <h2 class="page-title">应用详情</h2>
+          <p class="page-subtitle">集中查看应用基础档案、仓库信息与发布准备情况，常用操作会始终保持在标题区右侧。</p>
+        </div>
+      </div>
+      <a-space class="page-header-actions" wrap>
         <a-button v-if="canManageApplication" type="primary" @click="toEdit">
           <template #icon>
             <EditOutlined />
@@ -170,7 +176,31 @@ onMounted(() => {
 <style scoped>
 .page-header {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.page-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.page-header-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 768px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .page-header-actions {
+    justify-content: flex-start;
+  }
 }
 
 .detail-card {

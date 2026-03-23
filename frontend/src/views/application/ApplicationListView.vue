@@ -100,6 +100,7 @@ function handleReset() {
   void loadApplications()
 }
 
+
 function handlePageChange(page: number, pageSize: number) {
   listStore.setPage(page, pageSize)
   void loadApplications()
@@ -206,7 +207,7 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">我的应用</h2>
         <p class="page-subtitle">管理应用基础信息，支持筛选、分页、编辑与删除。</p>
       </div>
@@ -227,32 +228,34 @@ onMounted(() => {
     </div>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="Key">
-          <a-input v-model:value="listStore.key" allow-clear placeholder="按 Key 查询" />
-        </a-form-item>
-        <a-form-item label="名称">
-          <a-input v-model:value="listStore.name" allow-clear placeholder="按名称查询" />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="listStore.status"
-            class="filter-status-select"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: 'active', value: 'active' },
-              { label: 'inactive', value: 'inactive' },
-            ]"
-          />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="Key">
+            <a-input v-model:value="listStore.key" allow-clear placeholder="按 Key 查询" />
+          </a-form-item>
+          <a-form-item label="名称">
+            <a-input v-model:value="listStore.name" allow-clear placeholder="按名称查询" />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select
+              v-model:value="listStore.status"
+              class="filter-status-select"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: 'active', value: 'active' },
+                { label: 'inactive', value: 'inactive' },
+              ]"
+            />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">
@@ -430,11 +433,11 @@ onMounted(() => {
 }
 
 .repo-link {
-  color: #1677ff;
+  color: var(--color-dashboard-800);
 }
 
 .danger-icon {
-  color: #ff4d4f;
+  color: var(--color-danger);
 }
 
 .pagination-area {
@@ -454,52 +457,52 @@ onMounted(() => {
 }
 
 .flow-arrow {
-  color: #1677ff;
+  color: var(--color-dashboard-800);
   font-size: 20px;
   line-height: 1;
   text-align: center;
 }
 
 .flow-node {
-  border: 1px solid #d9e2f2;
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 16px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
   padding: 16px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
 }
 
 .flow-node.primary {
-  border-color: #91caff;
-  background: linear-gradient(180deg, #f0f7ff 0%, #ffffff 100%);
+  border-color: rgba(59, 130, 246, 0.22);
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%);
 }
 
 .flow-node.accent {
-  border-color: #b7eb8f;
-  background: linear-gradient(180deg, #f6ffed 0%, #ffffff 100%);
+  border-color: rgba(96, 165, 250, 0.2);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%);
 }
 
 .flow-title {
-  color: #0f172a;
+  color: var(--color-text-main);
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 6px;
 }
 
 .flow-desc {
-  color: #475569;
+  color: var(--color-text-soft);
   font-size: 13px;
   line-height: 1.7;
 }
 
 .flow-branch {
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed rgba(148, 163, 184, 0.32);
   border-radius: 18px;
   padding: 16px;
-  background: #fafcff;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.96));
 }
 
 .flow-branch-title {
-  color: #334155;
+  color: var(--color-dashboard-800);
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 12px;

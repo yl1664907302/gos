@@ -63,7 +63,7 @@ onMounted(() => {
   <div class="page-wrap">
     <a-card class="toolbar-card" :bordered="false">
       <div class="toolbar">
-        <div>
+        <div class="page-header-copy">
           <div class="page-title">系统设置</div>
           <div class="page-subtitle">配置发布单基础参数里的环境下拉选项。这里的值会直接用于新建发布单页面。</div>
         </div>
@@ -103,16 +103,6 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   gap: 16px;
-}
-
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-}
-
-.page-subtitle {
-  margin-top: 4px;
-  color: var(--ant-color-text-description, #8c8c8c);
 }
 
 .section-alert {

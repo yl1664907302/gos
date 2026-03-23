@@ -48,39 +48,44 @@ async function handleSubmit() {
 <template>
   <div class="login-page">
     <div class="login-background"></div>
-    <a-card class="login-card" :bordered="false">
-      <div class="login-title-area">
-        <h1 class="login-title">GOS 平台登录</h1>
-        <p class="login-subtitle">内部部署平台 · 用户与权限统一入口</p>
-      </div>
+    <div class="login-shell">
+      <a-card class="login-card" :bordered="false">
+        <div class="login-card-head">
+          <div class="login-card-eyebrow">GOS Platform</div>
+          <h2 class="login-title">GOS</h2>
+        </div>
 
-      <a-form
-        ref="formRef"
-        layout="vertical"
-        :model="formState"
-        :rules="rules"
-        autocomplete="off"
-        @keyup.enter="handleSubmit"
-      >
-        <a-form-item label="用户名" name="username">
-          <a-input v-model:value="formState.username" placeholder="请输入用户名">
-            <template #prefix>
-              <UserOutlined />
-            </template>
-          </a-input>
-        </a-form-item>
+        <a-form
+          ref="formRef"
+          layout="vertical"
+          :model="formState"
+          :rules="rules"
+          autocomplete="off"
+          class="login-form"
+          @keyup.enter="handleSubmit"
+        >
+          <a-form-item label="用户名" name="username">
+            <a-input v-model:value="formState.username" placeholder="请输入用户名">
+              <template #prefix>
+                <UserOutlined />
+              </template>
+            </a-input>
+          </a-form-item>
 
-        <a-form-item label="密码" name="password">
-          <a-input-password v-model:value="formState.password" placeholder="请输入密码">
-            <template #prefix>
-              <LockOutlined />
-            </template>
-          </a-input-password>
-        </a-form-item>
+          <a-form-item label="密码" name="password">
+            <a-input-password v-model:value="formState.password" placeholder="请输入密码">
+              <template #prefix>
+                <LockOutlined />
+              </template>
+            </a-input-password>
+          </a-form-item>
 
-        <a-button type="primary" block :loading="submitting" @click="handleSubmit">登录</a-button>
-      </a-form>
-    </a-card>
+          <a-button type="primary" block size="large" :loading="submitting" @click="handleSubmit">登录系统</a-button>
+        </a-form>
+
+        <div class="login-footnote">内部部署平台 · 用户与权限统一入口</div>
+      </a-card>
+    </div>
   </div>
 </template>
 
@@ -90,51 +95,147 @@ async function handleSubmit() {
   display: grid;
   place-items: center;
   min-height: 100vh;
-  background: linear-gradient(135deg, #eaf3ff 0%, #f7fafc 45%, #eff8f1 100%);
-  padding: 20px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 16% 12%, rgba(37, 99, 235, 0.22), transparent 24%),
+    radial-gradient(circle at 82% 18%, rgba(14, 165, 233, 0.12), transparent 20%),
+    radial-gradient(circle at 50% 88%, rgba(15, 23, 42, 0.12), transparent 24%),
+    linear-gradient(135deg, #0b1424 0%, #0f172a 48%, #162033 100%);
+  padding: 28px;
 }
 
 .login-background {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 15% 20%, rgba(22, 119, 255, 0.12), transparent 32%),
-    radial-gradient(circle at 78% 30%, rgba(82, 196, 26, 0.12), transparent 36%),
-    radial-gradient(circle at 50% 80%, rgba(24, 144, 255, 0.08), transparent 40%);
+    linear-gradient(120deg, rgba(59, 130, 246, 0.06), transparent 38%),
+    linear-gradient(rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
+  background-size: auto, 32px 32px, 32px 32px;
+  mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.9), transparent 92%);
   pointer-events: none;
 }
 
-.login-card {
+.login-shell {
   position: relative;
+  z-index: 1;
   width: 100%;
-  max-width: 420px;
-  border-radius: 16px;
-  box-shadow: 0 14px 38px rgba(15, 35, 95, 0.12);
+  max-width: 460px;
+  margin: 0 auto;
 }
 
-.login-title-area {
-  margin-bottom: 8px;
+.login-card {
+  width: 100%;
+  border-radius: 28px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 252, 0.92)),
+    rgba(255, 255, 255, 0.9);
+  box-shadow:
+    0 24px 60px rgba(2, 6, 23, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(16px);
+}
+
+.login-card-head {
+  margin-bottom: 12px;
+  text-align: left;
+}
+
+.login-card-eyebrow {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .login-title {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 700;
-  color: #1f1f1f;
+  margin: 10px 0 0;
+  color: #0f172a;
+  font-size: 38px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
 }
 
-.login-subtitle {
-  margin: 8px 0 16px;
-  color: #595959;
+.login-form :deep(.ant-form-item) {
+  margin-bottom: 22px;
+}
+
+.login-form :deep(.ant-form-item-label > label) {
+  color: #334155;
+  font-weight: 600;
+}
+
+.login-form :deep(.ant-input-affix-wrapper),
+.login-form :deep(.ant-input) {
+  min-height: 50px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.42);
+  background: rgba(248, 250, 252, 0.94);
+  box-shadow: none;
+}
+
+.login-form :deep(.ant-input-affix-wrapper:hover),
+.login-form :deep(.ant-input:hover) {
+  border-color: rgba(37, 99, 235, 0.46);
+}
+
+.login-form :deep(.ant-input-affix-wrapper-focused),
+.login-form :deep(.ant-input-affix-wrapper:focus),
+.login-form :deep(.ant-input:focus) {
+  border-color: rgba(29, 78, 216, 0.72);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.login-form :deep(.ant-input-prefix) {
+  color: #64748b;
+}
+
+.login-form :deep(.ant-btn) {
+  height: 50px;
+  margin-top: 6px;
+  border-radius: 16px;
+  font-size: 16px;
+  font-weight: 700;
+  background: linear-gradient(135deg, #1d4ed8, #2563eb);
+  border-color: #1d4ed8;
+  box-shadow: 0 18px 30px rgba(37, 99, 235, 0.22);
+}
+
+.login-form :deep(.ant-btn:hover),
+.login-form :deep(.ant-btn:focus) {
+  background: linear-gradient(135deg, #1e40af, #1d4ed8);
+  border-color: #1e40af;
+}
+
+.login-footnote {
+  margin-top: 22px;
+  color: #94a3b8;
+  font-size: 13px;
+  text-align: center;
+}
+
+@media (max-width: 1100px) {
+  .login-shell {
+    max-width: 520px;
+  }
 }
 
 @media (max-width: 768px) {
-  .login-card {
-    max-width: 100%;
+  .login-page {
+    padding: 18px;
+  }
+
+  .showcase-mark {
+    width: 54px;
+    height: 54px;
+    border-radius: 18px;
+    font-size: 24px;
   }
 
   .login-title {
-    font-size: 22px;
+    font-size: 28px;
   }
 }
 </style>

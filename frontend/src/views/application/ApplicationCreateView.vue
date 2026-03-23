@@ -59,13 +59,18 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <a-button type="link" @click="goBack">
-        <template #icon>
-          <ArrowLeftOutlined />
-        </template>
-        返回列表
-      </a-button>
-      <h2 class="page-title">新增应用</h2>
+      <div class="page-header-main">
+        <a-button type="link" class="page-header-back" @click="goBack">
+          <template #icon>
+            <ArrowLeftOutlined />
+          </template>
+          返回列表
+        </a-button>
+        <div class="page-header-copy">
+          <h2 class="page-title">新增应用</h2>
+          <p class="page-subtitle">创建新的应用档案，补齐基础信息后即可继续绑定管线、配置模板并进入发布链路。</p>
+        </div>
+      </div>
     </div>
 
     <ApplicationForm
@@ -82,14 +87,18 @@ onMounted(() => {
 <style scoped>
 .page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+}
+
+.page-header-main {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
 @media (max-width: 768px) {
   .page-header {
-    flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
   }
 }
 </style>

@@ -979,6 +979,7 @@ function handleReset() {
   void loadTemplates()
 }
 
+
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
@@ -1167,7 +1168,7 @@ onMounted(async () => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">发布模板</h2>
         <p class="page-subtitle">按应用维护可复用的 CI/CD 发布结构，模板会决定本次发布启用哪些执行单元以及暴露哪些参数。</p>
       </div>
@@ -1206,28 +1207,30 @@ onMounted(async () => {
     </a-collapse>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="应用">
-          <a-select
-            v-model:value="filters.application_id"
-            class="filter-select-wide"
-            allow-clear
-            show-search
-            option-filter-prop="label"
-            placeholder="全部应用"
-            :options="applicationOptions"
-          />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select v-model:value="filters.status" class="filter-select" allow-clear placeholder="全部" :options="statusOptions" />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="应用">
+            <a-select
+              v-model:value="filters.application_id"
+              class="filter-select-wide"
+              allow-clear
+              show-search
+              option-filter-prop="label"
+              placeholder="全部应用"
+              :options="applicationOptions"
+            />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select v-model:value="filters.status" class="filter-select" allow-clear placeholder="全部" :options="statusOptions" />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">
@@ -1287,6 +1290,7 @@ onMounted(async () => {
       :confirm-loading="submitting"
       :title="modalTitle"
       :width="980"
+      wrap-class-name="template-editor-modal-wrap"
       ok-text="保存"
       cancel-text="取消"
       @ok="submitForm"
@@ -1381,7 +1385,9 @@ onMounted(async () => {
                       </div>
                     </template>
                     <template v-else-if="column.key === 'required'">
-                      <a-tag :color="record.required ? 'orange' : 'default'">{{ record.required ? '是' : '否' }}</a-tag>
+                      <a-tag :class="record.required ? 'dashboard-chip dashboard-chip-warning' : 'dashboard-chip dashboard-chip-neutral'">
+                        {{ record.required ? '必填' : '可选' }}
+                      </a-tag>
                     </template>
                   </template>
                 </a-table>
@@ -1479,7 +1485,7 @@ onMounted(async () => {
                       }}
                     </div>
                   </div>
-                  <a-tag color="processing">{{ gitopsRules.length }} 条规则</a-tag>
+                  <a-tag class="dashboard-chip dashboard-chip-running">{{ gitopsRules.length }} 条规则</a-tag>
                 </div>
 
                 <div class="gitops-rule-toolbar">
@@ -1658,9 +1664,46 @@ onMounted(async () => {
   border-radius: var(--radius-xl);
 }
 
+.template-editor-modal-wrap :deep(.ant-modal-content) {
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+  box-shadow:
+    0 24px 60px rgba(15, 23, 42, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-header) {
+  margin-bottom: 12px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-title) {
+  color: var(--color-text-main);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-body) {
+  padding-top: 8px;
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-footer) {
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
 .scope-card-base {
   margin-bottom: 16px;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.02) 0%, rgba(255, 255, 255, 1) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(248, 250, 252, 0.97) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 28px rgba(15, 23, 42, 0.04);
 }
 
 .filter-form {
@@ -1679,7 +1722,12 @@ onMounted(async () => {
 .release-page-guide-collapse {
   margin-bottom: 16px;
   border-radius: var(--radius-xl);
-  background: #fff;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(248, 250, 252, 0.97) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 10px 26px rgba(15, 23, 42, 0.03);
 }
 
 .pagination-area {
@@ -1689,12 +1737,62 @@ onMounted(async () => {
 }
 
 .danger-icon {
-  color: #ff4d4f;
+  color: var(--color-danger);
 }
 
 .scope-alert,
 .scope-binding-alert {
   margin-bottom: 12px;
+}
+
+.scope-card {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(248, 250, 252, 0.97) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 10px 26px rgba(15, 23, 42, 0.03);
+}
+
+.scope-card :deep(.ant-card-head) {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.scope-card :deep(.ant-card-head-title) {
+  color: var(--color-text-main);
+  font-weight: 700;
+}
+
+.scope-alert:deep(.ant-alert) {
+  border-radius: 14px;
+}
+
+.scope-alert:deep(.ant-alert-info) {
+  border: 1px solid rgba(2, 132, 199, 0.14);
+  background: linear-gradient(180deg, rgba(240, 249, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+}
+
+.scope-alert:deep(.ant-alert-info .ant-alert-message),
+.scope-alert:deep(.ant-alert-info .anticon) {
+  color: #0369a1;
+}
+
+.scope-alert:deep(.ant-alert-info .ant-alert-description) {
+  color: #475569;
+}
+
+.scope-binding-alert:deep(.ant-alert-success) {
+  border: 1px solid rgba(22, 163, 74, 0.14);
+  background: linear-gradient(180deg, rgba(240, 253, 244, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+}
+
+.scope-binding-alert:deep(.ant-alert-success .ant-alert-message),
+.scope-binding-alert:deep(.ant-alert-success .anticon) {
+  color: #15803d;
+}
+
+.scope-binding-alert:deep(.ant-alert-success .ant-alert-description) {
+  color: #475569;
 }
 
 .collapse-header-block {
@@ -1706,11 +1804,11 @@ onMounted(async () => {
 
 .collapse-header-title {
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text-main);
 }
 
 .collapse-header-subtitle {
-  color: #6b7280;
+  color: var(--color-text-soft);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -1718,7 +1816,9 @@ onMounted(async () => {
 .argocd-info-collapse,
 .gitops-rule-collapse {
   border-radius: 12px;
-  background: #fff;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
 }
 
 .argocd-info-collapse {
@@ -1734,6 +1834,7 @@ onMounted(async () => {
 .argocd-info-collapse :deep(.ant-collapse-header),
 .gitops-rule-collapse :deep(.ant-collapse-header) {
   align-items: flex-start !important;
+  background: transparent !important;
 }
 
 .release-page-guide-collapse :deep(.ant-collapse-content-box),
@@ -1743,9 +1844,13 @@ onMounted(async () => {
 }
 
 .argocd-info-panel {
+  padding: 12px 14px;
+  border: 1px solid rgba(2, 132, 199, 0.12);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(240, 249, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
   font-size: 13px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--color-text-soft);
 }
 
 .argocd-install-header {
@@ -1759,28 +1864,79 @@ onMounted(async () => {
 .argocd-install-title {
   margin-bottom: 4px;
   font-weight: 600;
-  color: #1e3a8a;
+  color: var(--color-dashboard-800);
 }
 
 .argocd-install-subtitle {
   font-size: 13px;
   line-height: 1.7;
-  color: #475569;
+  color: var(--color-text-soft);
 }
 
 .argocd-install-code {
   margin: 0;
   padding: 14px 16px;
   border-radius: 10px;
-  background: #0f172a;
-  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(241, 245, 249, 0.96) 100%);
+  color: #0f172a;
   overflow-x: auto;
   font-size: 12px;
   line-height: 1.7;
 }
 
+.argocd-install-panel {
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.99) 0%, rgba(255, 255, 255, 0.97) 100%);
+}
+
 .scope-table-wrapper {
   min-height: 320px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.97) 100%);
+}
+
+.scope-table-wrapper :deep(.ant-table) {
+  background: transparent;
+}
+
+.scope-table-wrapper :deep(.ant-table-container) {
+  border-inline-start: none !important;
+}
+
+.scope-table-wrapper :deep(.ant-table-thead > tr > th) {
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.98) 0%, rgba(219, 234, 254, 0.78) 100%);
+  color: #334155;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  font-weight: 700;
+}
+
+.scope-table-wrapper :deep(.ant-table-thead > tr > th::before) {
+  display: none;
+}
+
+.scope-table-wrapper :deep(.ant-table-tbody > tr > td) {
+  background: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.86);
+  color: var(--color-text-main);
+}
+
+.scope-table-wrapper :deep(.ant-table-tbody > tr:hover > td) {
+  background: rgba(239, 246, 255, 0.72) !important;
+}
+
+.scope-table-wrapper :deep(.ant-table-row-selected > td) {
+  background: rgba(219, 234, 254, 0.58) !important;
+}
+
+.scope-table-wrapper :deep(.ant-checkbox-wrapper),
+.scope-table-wrapper :deep(.ant-checkbox + span) {
+  color: var(--color-text-main);
 }
 
 .gitops-rule-panel {
@@ -1791,9 +1947,17 @@ onMounted(async () => {
 
 .gitops-unsupported-result {
   margin-top: 8px;
-  border: 1px dashed #f5c16c;
+  border: 1px dashed rgba(217, 119, 6, 0.35);
   border-radius: 12px;
-  background: linear-gradient(180deg, #fffdf5 0%, #fff7e6 100%);
+  background: linear-gradient(180deg, rgba(255, 247, 237, 0.98) 0%, rgba(255, 251, 235, 0.96) 100%);
+}
+
+.gitops-unsupported-result:deep(.ant-result-title) {
+  color: #9a3412;
+}
+
+.gitops-unsupported-result:deep(.ant-result-subtitle) {
+  color: #7c5e10;
 }
 
 .gitops-rule-header {
@@ -1810,19 +1974,19 @@ onMounted(async () => {
 
 .gitops-rule-title {
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text-main);
 }
 
 .gitops-rule-subtitle {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--color-text-soft);
 }
 
 .gitops-rule-item {
   padding: 14px;
-  border: 1px solid #dbe2ea;
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 12px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
 }
 
 .gitops-rule-item-header {
@@ -1834,21 +1998,21 @@ onMounted(async () => {
 
 .gitops-rule-item-title {
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text-main);
 }
 
 .gitops-rule-source-tip {
   margin: -4px 0 12px;
-  color: #6b7280;
+  color: var(--color-text-soft);
   font-size: 12px;
 }
 
 .gitops-target-preview {
   margin-bottom: 12px;
   padding: 12px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid rgba(148, 163, 184, 0.18);
   border-radius: 12px;
-  background: #fff;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.96) 100%);
 }
 
 .gitops-target-preview-header {
@@ -1861,7 +2025,7 @@ onMounted(async () => {
 
 .gitops-target-preview-title {
   font-weight: 600;
-  color: #111827;
+  color: var(--color-text-main);
 }
 
 .gitops-target-select-row {
@@ -1885,12 +2049,12 @@ onMounted(async () => {
 
 .param-name {
   font-weight: 600;
-  color: #1f2937;
+  color: var(--color-text-main);
 }
 
 .param-executor {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--color-text-soft);
 }
 
 @media (max-width: 992px) {

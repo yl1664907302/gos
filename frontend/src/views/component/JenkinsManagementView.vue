@@ -267,6 +267,7 @@ function handleReset() {
   void loadPipelines()
 }
 
+
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
@@ -354,7 +355,7 @@ onMounted(() => {
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-      <div>
+      <div class="page-header-copy">
         <h2 class="page-title">管线列表</h2>
         <p class="page-subtitle">展示并维护 Jenkins 管线；支持查看原始脚本，以及创建/编辑 inline raw pipeline。</p>
       </div>
@@ -381,29 +382,31 @@ onMounted(() => {
     </div>
 
     <a-card class="filter-card" :bordered="true">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="名称">
-          <a-input v-model:value="filters.name" allow-clear placeholder="按管线名称查询" />
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="filters.status"
-            class="filter-status-select"
-            allow-clear
-            placeholder="全部"
-            :options="[
-              { label: 'active', value: 'active' },
-              { label: 'inactive', value: 'inactive' },
-            ]"
-          />
-        </a-form-item>
-        <a-form-item>
-          <a-space>
-            <a-button type="primary" @click="handleSearch">查询</a-button>
-            <a-button @click="handleReset">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
+      <div class="advanced-search-panel">
+        <a-form layout="inline" class="filter-form">
+          <a-form-item label="名称">
+            <a-input v-model:value="filters.name" allow-clear placeholder="按管线名称查询" />
+          </a-form-item>
+          <a-form-item label="状态">
+            <a-select
+              v-model:value="filters.status"
+              class="filter-status-select"
+              allow-clear
+              placeholder="全部"
+              :options="[
+                { label: 'active', value: 'active' },
+                { label: 'inactive', value: 'inactive' },
+              ]"
+            />
+          </a-form-item>
+          <a-form-item class="filter-form-actions">
+            <a-space>
+              <a-button type="primary" @click="handleSearch">查询</a-button>
+              <a-button @click="handleReset">重置</a-button>
+            </a-space>
+          </a-form-item>
+        </a-form>
+      </div>
     </a-card>
 
     <a-card class="table-card" :bordered="true">
