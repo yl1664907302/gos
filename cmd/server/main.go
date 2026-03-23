@@ -171,8 +171,8 @@ func main() {
 		gitopsStatusQuery,
 		usecase.NewQueryGitOpsBindingTargets(gitopsService),
 		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
-		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsService),
-		usecase.NewQueryGitOpsValuesCandidates(repo, gitopsService),
+		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsInstanceManager),
+		usecase.NewQueryGitOpsValuesCandidates(repo, gitopsInstanceManager),
 		usecase.NewUpdateGitOpsCommitTemplate(
 			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
 			gitopsService,
@@ -204,7 +204,7 @@ func main() {
 		gitopsServiceFactory,
 		gitopsService,
 	)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, gitopsService)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, gitopsInstanceManager)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,

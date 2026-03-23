@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -215,6 +216,130 @@ func (uc *GitOpsInstanceManager) BuildServiceByID(ctx context.Context, id string
 		return domain.Instance{}, nil, fmt.Errorf("%w: gitops service factory is not configured", ErrInvalidInput)
 	}
 	return item, service, nil
+}
+
+func (uc *GitOpsInstanceManager) ListFieldCandidates(ctx context.Context, appKey string) ([]domain.FieldCandidate, error) {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
+		return nil, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return []domain.FieldCandidate{}, nil
+	}
+	instances, err := uc.repo.ListActiveInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.FieldCandidate, 0)
+	seen := make(map[string]struct{})
+	var firstErr error
+	for _, item := range instances {
+		service := uc.factory.Build(item)
+		if service == nil {
+			continue
+		}
+		candidates, scanErr := service.ListFieldCandidates(ctx, appKey)
+		if scanErr != nil {
+			logx.Warn("gitops_instance", "list_field_candidates_scan_failed",
+				logx.F("instance_id", item.ID),
+				logx.F("instance_code", item.InstanceCode),
+				logx.F("app_key", appKey),
+				logx.F("reason", scanErr.Error()),
+			)
+			if firstErr == nil {
+				firstErr = scanErr
+			}
+			continue
+		}
+		for _, candidate := range candidates {
+			key := strings.Join([]string{
+				strings.TrimSpace(candidate.FilePathTemplate),
+				strings.TrimSpace(candidate.DocumentKind),
+				strings.TrimSpace(candidate.DocumentName),
+				strings.TrimSpace(candidate.TargetPath),
+			}, "::")
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, candidate)
+		}
+	}
+	if len(result) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.Join([]string{result[i].FilePathTemplate, result[i].DocumentKind, result[i].DocumentName, result[i].TargetPath}, "::")
+		right := strings.Join([]string{result[j].FilePathTemplate, result[j].DocumentKind, result[j].DocumentName, result[j].TargetPath}, "::")
+		return left < right
+	})
+	logx.Info("gitops_instance", "list_field_candidates_success",
+		logx.F("app_key", appKey),
+		logx.F("instances_count", len(instances)),
+		logx.F("candidates_count", len(result)),
+	)
+	return result, nil
+}
+
+func (uc *GitOpsInstanceManager) ListValuesCandidates(ctx context.Context, appKey string) ([]domain.ValuesCandidate, error) {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
+		return nil, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return []domain.ValuesCandidate{}, nil
+	}
+	instances, err := uc.repo.ListActiveInstances(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]domain.ValuesCandidate, 0)
+	seen := make(map[string]struct{})
+	var firstErr error
+	for _, item := range instances {
+		service := uc.factory.Build(item)
+		if service == nil {
+			continue
+		}
+		candidates, scanErr := service.ListValuesCandidates(ctx, appKey)
+		if scanErr != nil {
+			logx.Warn("gitops_instance", "list_values_candidates_scan_failed",
+				logx.F("instance_id", item.ID),
+				logx.F("instance_code", item.InstanceCode),
+				logx.F("app_key", appKey),
+				logx.F("reason", scanErr.Error()),
+			)
+			if firstErr == nil {
+				firstErr = scanErr
+			}
+			continue
+		}
+		for _, candidate := range candidates {
+			key := strings.Join([]string{
+				strings.TrimSpace(candidate.FilePathTemplate),
+				strings.TrimSpace(candidate.TargetPath),
+			}, "::")
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			result = append(result, candidate)
+		}
+	}
+	if len(result) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.Join([]string{result[i].FilePathTemplate, result[i].TargetPath}, "::")
+		right := strings.Join([]string{result[j].FilePathTemplate, result[j].TargetPath}, "::")
+		return left < right
+	})
+	logx.Info("gitops_instance", "list_values_candidates_success",
+		logx.F("app_key", appKey),
+		logx.F("instances_count", len(instances)),
+		logx.F("candidates_count", len(result)),
+	)
+	return result, nil
 }
 
 func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstanceInput) (domain.Instance, error) {
