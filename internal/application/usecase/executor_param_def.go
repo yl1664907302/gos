@@ -167,6 +167,9 @@ func (uc *ExecutorParamDefManager) UpdateParamKey(ctx context.Context, id string
 	if platformParam.Status != platformparamdomain.StatusEnabled {
 		return domain.ExecutorParamDef{}, fmt.Errorf("%w: platform param dict is disabled", ErrInvalidInput)
 	}
+	if platformParam.CDSelfFill {
+		return domain.ExecutorParamDef{}, fmt.Errorf("%w: cd 自填字段不能映射到执行器参数", ErrInvalidInput)
+	}
 
 	return uc.repo.UpdateParamKey(ctx, id, normalized, uc.now())
 }

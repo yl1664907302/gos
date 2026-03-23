@@ -231,10 +231,12 @@ async function loadPlatformParamOptions(currentParamKey = '') {
       page: 1,
       page_size: 100,
     })
-    const options = response.data.map((item: PlatformParamDict) => ({
-      value: item.param_key,
-      label: `${item.name} (${item.param_key})`,
-    }))
+    const options = response.data
+      .filter((item: PlatformParamDict) => !item.cd_self_fill)
+      .map((item: PlatformParamDict) => ({
+        value: item.param_key,
+        label: `${item.name} (${item.param_key})`,
+      }))
     if (currentParamKey && !options.some((item) => item.value === currentParamKey)) {
       options.unshift({
         value: currentParamKey,

@@ -137,8 +137,6 @@ const bindingMapByScope = computed<Record<ReleasePipelineScope, ReleaseTemplateB
   cd: templateBindings.value.find((item) => item.pipeline_scope === 'cd' && item.enabled) || null,
 }))
 
-const isArgoCDCDTemplate = computed(() => bindingMapByScope.value.cd?.provider === 'argocd')
-
 const templateParamMetaByScope = computed<Record<ReleasePipelineScope, Record<string, ReleaseTemplateParam>>>(() => {
   const map: Record<ReleasePipelineScope, Record<string, ReleaseTemplateParam>> = {
     ci: {},
@@ -561,12 +559,8 @@ function useSelectForChoice(item: ExecutorParamDef) {
   return item.param_type === 'choice' && getChoiceMeta(item).options.length > 0
 }
 
-function isSingleValueProjectName(scope: ReleasePipelineScope, item: ExecutorParamDef) {
-  return isArgoCDCDTemplate.value && scope === 'ci' && String(item.param_key || '').trim().toLowerCase() === 'project_name'
-}
-
-function isMultipleChoice(scope: ReleasePipelineScope, item: ExecutorParamDef) {
-  return useSelectForChoice(item) && getChoiceMeta(item).multiple && !isSingleValueProjectName(scope, item)
+function isMultipleChoice(_scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  return useSelectForChoice(item) && getChoiceMeta(item).multiple
 }
 
 function splitByDelimiter(value: string, delimiter: string) {
@@ -630,9 +624,6 @@ function buildParamsPayload(): CreateReleaseOrderParamPayload[] {
       const label = resolveTemplateParamLabel(scope, item)
       if (item.required && !value) {
         throw new Error(`参数 ${label} 为必填，请填写发布值`)
-      }
-      if (isSingleValueProjectName(scope, item) && /,|，|\r|\n/.test(value)) {
-        throw new Error(`当前模板的 CD 使用 ArgoCD，参数 ${label} 当前仅支持单值，请只填写一个值`)
       }
       if (!value) {
         continue
@@ -862,13 +853,7 @@ onMounted(async () => {
                       class="param-value-control"
                       :value="getChoiceSingleValue(item.scope, param)"
                       :options="getChoiceMeta(param).options"
-                      :placeholder="
-                        isSingleValueProjectName(item.scope, param)
-                          ? '当前按单值处理，请只选择一个项目'
-                          : param.required
-                            ? '必填，请选择发布值'
-                            : '选填，留空将不下发'
-                      "
+                      :placeholder="param.required ? '必填，请选择发布值' : '选填，留空将不下发'"
                       allow-clear
                       @change="handleChoiceSingleChange(param, $event)"
                     />
@@ -876,19 +861,10 @@ onMounted(async () => {
                       v-else
                       :value="paramValues[param.id]"
                       class="param-value-control"
-                      :placeholder="
-                        isSingleValueProjectName(item.scope, param)
-                          ? '当前按单值处理，请输入单个项目名'
-                          : param.required
-                            ? '必填，请输入发布值'
-                            : '选填，留空将不下发'
-                      "
+                      :placeholder="param.required ? '必填，请输入发布值' : '选填，留空将不下发'"
                       allow-clear
                       @update:value="handleParamValueInput(param, String($event || ''))"
                     />
-                    <div v-if="isSingleValueProjectName(item.scope, param)" class="param-helper">
-                      当前模板的 CD 使用 ArgoCD，该参数当前按单值方式填写。
-                    </div>
                   </a-form-item>
                 </a-col>
               </a-row>

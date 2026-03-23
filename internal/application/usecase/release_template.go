@@ -675,6 +675,10 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 	if err != nil {
 		return nil, err
 	}
+	cdInputParams, err := uc.listCDInputPlatformParamsForTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
 	ciParams := make(map[string]releasedomain.ReleaseTemplateParam)
 	for _, item := range params {
 		if item.PipelineScope != releasedomain.PipelineScopeCI {
@@ -699,6 +703,8 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 		if sourceFrom == "" {
 			if _, ok := ciParams[paramKey]; ok {
 				sourceFrom = releasedomain.GitOpsRuleSourceCI
+			} else if _, ok := cdInputParams[paramKey]; ok {
+				sourceFrom = releasedomain.GitOpsRuleSourceCDInput
 			} else if _, ok := builtinParams[paramKey]; ok {
 				sourceFrom = releasedomain.GitOpsRuleSourceBuiltin
 			}
@@ -715,6 +721,12 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 				return nil, fmt.Errorf("%w: gitops 替换规则只能引用 ci 中已勾选的标准字段：%s", ErrInvalidInput, paramKey)
 			}
 			sourceName = firstNonEmpty(param.ParamName, paramKey)
+		case releasedomain.GitOpsRuleSourceCDInput:
+			dict, ok := cdInputParams[paramKey]
+			if !ok {
+				return nil, fmt.Errorf("%w: gitops 替换规则只能引用已启用的 CD 自填字段：%s", ErrInvalidInput, paramKey)
+			}
+			sourceName = firstNonEmpty(dict.Name, paramKey)
 		case releasedomain.GitOpsRuleSourceBuiltin:
 			dict, ok := builtinParams[paramKey]
 			if !ok {
@@ -794,8 +806,11 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 		seen[seenKey] = struct{}{}
 
 		valueTemplate := strings.TrimSpace(input.ValueTemplate)
-		if valueTemplate == "" {
+		if valueTemplate == "" && sourceFrom != releasedomain.GitOpsRuleSourceCDInput {
 			valueTemplate = "{" + paramKey + "}"
+		}
+		if sourceFrom == releasedomain.GitOpsRuleSourceCDInput && valueTemplate == "" {
+			return nil, fmt.Errorf("%w: CD 自填字段必须在模板里填写固定值", ErrInvalidInput)
 		}
 
 		result = append(result, releasedomain.ReleaseTemplateGitOpsRule{
@@ -827,6 +842,31 @@ func (uc *ReleaseTemplateManager) listBuiltinPlatformParamsForTemplate(
 		Status:   &status,
 		Page:     1,
 		PageSize: 500,
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]platformparamdomain.PlatformParamDict, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		result[key] = item
+	}
+	return result, nil
+}
+
+func (uc *ReleaseTemplateManager) listCDInputPlatformParamsForTemplate(
+	ctx context.Context,
+) (map[string]platformparamdomain.PlatformParamDict, error) {
+	cdSelfFill := true
+	status := platformparamdomain.StatusEnabled
+	items, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
+		CDSelfFill: &cdSelfFill,
+		Status:     &status,
+		Page:       1,
+		PageSize:   500,
 	})
 	if err != nil {
 		return nil, err

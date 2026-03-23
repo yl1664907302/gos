@@ -251,7 +251,7 @@ export interface ReleaseTemplateParam {
   updated_at: string
 }
 
-export type ReleaseTemplateGitOpsRuleSourceFrom = 'ci' | 'builtin'
+export type ReleaseTemplateGitOpsRuleSourceFrom = 'ci' | 'builtin' | 'cd_input'
 export type ReleaseTemplateGitOpsType = '' | 'kustomize' | 'helm'
 
 export interface ReleaseTemplateGitOpsRule {

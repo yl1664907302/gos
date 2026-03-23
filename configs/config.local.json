@@ -60,8 +60,7 @@
   "release": {
     "env_options": [
       "dev",
-      "prod",
-      "test"
+      "prod"
     ]
   },
   "server": {

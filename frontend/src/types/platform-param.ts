@@ -9,6 +9,7 @@ export interface PlatformParamDict {
   param_type: PlatformParamType
   required: boolean
   gitops_locator: boolean
+  cd_self_fill: boolean
   builtin: boolean
   status: PlatformParamStatus
   created_at: string
@@ -22,6 +23,7 @@ export interface PlatformParamDictPayload {
   param_type: PlatformParamType
   required: boolean
   gitops_locator: boolean
+  cd_self_fill: boolean
   status: PlatformParamStatus
 }
 

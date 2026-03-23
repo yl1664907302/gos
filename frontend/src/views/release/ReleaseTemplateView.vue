@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CopyOutlined, ExclamationCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
@@ -16,6 +16,7 @@ import {
   updateReleaseTemplate,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
+import type { Application } from '../../types/application'
 import type { PipelineBinding, ExecutorParamDef } from '../../types/pipeline'
 import type { GitOpsFieldCandidate, GitOpsValuesCandidate } from '../../types/gitops'
 import type { PlatformParamDict } from '../../types/platform-param'
@@ -66,7 +67,7 @@ interface BindingOption {
 interface GitOpsRuleFormItem {
   local_id: string
   source_param_key: string
-  source_from: 'ci' | 'builtin'
+  source_from: 'ci' | 'builtin' | 'cd_input'
   file_path_template: string
   document_kind: string
   document_name: string
@@ -116,6 +117,7 @@ const filters = reactive({
   pageSize: 20,
 })
 
+const applicationRecords = ref<Application[]>([])
 const applicationOptions = ref<SelectOption[]>([])
 const bindingOptions = ref<BindingOption[]>([])
 const loadingBindings = ref(false)
@@ -127,6 +129,9 @@ const loadingGitOpsFieldCandidates = ref(false)
 const gitopsRules = ref<GitOpsRuleFormItem[]>([])
 const gitOpsType = ref<ReleaseTemplateGitOpsType>('kustomize')
 const cdMode = ref<CDMode>('argocd')
+const argocdInfoActiveKeys = ref<string[]>([])
+const releasePageGuideActiveKeys = ref<string[]>([])
+const gitopsRuleActiveKeys = ref<string[]>([])
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -203,7 +208,43 @@ const gitOpsSourceOptions = computed<SelectOption[]>(() => {
     })
   })
 
+  platformParamDicts.value.forEach((item) => {
+    const key = String(item.param_key || '').trim().toLowerCase()
+    if (!item.cd_self_fill || item.status !== 1 || !key || seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    options.push({
+      label: `${item.name} (${key}) · CD 自填字段`,
+      value: key,
+    })
+  })
+
   return options
+})
+
+const selectedApplicationRecord = computed(() =>
+  applicationRecords.value.find((item) => item.id === formState.application_id.trim()) || null,
+)
+
+const argocdInstallCommand = computed(() => {
+  const appKey = selectedApplicationRecord.value?.key?.trim() || 'java-nantong-test'
+  const serviceName = 'gateway'
+  const env = 'dev'
+  const repoURL = 'http://192.168.1.195/sre/deploy-manifests.git'
+  const namespace = 'nantong-20'
+  return [
+    `argocd app create ${appKey}-${env}-${serviceName} \\`,
+    `  --repo ${repoURL} \\`,
+    `  --path apps/${appKey}/helm \\`,
+    `  --dest-server https://kubernetes.default.svc \\`,
+    `  --dest-namespace ${namespace} \\`,
+    `  --project default \\`,
+    `  --helm-set-string fullnameOverride=${serviceName} \\`,
+    `  --values values-${env}.yaml \\`,
+    `  --values ${serviceName}.values-${env}.yaml \\`,
+    `  --values platform.values-${env}.yaml`,
+  ].join('\n')
 })
 
 function selectedBinding(scope: ReleasePipelineScope) {
@@ -225,6 +266,10 @@ function normalizedGitOpsType(type?: string): ReleaseTemplateGitOpsType {
 
 function isHelmGitOps() {
   return isCDUsingArgoCD() && normalizedGitOpsType(gitOpsType.value) === 'helm'
+}
+
+function isUnsupportedKustomizeGitOps() {
+  return isCDUsingArgoCD() && normalizedGitOpsType(gitOpsType.value) === 'kustomize'
 }
 
 function statusColor(status: ReleaseTemplateStatus) {
@@ -253,14 +298,25 @@ function createGitOpsRuleFormItem(partial?: Partial<GitOpsRuleFormItem>): GitOps
     document_kind: String(partial?.document_kind || '').trim(),
     document_name: String(partial?.document_name || '').trim(),
     target_path: String(partial?.target_path || '').trim(),
-    value_template: String(partial?.value_template || (sourceKey ? `{${sourceKey}}` : '')).trim(),
+    value_template: String(
+      partial?.value_template ||
+        (sourceKey && partial?.source_from !== 'cd_input' && resolveGitOpsRuleSourceFrom(sourceKey) !== 'cd_input'
+          ? `{${sourceKey}}`
+          : ''),
+    ).trim(),
   }
 }
 
-function resolveGitOpsRuleSourceFrom(paramKey: string): 'ci' | 'builtin' {
+function resolveGitOpsRuleSourceFrom(paramKey: string): 'ci' | 'builtin' | 'cd_input' {
   const normalized = String(paramKey || '').trim().toLowerCase()
   if (!normalized) {
     return 'ci'
+  }
+  const manualItem = platformParamDicts.value.find(
+    (item) => String(item.param_key || '').trim().toLowerCase() === normalized && item.cd_self_fill && item.status === 1,
+  )
+  if (manualItem) {
+    return 'cd_input'
   }
   const selectedCIParamIDs = new Set(scopeStates.ci.selected_param_def_ids)
   const fromCI = scopeStates.ci.selectable_params.some(
@@ -416,6 +472,32 @@ function resolveGitOpsSourceLabel(paramKey: string) {
   return gitOpsSourceOptions.value.find((item) => item.value === normalized)?.label || `${resolvePlatformParamName(normalized)} (${normalized})`
 }
 
+function gitOpsRuleUsesCDInput(rule: GitOpsRuleFormItem) {
+  return rule.source_from === 'cd_input'
+}
+
+function resolveGitOpsValueTemplatePlaceholder(rule: GitOpsRuleFormItem) {
+  if (gitOpsRuleUsesCDInput(rule)) {
+    return '请填写 CD 固定值，例如 registry.example.com/app:stable'
+  }
+  return isHelmGitOps() ? '默认会使用 {标准Key}，例如 {image_version}' : '默认会使用 {标准Key}，例如 {param_key}-config'
+}
+
+function resolveArgoCDModeDescription() {
+  return isHelmGitOps()
+    ? '当前 GitOps 类型为 Helm。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例，并按规则修改 Helm values 文件后触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
+    : '当前 GitOps 类型为 Kustomize。该模式当前在模板页暂不支持配置，请先切换到 Helm。'
+}
+
+async function copyArgoCDInstallCommand() {
+  try {
+    await navigator.clipboard.writeText(argocdInstallCommand.value)
+    message.success('ArgoCD 创建命令已复制')
+  } catch {
+    message.error('复制失败，请手工复制命令')
+  }
+}
+
 function matchesGitOpsRuleCandidate(rule: GitOpsRuleFormItem, candidate: GitOpsFieldCandidate) {
   return (
     candidate.file_path_template === rule.file_path_template &&
@@ -472,6 +554,19 @@ function formatGitOpsRuleTargetSummary(rule: GitOpsRuleFormItem) {
   }
 }
 
+function formatGitOpsRulePanelTitle(rule: GitOpsRuleFormItem) {
+  const source = resolveGitOpsSourceLabel(rule.source_param_key)
+  const target = formatGitOpsRuleTargetSummary(rule)
+  return `${source} -> ${target.path}`
+}
+
+function formatGitOpsRulePanelDescription(rule: GitOpsRuleFormItem) {
+  const target = formatGitOpsRuleTargetSummary(rule)
+  return isHelmGitOps()
+    ? `${pathBaseName(target.file)} · ${target.sample}`
+    : `${target.title} · ${pathBaseName(target.file)}`
+}
+
 function resetScopeState(scope: ReleasePipelineScope) {
   scopeStates[scope].binding_id = ''
   scopeStates[scope].selected_param_def_ids = []
@@ -495,6 +590,8 @@ function resetFormState() {
   gitopsRules.value = []
   gitOpsType.value = 'kustomize'
   cdMode.value = 'argocd'
+  argocdInfoActiveKeys.value = []
+  gitopsRuleActiveKeys.value = []
 }
 
 function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGitOpsRulePayload {
@@ -604,6 +701,7 @@ async function loadGitOpsValuesCandidates(applicationID: string, silent = false)
 async function loadApplications() {
   try {
     const response = await listApplications({ page: 1, page_size: 200 })
+    applicationRecords.value = response.data
     applicationOptions.value = response.data.map((item) => ({
       label: `${item.name} (${item.key})`,
       value: item.id,
@@ -784,11 +882,14 @@ function getRowSelection(scope: ReleasePipelineScope) {
 }
 
 function addGitOpsRule() {
-  gitopsRules.value.push(createGitOpsRuleFormItem())
+  const item = createGitOpsRuleFormItem()
+  gitopsRules.value.push(item)
+  gitopsRuleActiveKeys.value = []
 }
 
 function removeGitOpsRule(localID: string) {
   gitopsRules.value = gitopsRules.value.filter((item) => item.local_id !== localID)
+  gitopsRuleActiveKeys.value = gitopsRuleActiveKeys.value.filter((item) => item !== localID)
 }
 
 function handleGitOpsRuleSourceChange(rule: GitOpsRuleFormItem, value: string | undefined) {
@@ -796,6 +897,12 @@ function handleGitOpsRuleSourceChange(rule: GitOpsRuleFormItem, value: string | 
   const previousTemplate = `{${rule.source_param_key}}`
   rule.source_param_key = nextKey
   rule.source_from = resolveGitOpsRuleSourceFrom(nextKey)
+  if (rule.source_from === 'cd_input') {
+    if (!rule.value_template || rule.value_template === previousTemplate) {
+      rule.value_template = ''
+    }
+    return
+  }
   if (!rule.value_template || rule.value_template === previousTemplate) {
     rule.value_template = nextKey ? `{${nextKey}}` : ''
   }
@@ -943,6 +1050,7 @@ async function openEditModal(record: ReleaseTemplate) {
         value_template: item.value_template,
       }),
     )
+    gitopsRuleActiveKeys.value = []
     if (gitopsRules.value.some((item) => formatGitOpsRuleTargetSummary(item).stale)) {
       message.warning(
         isHelmGitOps()
@@ -984,9 +1092,15 @@ function validateScopeState() {
     }
   }
   if (isCDUsingArgoCD()) {
+    if (isUnsupportedKustomizeGitOps()) {
+      throw new Error('Kustomize 模式暂不支持，请先切换到 Helm')
+    }
     for (const item of gitopsRules.value) {
       if (!item.source_param_key.trim()) {
         throw new Error('请为 GitOps 替换规则选择标准字段')
+      }
+      if (gitOpsRuleUsesCDInput(item) && !item.value_template.trim()) {
+        throw new Error(`请为 CD 自填字段 ${resolvePlatformParamName(item.source_param_key)} 填写固定值`)
       }
       if (isHelmGitOps()) {
         if (!item.file_path_template.trim() || !item.target_path.trim()) {
@@ -1064,6 +1178,32 @@ onMounted(async () => {
         新增发布模板
       </a-button>
     </div>
+
+    <a-collapse v-model:activeKey="releasePageGuideActiveKeys" class="release-page-guide-collapse" ghost>
+      <a-collapse-panel key="install-guide">
+        <template #header>
+          <div class="collapse-header-block">
+            <div class="collapse-header-title">异地集群创建 ArgoCD Application 示例</div>
+            <div class="collapse-header-subtitle">
+              网络不通的目标集群，可先在目标侧 ArgoCD 创建 Application，再由平台改 GitOps 并触发 Sync。
+            </div>
+          </div>
+        </template>
+        <div class="argocd-install-panel">
+          <div class="argocd-install-header">
+            <div class="argocd-install-subtitle">
+              如果目标 K8s 集群与发布平台网络不通，需要先在目标集群侧可访问的 ArgoCD 环境里执行一次 `argocd app create`，
+              让该集群先拥有对应的 Application。平台后续发布时只负责改 GitOps 配置并触发 Sync。
+            </div>
+            <a-button size="small" @click.stop="copyArgoCDInstallCommand">
+              <template #icon><CopyOutlined /></template>
+              复制命令
+            </a-button>
+          </div>
+          <pre class="argocd-install-code"><code>{{ argocdInstallCommand }}</code></pre>
+        </div>
+      </a-collapse-panel>
+    </a-collapse>
 
     <a-card class="filter-card" :bordered="true">
       <a-form layout="inline" class="filter-form">
@@ -1284,16 +1424,21 @@ onMounted(async () => {
                 />
               </a-form-item>
 
-              <a-alert
-                v-if="isCDUsingArgoCD()"
-                class="scope-binding-alert"
-                type="warning"
-                show-icon
-                message="当前模板的 CD 方式为 ArgoCD。"
-                :description="isHelmGitOps()
-                  ? '当前 GitOps 类型为 Helm。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例，并按规则修改 Helm values 文件后触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
-                  : '当前 GitOps 类型为 Kustomize。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例；你只需要从左侧 CI 已勾选的标准字段中选择要引用的 Key，再为它绑定 GitOps YAML 字段。系统内置字段也可以直接引用。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'"
-              />
+              <a-collapse v-if="isCDUsingArgoCD()" v-model:activeKey="argocdInfoActiveKeys" class="argocd-info-collapse" ghost>
+                <a-collapse-panel key="argocd-info">
+                  <template #header>
+                    <div class="collapse-header-block">
+                      <div class="collapse-header-title">当前模板的 CD 方式为 ArgoCD</div>
+                      <div class="collapse-header-subtitle">
+                        {{ isHelmGitOps() ? 'GitOps 类型：Helm' : 'GitOps 类型：Kustomize' }}
+                      </div>
+                    </div>
+                  </template>
+                  <div class="argocd-info-panel">
+                    {{ resolveArgoCDModeDescription() }}
+                  </div>
+                </a-collapse-panel>
+              </a-collapse>
               <a-alert
                 v-else-if="isCDUsingPipeline() && selectedBinding('cd')"
                 class="scope-binding-alert"
@@ -1314,17 +1459,30 @@ onMounted(async () => {
                   />
                 </a-form-item>
 
+                <a-result
+                  v-if="isUnsupportedKustomizeGitOps()"
+                  class="gitops-unsupported-result"
+                  status="warning"
+                  title="Kustomize 暂不支持"
+                  sub-title="当前模板页暂不支持 Kustomize 规则配置，请先切换到 Helm。"
+                />
+
+                <template v-else>
                 <div class="gitops-rule-header">
                   <div>
                     <div class="gitops-rule-title">GitOps 替换规则</div>
                     <div class="gitops-rule-subtitle">
                       {{
                         isHelmGitOps()
-                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；推荐优先落到 platform.values-{env}.yaml，运行时平台只负责写回这些受控键路径。'
-                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；发布执行时平台会结合 env 自动命中对应的 ArgoCD 实例。'
+                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；支持 CI 已勾选字段、系统内置字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
+                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；支持 CI 已勾选字段、系统内置字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
                       }}
                     </div>
                   </div>
+                  <a-tag color="processing">{{ gitopsRules.length }} 条规则</a-tag>
+                </div>
+
+                <div class="gitops-rule-toolbar">
                   <a-space>
                     <a-button size="small" :loading="loadingGitOpsFieldCandidates" @click="reloadCurrentGitOpsCandidates">
                       <template #icon><ReloadOutlined /></template>
@@ -1341,126 +1499,140 @@ onMounted(async () => {
                     : '当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好。'"
                 />
 
-                <div v-for="rule in gitopsRules" :key="rule.local_id" class="gitops-rule-item">
-                  <div class="gitops-rule-item-header">
-                    <div class="gitops-rule-item-title">规则 {{ gitopsRules.findIndex((item) => item.local_id === rule.local_id) + 1 }}</div>
-                    <a-button danger type="link" @click="removeGitOpsRule(rule.local_id)">删除</a-button>
-                  </div>
+                <a-collapse v-model:activeKey="gitopsRuleActiveKeys" class="gitops-rule-collapse" accordion>
+                  <a-collapse-panel v-for="rule in gitopsRules" :key="rule.local_id">
+                    <template #header>
+                      <div class="collapse-header-block">
+                        <div class="collapse-header-title">
+                          规则 {{ gitopsRules.findIndex((item) => item.local_id === rule.local_id) + 1 }}：{{ formatGitOpsRulePanelTitle(rule) }}
+                        </div>
+                        <div class="collapse-header-subtitle">
+                          {{ formatGitOpsRulePanelDescription(rule) }}
+                        </div>
+                      </div>
+                    </template>
+                    <template #extra>
+                      <a-button danger type="link" @click.stop="removeGitOpsRule(rule.local_id)">删除</a-button>
+                    </template>
 
-                  <a-row :gutter="12">
-                    <a-col :span="24">
-                      <a-form-item label="标准字段">
-                        <a-select
-                          :value="rule.source_param_key || undefined"
-                          show-search
+                    <div class="gitops-rule-item">
+                      <a-row :gutter="12">
+                        <a-col :span="24">
+                          <a-form-item label="标准字段">
+                            <a-select
+                              :value="rule.source_param_key || undefined"
+                              show-search
+                              allow-clear
+                              option-filter-prop="label"
+                              placeholder="请选择 CI 已勾选字段、系统内置字段或 CD 自填字段"
+                              :options="gitOpsSourceOptions"
+                              @change="(value: string | undefined) => handleGitOpsRuleSourceChange(rule, value)"
+                            />
+                          </a-form-item>
+                        </a-col>
+                      </a-row>
+
+                      <div class="gitops-rule-source-tip">
+                        当前来源：{{ resolveGitOpsSourceLabel(rule.source_param_key) }}
+                      </div>
+
+                      <div class="gitops-target-preview">
+                        <div class="gitops-target-preview-header">
+                          <div class="gitops-target-preview-title">{{ isHelmGitOps() ? 'Values 目标路径' : 'YAML 目标字段' }}</div>
+                          <a-tag :color="formatGitOpsRuleTargetSummary(rule).stale ? 'error' : 'processing'">
+                            {{ formatGitOpsRuleTargetSummary(rule).stale ? '字段已变化' : '字段有效' }}
+                          </a-tag>
+                        </div>
+                        <a-row v-if="isHelmGitOps()" :gutter="12" class="gitops-target-select-row">
+                          <a-col :span="24">
+                            <a-form-item label="目标文件" class="gitops-inline-item">
+                              <a-input :value="pathBaseName(rule.file_path_template || valuesFileOptions()[0]?.value || 'platform.values-{env}.yaml')" readonly />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="24">
+                            <a-form-item label="Values 路径" class="gitops-inline-item">
+                              <a-select
+                                :value="rule.target_path ? JSON.stringify({ file_path_template: rule.file_path_template, target_path: rule.target_path }) : undefined"
+                                allow-clear
+                                show-search
+                                option-filter-prop="label"
+                                placeholder="请选择 Values 路径"
+                                :options="valuesPathOptions(rule)"
+                                @change="(value: string | undefined) => handleValuesTargetPathChange(rule, value)"
+                              />
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+                        <a-row v-else :gutter="12" class="gitops-target-select-row">
+                          <a-col :span="8">
+                            <a-form-item label="目标文件" class="gitops-inline-item">
+                              <a-select
+                                :value="rule.file_path_template || undefined"
+                                allow-clear
+                                show-search
+                                option-filter-prop="label"
+                                placeholder="请选择 YAML 文件"
+                                :options="yamlFileOptions(rule)"
+                                @change="(value: string | undefined) => handleYamlFileTemplateChange(rule, value)"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="8">
+                            <a-form-item label="目标资源" class="gitops-inline-item">
+                              <a-select
+                                :value="selectedYamlDocumentValue(rule)"
+                                allow-clear
+                                show-search
+                                option-filter-prop="label"
+                                placeholder="请选择资源"
+                                :options="yamlDocumentOptions(rule)"
+                                :disabled="!rule.file_path_template"
+                                @change="(value: string | undefined) => handleYamlDocumentChange(rule, value)"
+                              />
+                            </a-form-item>
+                          </a-col>
+                          <a-col :span="8">
+                            <a-form-item label="目标字段" class="gitops-inline-item">
+                              <a-select
+                                :value="rule.target_path || undefined"
+                                allow-clear
+                                show-search
+                                option-filter-prop="label"
+                                placeholder="请选择字段路径"
+                                :options="yamlFieldOptions(rule)"
+                                :disabled="!rule.file_path_template || !rule.document_kind"
+                                @change="(value: string | undefined) => handleYamlTargetPathChange(rule, value)"
+                              />
+                            </a-form-item>
+                          </a-col>
+                        </a-row>
+                        <a-descriptions :column="1" size="small" bordered>
+                          <a-descriptions-item :label="isHelmGitOps() ? '类型' : '资源'">
+                            {{ formatGitOpsRuleTargetSummary(rule).title }}
+                          </a-descriptions-item>
+                          <a-descriptions-item :label="isHelmGitOps() ? 'Values 文件模版' : '文件'">
+                            <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).file }}</span>
+                          </a-descriptions-item>
+                          <a-descriptions-item :label="isHelmGitOps() ? 'Values 路径' : '字段路径'">
+                            <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).path }}</span>
+                          </a-descriptions-item>
+                          <a-descriptions-item label="当前示例值">
+                            <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).sample }}</span>
+                          </a-descriptions-item>
+                        </a-descriptions>
+                      </div>
+
+                      <a-form-item label="取值模版">
+                        <a-input
+                          v-model:value="rule.value_template"
                           allow-clear
-                          option-filter-prop="label"
-                          placeholder="请选择 CI 已勾选字段或系统内置字段"
-                          :options="gitOpsSourceOptions"
-                          @change="(value: string | undefined) => handleGitOpsRuleSourceChange(rule, value)"
+                          :placeholder="resolveGitOpsValueTemplatePlaceholder(rule)"
                         />
                       </a-form-item>
-                    </a-col>
-                  </a-row>
-
-                  <div class="gitops-rule-source-tip">
-                    当前来源：{{ resolveGitOpsSourceLabel(rule.source_param_key) }}
-                  </div>
-
-                  <div class="gitops-target-preview">
-                    <div class="gitops-target-preview-header">
-                      <div class="gitops-target-preview-title">{{ isHelmGitOps() ? 'Values 目标路径' : 'YAML 目标字段' }}</div>
-                      <a-tag :color="formatGitOpsRuleTargetSummary(rule).stale ? 'error' : 'processing'">
-                        {{ formatGitOpsRuleTargetSummary(rule).stale ? '字段已变化' : '字段有效' }}
-                      </a-tag>
                     </div>
-                    <a-row v-if="isHelmGitOps()" :gutter="12" class="gitops-target-select-row">
-                      <a-col :span="24">
-                        <a-form-item label="目标文件" class="gitops-inline-item">
-                          <a-input :value="pathBaseName(rule.file_path_template || valuesFileOptions()[0]?.value || 'platform.values-{env}.yaml')" readonly />
-                        </a-form-item>
-                      </a-col>
-                      <a-col :span="24">
-                        <a-form-item label="Values 路径" class="gitops-inline-item">
-                          <a-select
-                            :value="rule.target_path ? JSON.stringify({ file_path_template: rule.file_path_template, target_path: rule.target_path }) : undefined"
-                            allow-clear
-                            show-search
-                            option-filter-prop="label"
-                            placeholder="请选择 Values 路径"
-                            :options="valuesPathOptions(rule)"
-                            @change="(value: string | undefined) => handleValuesTargetPathChange(rule, value)"
-                          />
-                        </a-form-item>
-                      </a-col>
-                    </a-row>
-                    <a-row v-else :gutter="12" class="gitops-target-select-row">
-                      <a-col :span="8">
-                        <a-form-item label="目标文件" class="gitops-inline-item">
-                          <a-select
-                            :value="rule.file_path_template || undefined"
-                            allow-clear
-                            show-search
-                            option-filter-prop="label"
-                            placeholder="请选择 YAML 文件"
-                            :options="yamlFileOptions(rule)"
-                            @change="(value: string | undefined) => handleYamlFileTemplateChange(rule, value)"
-                          />
-                        </a-form-item>
-                      </a-col>
-                      <a-col :span="8">
-                        <a-form-item label="目标资源" class="gitops-inline-item">
-                          <a-select
-                            :value="selectedYamlDocumentValue(rule)"
-                            allow-clear
-                            show-search
-                            option-filter-prop="label"
-                            placeholder="请选择资源"
-                            :options="yamlDocumentOptions(rule)"
-                            :disabled="!rule.file_path_template"
-                            @change="(value: string | undefined) => handleYamlDocumentChange(rule, value)"
-                          />
-                        </a-form-item>
-                      </a-col>
-                      <a-col :span="8">
-                        <a-form-item label="目标字段" class="gitops-inline-item">
-                          <a-select
-                            :value="rule.target_path || undefined"
-                            allow-clear
-                            show-search
-                            option-filter-prop="label"
-                            placeholder="请选择字段路径"
-                            :options="yamlFieldOptions(rule)"
-                            :disabled="!rule.file_path_template || !rule.document_kind"
-                            @change="(value: string | undefined) => handleYamlTargetPathChange(rule, value)"
-                          />
-                        </a-form-item>
-                      </a-col>
-                    </a-row>
-                    <a-descriptions :column="1" size="small" bordered>
-                      <a-descriptions-item :label="isHelmGitOps() ? '类型' : '资源'">
-                        {{ formatGitOpsRuleTargetSummary(rule).title }}
-                      </a-descriptions-item>
-                      <a-descriptions-item :label="isHelmGitOps() ? 'Values 文件模版' : '文件'">
-                        <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).file }}</span>
-                      </a-descriptions-item>
-                      <a-descriptions-item :label="isHelmGitOps() ? 'Values 路径' : '字段路径'">
-                        <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).path }}</span>
-                      </a-descriptions-item>
-                      <a-descriptions-item label="当前示例值">
-                        <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).sample }}</span>
-                      </a-descriptions-item>
-                    </a-descriptions>
-                  </div>
-
-                  <a-form-item label="取值模版">
-                    <a-input
-                      v-model:value="rule.value_template"
-                      allow-clear
-                      :placeholder="isHelmGitOps() ? '默认会使用 {标准Key}，例如 {image_version}' : '默认会使用 {标准Key}，例如 {param_key}-config'"
-                    />
-                  </a-form-item>
-                </div>
+                  </a-collapse-panel>
+                </a-collapse>
+                </template>
               </div>
 
             </a-card>
@@ -1504,6 +1676,12 @@ onMounted(async () => {
   width: 260px;
 }
 
+.release-page-guide-collapse {
+  margin-bottom: 16px;
+  border-radius: var(--radius-xl);
+  background: #fff;
+}
+
 .pagination-area {
   margin-top: var(--space-6);
   display: flex;
@@ -1519,6 +1697,88 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
+.collapse-header-block {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.collapse-header-title {
+  font-weight: 600;
+  color: #111827;
+}
+
+.collapse-header-subtitle {
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.argocd-info-collapse,
+.gitops-rule-collapse {
+  border-radius: 12px;
+  background: #fff;
+}
+
+.argocd-info-collapse {
+  margin-bottom: 12px;
+}
+
+.argocd-info-panel,
+.argocd-install-panel {
+  padding: 4px 0 0;
+}
+
+.release-page-guide-collapse :deep(.ant-collapse-header),
+.argocd-info-collapse :deep(.ant-collapse-header),
+.gitops-rule-collapse :deep(.ant-collapse-header) {
+  align-items: flex-start !important;
+}
+
+.release-page-guide-collapse :deep(.ant-collapse-content-box),
+.argocd-info-collapse :deep(.ant-collapse-content-box),
+.gitops-rule-collapse :deep(.ant-collapse-content-box) {
+  padding-top: 0 !important;
+}
+
+.argocd-info-panel {
+  font-size: 13px;
+  line-height: 1.8;
+  color: #475569;
+}
+
+.argocd-install-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.argocd-install-title {
+  margin-bottom: 4px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.argocd-install-subtitle {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #475569;
+}
+
+.argocd-install-code {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
 .scope-table-wrapper {
   min-height: 320px;
 }
@@ -1529,11 +1789,23 @@ onMounted(async () => {
   gap: 12px;
 }
 
+.gitops-unsupported-result {
+  margin-top: 8px;
+  border: 1px dashed #f5c16c;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fffdf5 0%, #fff7e6 100%);
+}
+
 .gitops-rule-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.gitops-rule-toolbar {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .gitops-rule-title {

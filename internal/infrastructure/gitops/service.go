@@ -983,6 +983,53 @@ func (s *Service) runCommand(ctx context.Context, workspacePath string, name str
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	lockMaxAge := timeout
+	if lockMaxAge < 60*time.Second {
+		lockMaxAge = 60 * time.Second
+	}
+	if name == "git" && strings.TrimSpace(workspacePath) != "" {
+		_, _ = recoverStaleGitIndexLock(workspacePath, lockMaxAge)
+	}
+	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, name, args...)
+	cmd.Dir = workspacePath
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = strings.TrimSpace(stdout.String())
+		}
+		if message == "" {
+			message = err.Error()
+		}
+		if name == "git" && strings.TrimSpace(workspacePath) != "" && isGitIndexLockError(message) {
+			cleared, clearErr := recoverStaleGitIndexLock(workspacePath, 0)
+			if clearErr != nil {
+				logx.Warn("gitops_service", "git_index_lock_cleanup_failed",
+					logx.F("workspace_path", workspacePath),
+					logx.F("reason", clearErr.Error()),
+				)
+			}
+			if cleared {
+				logx.Warn("gitops_service", "git_index_lock_retry",
+					logx.F("workspace_path", workspacePath),
+					logx.F("command", name),
+					logx.F("args", strings.Join(args, " ")),
+				)
+				return s.runCommandWithoutRetry(ctx, workspacePath, timeout, name, args...)
+			}
+		}
+		return "", fmt.Errorf("%s %s failed: %s", name, strings.Join(args, " "), message)
+	}
+	return stdout.String(), nil
+}
+
+func (s *Service) runCommandWithoutRetry(ctx context.Context, workspacePath string, timeout time.Duration, name string, args ...string) (string, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -1003,6 +1050,29 @@ func (s *Service) runCommand(ctx context.Context, workspacePath string, name str
 		return "", fmt.Errorf("%s %s failed: %s", name, strings.Join(args, " "), message)
 	}
 	return stdout.String(), nil
+}
+
+func recoverStaleGitIndexLock(workspacePath string, maxAge time.Duration) (bool, error) {
+	lockPath := filepath.Join(strings.TrimSpace(workspacePath), ".git", "index.lock")
+	info, err := os.Stat(lockPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if maxAge > 0 && time.Since(info.ModTime()) < maxAge {
+		return false, nil
+	}
+	if err := os.Remove(lockPath); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isGitIndexLockError(message string) bool {
+	text := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(text, "index.lock") && strings.Contains(text, "file exists")
 }
 
 func repoWorkspaceName(repoURL string) string {

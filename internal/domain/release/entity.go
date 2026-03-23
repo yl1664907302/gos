@@ -344,11 +344,12 @@ type GitOpsRuleSourceFrom string
 const (
 	GitOpsRuleSourceCI      GitOpsRuleSourceFrom = "ci"
 	GitOpsRuleSourceBuiltin GitOpsRuleSourceFrom = "builtin"
+	GitOpsRuleSourceCDInput GitOpsRuleSourceFrom = "cd_input"
 )
 
 func (s GitOpsRuleSourceFrom) Valid() bool {
 	switch s {
-	case GitOpsRuleSourceCI, GitOpsRuleSourceBuiltin:
+	case GitOpsRuleSourceCI, GitOpsRuleSourceBuiltin, GitOpsRuleSourceCDInput:
 		return true
 	default:
 		return false

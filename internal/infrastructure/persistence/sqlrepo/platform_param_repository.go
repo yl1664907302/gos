@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 	param_type VARCHAR(50) NOT NULL,
 	required TINYINT(1) NOT NULL,
 	gitops_locator TINYINT(1) NOT NULL DEFAULT 0,
+	cd_self_fill TINYINT(1) NOT NULL DEFAULT 0,
 	builtin TINYINT(1) NOT NULL,
 	status TINYINT(1) NOT NULL,
 	created_at BIGINT NOT NULL,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS platform_param_dict (
 	param_type TEXT NOT NULL,
 	required INTEGER NOT NULL,
 	gitops_locator INTEGER NOT NULL DEFAULT 0,
+	cd_self_fill INTEGER NOT NULL DEFAULT 0,
 	builtin INTEGER NOT NULL,
 	status INTEGER NOT NULL,
 	created_at INTEGER NOT NULL,
@@ -92,6 +94,18 @@ func (r *PlatformParamRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		exists, err = r.mysqlColumnExists(ctx, "platform_param_dict", "cd_self_fill")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE platform_param_dict ADD COLUMN cd_self_fill TINYINT(1) NOT NULL DEFAULT 0 AFTER gitops_locator;`,
+			); err != nil {
+				return err
+			}
+		}
 	case "sqlite":
 		columns, err := r.sqliteTableColumns(ctx, "platform_param_dict")
 		if err != nil {
@@ -101,6 +115,14 @@ func (r *PlatformParamRepository) migrateSchema(ctx context.Context) error {
 			if _, err = r.db.ExecContext(
 				ctx,
 				`ALTER TABLE platform_param_dict ADD COLUMN gitops_locator INTEGER NOT NULL DEFAULT 0;`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["cd_self_fill"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE platform_param_dict ADD COLUMN cd_self_fill INTEGER NOT NULL DEFAULT 0;`,
 			); err != nil {
 				return err
 			}
@@ -122,6 +144,7 @@ func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error
 			ParamType:     domain.ParamTypeString,
 			Required:      false,
 			GitOpsLocator: false,
+			CDSelfFill:    false,
 			Builtin:       true,
 			Status:        domain.StatusEnabled,
 			CreatedAt:     now,
@@ -144,14 +167,15 @@ func (r *PlatformParamRepository) upsertBuiltinParam(ctx context.Context, item d
 	case "mysql":
 		const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
 	name = VALUES(name),
 	description = VALUES(description),
 	param_type = VALUES(param_type),
 	required = VALUES(required),
 	gitops_locator = VALUES(gitops_locator),
+	cd_self_fill = VALUES(cd_self_fill),
 	builtin = VALUES(builtin),
 	status = VALUES(status),
 	updated_at = VALUES(updated_at);`
@@ -165,6 +189,7 @@ ON DUPLICATE KEY UPDATE
 			string(item.ParamType),
 			boolToInt(item.Required),
 			boolToInt(item.GitOpsLocator),
+			boolToInt(item.CDSelfFill),
 			boolToInt(item.Builtin),
 			int(item.Status),
 			item.CreatedAt.UTC().UnixNano(),
@@ -174,14 +199,15 @@ ON DUPLICATE KEY UPDATE
 	case "sqlite":
 		const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(param_key) DO UPDATE SET
 	name = excluded.name,
 	description = excluded.description,
 	param_type = excluded.param_type,
 	required = excluded.required,
 	gitops_locator = excluded.gitops_locator,
+	cd_self_fill = excluded.cd_self_fill,
 	builtin = excluded.builtin,
 	status = excluded.status,
 	updated_at = excluded.updated_at;`
@@ -195,6 +221,7 @@ ON CONFLICT(param_key) DO UPDATE SET
 			string(item.ParamType),
 			boolToInt(item.Required),
 			boolToInt(item.GitOpsLocator),
+			boolToInt(item.CDSelfFill),
 			boolToInt(item.Builtin),
 			int(item.Status),
 			item.CreatedAt.UTC().UnixNano(),
@@ -232,8 +259,8 @@ func (r *PlatformParamRepository) normalizeBuiltinFlags(ctx context.Context, bui
 func (r *PlatformParamRepository) Create(ctx context.Context, item domain.PlatformParamDict) error {
 	const q = `
 INSERT INTO platform_param_dict (
-	id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err := r.db.ExecContext(
 		ctx,
@@ -245,6 +272,7 @@ INSERT INTO platform_param_dict (
 		string(item.ParamType),
 		boolToInt(item.Required),
 		boolToInt(item.GitOpsLocator),
+		boolToInt(item.CDSelfFill),
 		boolToInt(item.Builtin),
 		int(item.Status),
 		item.CreatedAt.UTC().UnixNano(),
@@ -261,7 +289,7 @@ INSERT INTO platform_param_dict (
 
 func (r *PlatformParamRepository) GetByID(ctx context.Context, id string) (domain.PlatformParamDict, error) {
 	const q = `
-SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
 FROM platform_param_dict
 WHERE id = ?;`
 
@@ -278,7 +306,7 @@ WHERE id = ?;`
 
 func (r *PlatformParamRepository) GetByParamKey(ctx context.Context, paramKey string) (domain.PlatformParamDict, error) {
 	const q = `
-SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
 FROM platform_param_dict
 WHERE param_key = ?;`
 
@@ -317,6 +345,10 @@ func (r *PlatformParamRepository) List(ctx context.Context, filter domain.ListFi
 		where = append(where, "gitops_locator = ?")
 		args = append(args, boolToInt(*filter.GitOpsLocator))
 	}
+	if filter.CDSelfFill != nil {
+		where = append(where, "cd_self_fill = ?")
+		args = append(args, boolToInt(*filter.CDSelfFill))
+	}
 
 	countQuery := "SELECT COUNT(1) FROM platform_param_dict"
 	if len(where) > 0 {
@@ -328,7 +360,7 @@ func (r *PlatformParamRepository) List(ctx context.Context, filter domain.ListFi
 	}
 
 	listQuery := `
-SELECT id, param_key, name, description, param_type, required, gitops_locator, builtin, status, created_at, updated_at
+SELECT id, param_key, name, description, param_type, required, gitops_locator, cd_self_fill, builtin, status, created_at, updated_at
 FROM platform_param_dict`
 	if len(where) > 0 {
 		listQuery += " WHERE " + strings.Join(where, " AND ")
@@ -359,7 +391,7 @@ FROM platform_param_dict`
 func (r *PlatformParamRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.PlatformParamDict, error) {
 	const q = `
 UPDATE platform_param_dict
-SET param_key = ?, name = ?, description = ?, param_type = ?, required = ?, gitops_locator = ?, builtin = ?, status = ?, updated_at = ?
+SET param_key = ?, name = ?, description = ?, param_type = ?, required = ?, gitops_locator = ?, cd_self_fill = ?, builtin = ?, status = ?, updated_at = ?
 WHERE id = ?;`
 
 	res, err := r.db.ExecContext(
@@ -371,6 +403,7 @@ WHERE id = ?;`
 		string(input.ParamType),
 		boolToInt(input.Required),
 		boolToInt(input.GitOpsLocator),
+		boolToInt(input.CDSelfFill),
 		boolToInt(input.Builtin),
 		int(input.Status),
 		updatedAt.UTC().UnixNano(),
@@ -414,6 +447,7 @@ func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 		paramType     string
 		required      int
 		gitopsLocator int
+		cdSelfFill    int
 		builtin       int
 		status        int
 		createdAt     int64
@@ -428,6 +462,7 @@ func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 		&paramType,
 		&required,
 		&gitopsLocator,
+		&cdSelfFill,
 		&builtin,
 		&status,
 		&createdAt,
@@ -439,6 +474,7 @@ func scanPlatformParam(s scanner) (domain.PlatformParamDict, error) {
 	item.ParamType = domain.ParamType(paramType)
 	item.Required = required > 0
 	item.GitOpsLocator = gitopsLocator > 0
+	item.CDSelfFill = cdSelfFill > 0
 	item.Builtin = builtin > 0
 	item.Status = domain.Status(status)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()

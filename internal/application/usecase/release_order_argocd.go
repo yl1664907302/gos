@@ -558,7 +558,7 @@ func (uc *ReleaseOrderManager) buildArgoCDManifestRules(
 	result := make([]gitopsdomain.ManifestRule, 0, len(rules))
 	for _, item := range rules {
 		sourceKey := strings.ToLower(strings.TrimSpace(item.SourceParamKey))
-		if sourceKey != "" && strings.TrimSpace(fields[sourceKey]) == "" {
+		if item.SourceFrom != domain.GitOpsRuleSourceCDInput && sourceKey != "" && strings.TrimSpace(fields[sourceKey]) == "" {
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少取值字段 %s", ErrInvalidInput, sourceKey)
 		}
 		locatorKey := strings.ToLower(strings.TrimSpace(item.LocatorParamKey))
@@ -597,7 +597,7 @@ func (uc *ReleaseOrderManager) buildArgoCDValuesRules(
 	result := make([]gitopsdomain.ValuesRule, 0, len(rules))
 	for _, item := range rules {
 		sourceKey := strings.ToLower(strings.TrimSpace(item.SourceParamKey))
-		if sourceKey != "" && strings.TrimSpace(fields[sourceKey]) == "" {
+		if item.SourceFrom != domain.GitOpsRuleSourceCDInput && sourceKey != "" && strings.TrimSpace(fields[sourceKey]) == "" {
 			return nil, fmt.Errorf("%w: gitops 替换规则缺少取值字段 %s", ErrInvalidInput, sourceKey)
 		}
 		locatorKey := strings.ToLower(strings.TrimSpace(item.LocatorParamKey))

@@ -21,6 +21,7 @@ type ListFilter struct {
 	Status        *Status
 	Builtin       *bool
 	GitOpsLocator *bool
+	CDSelfFill    *bool
 	Page          int
 	PageSize      int
 }
@@ -32,6 +33,7 @@ type UpdateInput struct {
 	ParamType     ParamType
 	Required      bool
 	GitOpsLocator bool
+	CDSelfFill    bool
 	Builtin       bool
 	Status        Status
 }

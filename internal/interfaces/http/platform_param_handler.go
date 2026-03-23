@@ -40,6 +40,7 @@ type CreatePlatformParamDictRequest struct {
 	ParamType     string `json:"param_type"`
 	Required      bool   `json:"required"`
 	GitOpsLocator bool   `json:"gitops_locator"`
+	CDSelfFill    bool   `json:"cd_self_fill"`
 	Status        *int   `json:"status"`
 }
 
@@ -50,6 +51,7 @@ type UpdatePlatformParamDictRequest struct {
 	ParamType     string `json:"param_type"`
 	Required      bool   `json:"required"`
 	GitOpsLocator bool   `json:"gitops_locator"`
+	CDSelfFill    bool   `json:"cd_self_fill"`
 	Status        int    `json:"status"`
 }
 
@@ -61,6 +63,7 @@ type PlatformParamDictResponse struct {
 	ParamType     string    `json:"param_type"`
 	Required      bool      `json:"required"`
 	GitOpsLocator bool      `json:"gitops_locator"`
+	CDSelfFill    bool      `json:"cd_self_fill"`
 	Builtin       bool      `json:"builtin"`
 	Status        int       `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -106,6 +109,7 @@ func (h *PlatformParamHandler) Create(c *gin.Context) {
 		ParamType:     domain.ParamType(strings.TrimSpace(req.ParamType)),
 		Required:      req.Required,
 		GitOpsLocator: req.GitOpsLocator,
+		CDSelfFill:    req.CDSelfFill,
 		Status:        createPlatformParamStatus(req.Status),
 	})
 	if err != nil {
@@ -231,6 +235,7 @@ func (h *PlatformParamHandler) Update(c *gin.Context) {
 		ParamType:     domain.ParamType(strings.TrimSpace(req.ParamType)),
 		Required:      req.Required,
 		GitOpsLocator: req.GitOpsLocator,
+		CDSelfFill:    req.CDSelfFill,
 		Status:        domain.Status(req.Status),
 	})
 	if err != nil {
@@ -271,6 +276,7 @@ func toPlatformParamResponse(item domain.PlatformParamDict) PlatformParamDictRes
 		ParamType:     string(item.ParamType),
 		Required:      item.Required,
 		GitOpsLocator: item.GitOpsLocator,
+		CDSelfFill:    item.CDSelfFill,
 		Builtin:       item.Builtin,
 		Status:        int(item.Status),
 		CreatedAt:     item.CreatedAt,

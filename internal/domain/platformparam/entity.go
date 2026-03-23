@@ -39,6 +39,7 @@ type PlatformParamDict struct {
 	ParamType     ParamType
 	Required      bool
 	GitOpsLocator bool
+	CDSelfFill    bool
 	Builtin       bool
 	Status        Status
 	CreatedAt     time.Time

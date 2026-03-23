@@ -26,6 +26,7 @@ type CreatePlatformParamDictInput struct {
 	ParamType     domain.ParamType
 	Required      bool
 	GitOpsLocator bool
+	CDSelfFill    bool
 	Status        domain.Status
 }
 
@@ -66,6 +67,7 @@ func (uc *PlatformParamDictManager) Create(ctx context.Context, input CreatePlat
 		ParamType:     input.ParamType,
 		Required:      input.Required,
 		GitOpsLocator: input.GitOpsLocator,
+		CDSelfFill:    input.CDSelfFill,
 		// Manual entries are always non-builtin. Builtin keys are seeded by the platform.
 		Builtin:   false,
 		Status:    status,
@@ -154,6 +156,7 @@ func (uc *PlatformParamDictManager) Update(ctx context.Context, id string, input
 		ParamType:     input.ParamType,
 		Required:      input.Required,
 		GitOpsLocator: input.GitOpsLocator,
+		CDSelfFill:    input.CDSelfFill,
 		// Builtin fields are not editable; manual fields remain non-builtin.
 		Builtin: false,
 		Status:  input.Status,

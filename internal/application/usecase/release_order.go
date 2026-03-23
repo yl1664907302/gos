@@ -219,13 +219,6 @@ func (uc *ReleaseOrderManager) Create(
 		)
 		return domain.ReleaseOrder{}, err
 	}
-	if err := validateArgoCDProjectNameSingleValue(templateBindings, input.Params); err != nil {
-		logx.Error("release_order", "create_failed", err,
-			logx.F("application_id", applicationID),
-			logx.F("template_id", templateID),
-		)
-		return domain.ReleaseOrder{}, err
-	}
 	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
 	summary := resolveReleaseOrderSummaryFields(input.Params)
 	envCode := firstNonEmpty(input.EnvCode, summary.EnvCode)
@@ -532,24 +525,6 @@ func executorParamNameOrKey(executorParamName string, paramKey string) string {
 	return strings.TrimSpace(paramKey)
 }
 
-func validateArgoCDProjectNameSingleValue(
-	templateBindings []domain.ReleaseTemplateBinding,
-	params []CreateReleaseOrderParamInput,
-) error {
-	if !templateUsesArgoCD(templateBindings) {
-		return nil
-	}
-	for _, item := range params {
-		if !strings.EqualFold(strings.TrimSpace(item.ParamKey), "project_name") {
-			continue
-		}
-		if isMultiValueProjectName(item.ParamValue) {
-			return fmt.Errorf("%w: cd 选择 argocd 时，project_name 当前仅支持单值", ErrInvalidInput)
-		}
-	}
-	return nil
-}
-
 func templateUsesArgoCD(bindings []domain.ReleaseTemplateBinding) bool {
 	for _, item := range bindings {
 		if item.PipelineScope != domain.PipelineScopeCD {
@@ -560,14 +535,6 @@ func templateUsesArgoCD(bindings []domain.ReleaseTemplateBinding) bool {
 		}
 	}
 	return false
-}
-
-func isMultiValueProjectName(value string) bool {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return false
-	}
-	return strings.Contains(text, ",") || strings.Contains(text, "，") || strings.Contains(text, "\n") || strings.Contains(text, "\r")
 }
 
 func (uc *ReleaseOrderManager) resolveTemplateForCreate(
@@ -1400,7 +1367,112 @@ func (uc *ReleaseOrderManager) markStep(
 		}
 		return err
 	}
+	if syncErr := uc.syncPipelineStageFromStep(ctx, orderID, stepCode, status, message, startedAt, finishedAt); syncErr != nil {
+		return syncErr
+	}
 	return nil
+}
+
+func (uc *ReleaseOrderManager) syncPipelineStageFromStep(
+	ctx context.Context,
+	orderID string,
+	stepCode string,
+	status domain.StepStatus,
+	message string,
+	startedAt *time.Time,
+	finishedAt *time.Time,
+) error {
+	scope, suffix, ok := strings.Cut(strings.TrimSpace(stepCode), ":")
+	if !ok {
+		return nil
+	}
+	if !isArgoCDPipelineStageKey(suffix) {
+		return nil
+	}
+	stages, err := uc.repo.ListPipelineStages(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	if len(stages) == 0 {
+		return nil
+	}
+	now := uc.now()
+	changed := false
+	for idx := range stages {
+		if !strings.EqualFold(strings.TrimSpace(stages[idx].PipelineScope), scope) {
+			continue
+		}
+		if !strings.EqualFold(strings.TrimSpace(stages[idx].StageKey), suffix) {
+			continue
+		}
+		nextStatus := pipelineStageStatusFromStepStatus(status)
+		if stages[idx].Status != nextStatus {
+			stages[idx].Status = nextStatus
+			changed = true
+		}
+		if strings.TrimSpace(message) != strings.TrimSpace(stages[idx].RawStatus) {
+			stages[idx].RawStatus = strings.TrimSpace(message)
+			changed = true
+		}
+		if startedAt != nil && (stages[idx].StartedAt == nil || !stages[idx].StartedAt.Equal(*startedAt)) {
+			value := startedAt.UTC()
+			stages[idx].StartedAt = &value
+			changed = true
+		}
+		if finishedAt != nil && (stages[idx].FinishedAt == nil || !stages[idx].FinishedAt.Equal(*finishedAt)) {
+			value := finishedAt.UTC()
+			stages[idx].FinishedAt = &value
+			changed = true
+		}
+		duration := computePipelineStageDurationFromTimes(stages[idx].StartedAt, stages[idx].FinishedAt, status, now)
+		if stages[idx].DurationMillis != duration {
+			stages[idx].DurationMillis = duration
+			changed = true
+		}
+		stages[idx].UpdatedAt = now
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return uc.repo.ReplacePipelineStages(ctx, orderID, stages)
+}
+
+func isArgoCDPipelineStageKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "gitops_update", "git_commit", "git_push", "argocd_sync", "health_check":
+		return true
+	default:
+		return false
+	}
+}
+
+func pipelineStageStatusFromStepStatus(status domain.StepStatus) domain.PipelineStageStatus {
+	switch status {
+	case domain.StepStatusSuccess:
+		return domain.PipelineStageStatusSuccess
+	case domain.StepStatusFailed:
+		return domain.PipelineStageStatusFailed
+	case domain.StepStatusRunning:
+		return domain.PipelineStageStatusRunning
+	default:
+		return domain.PipelineStageStatusPending
+	}
+}
+
+func computePipelineStageDurationFromTimes(startedAt *time.Time, finishedAt *time.Time, status domain.StepStatus, now time.Time) int64 {
+	if startedAt == nil {
+		return 0
+	}
+	end := finishedAt
+	if end == nil && status == domain.StepStatusRunning {
+		current := now.UTC()
+		end = &current
+	}
+	if end == nil || end.Before(*startedAt) {
+		return 0
+	}
+	return end.Sub(*startedAt).Milliseconds()
 }
 
 func (uc *ReleaseOrderManager) ListSteps(ctx context.Context, orderID string) ([]domain.ReleaseOrderStep, error) {
@@ -1441,7 +1513,7 @@ func (uc *ReleaseOrderManager) reconcileTerminalSteps(
 		}
 		healthCode := scopeStepCode(execution.PipelineScope, "health_check")
 		current := findStepByCode(steps, healthCode)
-		if current == nil || (current.Status != domain.StepStatusPending && current.Status != domain.StepStatusRunning) {
+		if current == nil {
 			continue
 		}
 
@@ -1449,11 +1521,14 @@ func (uc *ReleaseOrderManager) reconcileTerminalSteps(
 		nextMessage := strings.TrimSpace(current.Message)
 		if execution.Status == domain.ExecutionStatusSuccess {
 			nextStatus = domain.StepStatusSuccess
-			if nextMessage == "" {
+			if nextMessage == "" || isWaitingArgoCDHealthCheckMessage(nextMessage) {
 				nextMessage = "ArgoCD 部署完成"
 			}
-		} else if nextMessage == "" {
+		} else if nextMessage == "" || isWaitingArgoCDHealthCheckMessage(nextMessage) {
 			nextMessage = "ArgoCD 部署失败"
+		}
+		if current.Status == nextStatus && strings.TrimSpace(current.Message) == nextMessage {
+			continue
 		}
 
 		startedAt := current.StartedAt
@@ -1473,35 +1548,39 @@ func (uc *ReleaseOrderManager) reconcileTerminalSteps(
 	}
 
 	globalStep := findStepByCode(steps, "global:release_finish")
-	if globalStep != nil &&
-		(globalStep.Status == domain.StepStatusPending || globalStep.Status == domain.StepStatusRunning) &&
-		order.Status.IsTerminal() {
+	if globalStep != nil && order.Status.IsTerminal() {
 		globalStatus := domain.StepStatusSuccess
 		globalMessage := "发布完成"
 		if order.Status != domain.OrderStatusSuccess {
 			globalStatus = domain.StepStatusFailed
 			globalMessage = "发布结束"
 		}
-		startedAt := globalStep.StartedAt
-		if startedAt == nil {
-			startedAt = firstNonNilTime(order.StartedAt, ptrTime(now))
+		if globalStep.Status != globalStatus || strings.TrimSpace(globalStep.Message) != globalMessage {
+			startedAt := globalStep.StartedAt
+			if startedAt == nil {
+				startedAt = firstNonNilTime(order.StartedAt, ptrTime(now))
+			}
+			finishedAt := firstNonNilTime(order.FinishedAt, ptrTime(now))
+			if _, updateErr := uc.repo.UpdateStep(ctx, order.ID, "global:release_finish", domain.StepUpdateInput{
+				Status:     globalStatus,
+				Message:    globalMessage,
+				StartedAt:  startedAt,
+				FinishedAt: finishedAt,
+			}); updateErr != nil {
+				return nil, updateErr
+			}
+			changed = true
 		}
-		finishedAt := firstNonNilTime(order.FinishedAt, ptrTime(now))
-		if _, updateErr := uc.repo.UpdateStep(ctx, order.ID, "global:release_finish", domain.StepUpdateInput{
-			Status:     globalStatus,
-			Message:    globalMessage,
-			StartedAt:  startedAt,
-			FinishedAt: finishedAt,
-		}); updateErr != nil {
-			return nil, updateErr
-		}
-		changed = true
 	}
-
 	if !changed {
 		return steps, nil
 	}
 	return uc.repo.ListSteps(ctx, order.ID)
+}
+
+func isWaitingArgoCDHealthCheckMessage(message string) bool {
+	text := strings.TrimSpace(message)
+	return strings.Contains(text, "等待健康检查回传")
 }
 
 func (uc *ReleaseOrderManager) StartStep(
