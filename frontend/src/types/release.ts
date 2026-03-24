@@ -1,5 +1,6 @@
 export type ReleaseTriggerType = 'manual' | 'webhook' | 'schedule'
 export type ReleaseOrderStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
+export type ReleaseOperationType = 'deploy' | 'rollback' | 'replay'
 export type ReleaseStepStatus = 'pending' | 'running' | 'success' | 'failed'
 export type ReleasePipelineStageStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled' | 'skipped'
 export type ReleaseOrderValueProgressStatus = 'pending' | 'running' | 'resolved' | 'failed' | 'skipped'
@@ -12,6 +13,10 @@ export interface ReleaseOrder {
   id: string
   order_no: string
   previous_order_no: string
+  operation_type: ReleaseOperationType
+  source_order_id: string
+  source_order_no: string
+  cd_provider: string
   application_id: string
   application_name: string
   template_id: string

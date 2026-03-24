@@ -22,11 +22,19 @@ import {
   getReleaseOrderByID,
   listReleaseOrderParams,
   listReleaseOrders,
+  replayReleaseOrderByID,
+  rollbackReleaseOrderByID,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useAuthStore } from '../../stores/auth'
 import type { PipelineBinding } from '../../types/pipeline'
-import type { ReleaseOrder, ReleaseOrderParam, ReleaseOrderStatus, ReleaseTriggerType } from '../../types/release'
+import type {
+  ReleaseOperationType,
+  ReleaseOrder,
+  ReleaseOrderParam,
+  ReleaseOrderStatus,
+  ReleaseTriggerType,
+} from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 interface SelectOption {
@@ -59,6 +67,7 @@ const loading = ref(false)
 const querying = ref(false)
 const cancellingID = ref('')
 const executingID = ref('')
+const recoveringID = ref('')
 const dataSource = ref<ReleaseOrder[]>([])
 const total = ref(0)
 const autoRefreshTimer = ref<number | null>(null)
@@ -83,7 +92,7 @@ const filters = reactive({
   status: '' as ReleaseOrderStatus | '',
   trigger_type: '' as ReleaseTriggerType | '',
   page: 1,
-  pageSize: 20,
+  pageSize: 10,
 })
 
 const activeQuery = reactive({
@@ -97,7 +106,6 @@ const activeQuery = reactive({
 const initialColumns: TableColumnsType<ReleaseOrder> = [
   { title: '发布单号', dataIndex: 'order_no', key: 'order_no', width: 220 },
   { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 190 },
-  { title: '上次发布单号', dataIndex: 'previous_order_no', key: 'previous_order_no', width: 220 },
   { title: '应用名称', dataIndex: 'application_name', key: 'application_name', width: 180 },
   { title: '环境', dataIndex: 'env_code', key: 'env_code', width: 110 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
@@ -297,12 +305,55 @@ function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined
   }
 }
 
+function operationTypeText(operationType: ReleaseOperationType | '' | null | undefined) {
+  switch (String(operationType || '').trim().toLowerCase()) {
+    case 'rollback':
+      return '标准回滚'
+    case 'replay':
+      return '重放回滚'
+    default:
+      return '普通发布'
+  }
+}
+
 function canCancel(record: ReleaseOrder) {
   return canCancelRelease.value && (record.status === 'pending' || record.status === 'running')
 }
 
 function canExecute(record: ReleaseOrder) {
   return canExecuteRelease.value && record.status === 'pending'
+}
+
+function canRollback(record: ReleaseOrder) {
+  return canCreateRelease.value && record.status === 'success' && String(record.cd_provider || '').trim().toLowerCase() === 'argocd'
+}
+
+function canReplay(record: ReleaseOrder) {
+  return (
+    canCreateRelease.value &&
+    record.status === 'success' &&
+    String(record.cd_provider || '').trim().toLowerCase() !== 'argocd'
+  )
+}
+
+function isCiOnlyRecovery(record: ReleaseOrder) {
+  return String(record.cd_provider || '').trim() === ''
+}
+
+function replayActionText(record: ReleaseOrder) {
+  return '回滚到此版本'
+}
+
+function replayConfirmTitle(record: ReleaseOrder) {
+  return isCiOnlyRecovery(record) ? '确认基于这张成功单创建 CI 重放回滚吗？' : '确认基于这张成功单创建重放回滚吗？'
+}
+
+function replaySuccessText(record: ReleaseOrder, orderNo: string) {
+  return isCiOnlyRecovery(record) ? `已创建 CI 重放回滚单：${orderNo}` : `已创建重放回滚单：${orderNo}`
+}
+
+function replayFailureText(record: ReleaseOrder) {
+  return isCiOnlyRecovery(record) ? 'CI 重放回滚创建失败' : '重放回滚创建失败'
 }
 
 async function loadApplicationOptions() {
@@ -441,7 +492,7 @@ function handleReset() {
   filters.status = ''
   filters.trigger_type = ''
   filters.page = 1
-  filters.pageSize = 20
+  filters.pageSize = 10
   bindingOptions.value = []
   advancedSearchExpanded.value = false
   applyActiveQueryFromFilters()
@@ -453,6 +504,12 @@ function toggleAdvancedSearch() {
 }
 
 function handlePageChange(page: number, pageSize: number) {
+  filters.page = page
+  filters.pageSize = pageSize
+  void loadReleaseOrders()
+}
+
+function handlePageSizeChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
   void loadReleaseOrders()
@@ -527,13 +584,45 @@ async function confirmExecuteRelease() {
   executeSubmitting.value = true
   try {
     await executeReleaseOrder(executePreviewOrder.value.id)
-    message.success('发布已触发，后端开始执行')
+    message.success('发布已提交，正在调度执行')
     closeExecutePreviewModal()
     await loadReleaseOrders()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '发布执行失败'))
   } finally {
     executeSubmitting.value = false
+  }
+}
+
+async function handleRollback(record: ReleaseOrder) {
+  if (!canRollback(record)) {
+    return
+  }
+  recoveringID.value = record.id
+  try {
+    const response = await rollbackReleaseOrderByID(record.id)
+    message.success(`已创建标准回滚单：${response.data.order_no}`)
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '标准回滚创建失败'))
+  } finally {
+    recoveringID.value = ''
+  }
+}
+
+async function handleReplay(record: ReleaseOrder) {
+  if (!canReplay(record)) {
+    return
+  }
+  recoveringID.value = record.id
+  try {
+    const response = await replayReleaseOrderByID(record.id)
+    message.success(replaySuccessText(record, response.data.order_no))
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, replayFailureText(record)))
+  } finally {
+    recoveringID.value = ''
   }
 }
 
@@ -728,11 +817,13 @@ onBeforeUnmount(() => {
           <template v-else-if="column.key === 'order_no'">
             <a-space :size="6">
               <span>{{ record.order_no }}</span>
-              <a-tag v-if="record.previous_order_no" class="dashboard-chip dashboard-chip-danger">回滚</a-tag>
+              <a-tag v-if="record.operation_type === 'rollback'" class="dashboard-chip dashboard-chip-danger">
+                {{ operationTypeText(record.operation_type) }}
+              </a-tag>
+              <a-tag v-else-if="record.operation_type === 'replay'" class="dashboard-chip dashboard-chip-warning">
+                {{ operationTypeText(record.operation_type) }}
+              </a-tag>
             </a-space>
-          </template>
-          <template v-else-if="column.key === 'previous_order_no'">
-            {{ record.previous_order_no || '-' }}
           </template>
           <template v-else-if="column.key === 'finished_at'">
             {{ formatTime(record.finished_at) }}
@@ -755,6 +846,30 @@ onBeforeUnmount(() => {
               >
                 发布
               </a-button>
+              <a-popconfirm
+                v-if="canRollback(record)"
+                title="确认基于这张成功单创建标准回滚吗？"
+                ok-text="确认回滚"
+                cancel-text="取消"
+                @confirm="handleRollback(record)"
+              >
+                <template #icon>
+                  <ExclamationCircleOutlined class="danger-icon" />
+                </template>
+                <a-button type="link" size="small" danger :loading="recoveringID === record.id">回滚到此版本</a-button>
+              </a-popconfirm>
+              <a-popconfirm
+                v-else-if="canReplay(record)"
+                :title="replayConfirmTitle(record)"
+                :ok-text="isCiOnlyRecovery(record) ? '确认恢复' : '确认重放'"
+                cancel-text="取消"
+                @confirm="handleReplay(record)"
+              >
+                <template #icon>
+                  <ExclamationCircleOutlined />
+                </template>
+                <a-button type="link" size="small" :loading="recoveringID === record.id">{{ replayActionText(record) }}</a-button>
+              </a-popconfirm>
               <a-popconfirm
                 v-if="canCancel(record)"
                 title="确认取消当前发布单吗？"
@@ -783,6 +898,7 @@ onBeforeUnmount(() => {
           show-quick-jumper
           :show-total="(count: number) => `共 ${count} 条`"
           @change="handlePageChange"
+          @showSizeChange="handlePageSizeChange"
         />
       </div>
     </a-card>

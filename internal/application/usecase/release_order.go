@@ -245,6 +245,7 @@ func (uc *ReleaseOrderManager) Create(
 		ID:              generateID("ro"),
 		OrderNo:         generateOrderNo(now),
 		PreviousOrderNo: strings.TrimSpace(input.PreviousOrderNo),
+		OperationType:   domain.OperationTypeDeploy,
 		ApplicationID:   applicationID,
 		ApplicationName: app.Name,
 		TemplateID:      template.ID,
@@ -309,86 +310,179 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 	creatorUserID string,
 	triggeredBy string,
 ) (domain.ReleaseOrder, error) {
-	applicationID = strings.TrimSpace(applicationID)
+	_ = applicationID
+	_ = creatorUserID
+	_ = triggeredBy
+	return domain.ReleaseOrder{}, fmt.Errorf("%w: 按应用自动回滚已废弃，请基于指定成功发布单发起恢复", ErrInvalidInput)
+}
+
+func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
+	ctx context.Context,
+	sourceOrderID string,
+	creatorUserID string,
+	triggeredBy string,
+) (domain.ReleaseOrder, error) {
+	sourceOrderID = strings.TrimSpace(sourceOrderID)
 	logx.Info("release_order", "rollback_create_start",
-		logx.F("application_id", applicationID),
+		logx.F("source_order_id", sourceOrderID),
 		logx.F("creator_user_id", creatorUserID),
 	)
-	if applicationID == "" {
-		err := fmt.Errorf("%w: application_id is required", ErrInvalidInput)
-		logx.Error("release_order", "rollback_create_failed", err,
-			logx.F("application_id", applicationID),
-		)
-		return domain.ReleaseOrder{}, err
-	}
-
-	items, _, err := uc.repo.List(ctx, domain.ListFilter{
-		ApplicationID: applicationID,
-		Status:        domain.OrderStatusSuccess,
-		Page:          1,
-		PageSize:      1,
-	})
+	sourceOrder, sourceExecutions, err := uc.loadRecoverySourceOrder(ctx, sourceOrderID)
 	if err != nil {
 		logx.Error("release_order", "rollback_create_failed", err,
-			logx.F("application_id", applicationID),
+			logx.F("source_order_id", sourceOrderID),
 		)
 		return domain.ReleaseOrder{}, err
 	}
-	if len(items) == 0 {
-		err := fmt.Errorf("%w: 当前应用暂无可回滚的成功发布单", ErrInvalidInput)
-		logx.Warn("release_order", "rollback_create_failed",
-			logx.F("application_id", applicationID),
-			logx.F("reason", err.Error()),
-		)
+	sourceCDExecution, err := resolveCDExecution(sourceExecutions)
+	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-
-	sourceOrder := items[0]
-	logx.Info("release_order", "rollback_source_selected",
-		logx.F("application_id", applicationID),
-		logx.F("source_order_id", sourceOrder.ID),
-		logx.F("source_order_no", sourceOrder.OrderNo),
-	)
+	if !isArgoCDExecution(sourceCDExecution) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前成功单不支持标准回滚", ErrInvalidInput)
+	}
+	snapshot, err := uc.ensureRollbackDeploySnapshot(ctx, sourceOrder, sourceExecutions)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if normalizeTemplateGitOpsType(snapshot.GitOpsType, true) != domain.GitOpsTypeHelm {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前成功单仅支持 Helm 标准回滚", ErrInvalidInput)
+	}
 	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
 	if err != nil {
-		logx.Error("release_order", "rollback_create_failed", err,
-			logx.F("application_id", applicationID),
-			logx.F("source_order_id", sourceOrder.ID),
-		)
 		return domain.ReleaseOrder{}, err
 	}
 
-	params := make([]CreateReleaseOrderParamInput, 0, len(sourceParams))
-	for _, item := range sourceParams {
-		params = append(params, CreateReleaseOrderParamInput{
-			PipelineScope:     item.PipelineScope,
+	template, templateBindings, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	cdBinding, ok := selectRecoveryTemplateBinding(templateBindings, domain.PipelineScopeCD)
+	if !ok {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板未配置可用的 CD 执行器", ErrInvalidInput)
+	}
+	if !strings.EqualFold(strings.TrimSpace(cdBinding.Provider), string(pipelinedomain.ProviderArgoCD)) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板的 CD 方式不是 ArgoCD，无法执行标准回滚", ErrInvalidInput)
+	}
+	order, err := uc.createRecoveryOrder(
+		ctx,
+		sourceOrder,
+		sourceParams,
+		template,
+		cdBinding,
+		domain.PipelineScopeCD,
+		nil,
+		domain.OperationTypeRollback,
+		buildRollbackRemark(sourceOrder),
+		strings.TrimSpace(creatorUserID),
+		strings.TrimSpace(triggeredBy),
+	)
+	if err != nil {
+		logx.Error("release_order", "rollback_create_failed", err,
+			logx.F("source_order_id", sourceOrder.ID),
+			logx.F("source_order_no", sourceOrder.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	logx.Info("release_order", "rollback_create_success",
+		logx.F("source_order_id", sourceOrder.ID),
+		logx.F("source_order_no", sourceOrder.OrderNo),
+		logx.F("new_order_id", order.ID),
+		logx.F("new_order_no", order.OrderNo),
+	)
+	return order, nil
+}
+
+func (uc *ReleaseOrderManager) CreatePipelineReplayByOrder(
+	ctx context.Context,
+	sourceOrderID string,
+	creatorUserID string,
+	triggeredBy string,
+) (domain.ReleaseOrder, error) {
+	sourceOrderID = strings.TrimSpace(sourceOrderID)
+	logx.Info("release_order", "pipeline_replay_create_start",
+		logx.F("source_order_id", sourceOrderID),
+		logx.F("creator_user_id", creatorUserID),
+	)
+	sourceOrder, sourceExecutions, err := uc.loadRecoverySourceOrder(ctx, sourceOrderID)
+	if err != nil {
+		logx.Error("release_order", "pipeline_replay_create_failed", err,
+			logx.F("source_order_id", sourceOrderID),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	sourceReplayExecution, err := resolveReplayExecution(sourceExecutions)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if isArgoCDExecution(sourceReplayExecution) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: ArgoCD 成功单请使用标准回滚，不支持参数重放", ErrInvalidInput)
+	}
+
+	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	replayScope := sourceReplayExecution.PipelineScope
+	replayParamsFromSource := filterReleaseOrderParamsByScope(sourceParams, replayScope)
+	if replayScope == domain.PipelineScopeCD && len(replayParamsFromSource) == 0 {
+		ciParams := filterReleaseOrderParamsByScope(sourceParams, domain.PipelineScopeCI)
+		if len(ciParams) > 0 {
+			replayScope = domain.PipelineScopeCI
+			replayParamsFromSource = ciParams
+		}
+	}
+	if len(replayParamsFromSource) == 0 {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 来源成功单缺少可重放参数快照，无法执行参数重放", ErrInvalidInput)
+	}
+
+	template, templateBindings, templateParams, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	replayBinding, ok := selectRecoveryTemplateBinding(templateBindings, replayScope)
+	if !ok {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板未配置可用的 %s 执行器", ErrInvalidInput, strings.ToUpper(string(replayScope)))
+	}
+	if strings.EqualFold(strings.TrimSpace(replayBinding.Provider), string(pipelinedomain.ProviderArgoCD)) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板的 %s 方式不是管线，无法执行参数重放", ErrInvalidInput, strings.ToUpper(string(replayScope)))
+	}
+	if err := ensureReplayParamsMatchTemplate(templateParams, replayParamsFromSource, replayScope); err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+
+	replayParams := make([]CreateReleaseOrderParamInput, 0, len(replayParamsFromSource))
+	for _, item := range replayParamsFromSource {
+		replayParams = append(replayParams, CreateReleaseOrderParamInput{
+			PipelineScope:     replayScope,
 			ParamKey:          strings.TrimSpace(item.ParamKey),
 			ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
 			ParamValue:        strings.TrimSpace(item.ParamValue),
 			ValueSource:       item.ValueSource,
 		})
 	}
-
-	order, err := uc.Create(ctx, CreateReleaseOrderInput{
-		ApplicationID:   sourceOrder.ApplicationID,
-		TemplateID:      sourceOrder.TemplateID,
-		PreviousOrderNo: sourceOrder.OrderNo,
-		EnvCode:         sourceOrder.EnvCode,
-		TriggerType:     domain.TriggerTypeManual,
-		Remark:          buildRollbackRemark(sourceOrder),
-		CreatorUserID:   strings.TrimSpace(creatorUserID),
-		TriggeredBy:     strings.TrimSpace(triggeredBy),
-		Params:          params,
-	})
+	order, err := uc.createRecoveryOrder(
+		ctx,
+		sourceOrder,
+		sourceParams,
+		template,
+		replayBinding,
+		replayScope,
+		replayParams,
+		domain.OperationTypeReplay,
+		buildReplayRemark(sourceOrder, replayScope),
+		strings.TrimSpace(creatorUserID),
+		strings.TrimSpace(triggeredBy),
+	)
 	if err != nil {
-		logx.Error("release_order", "rollback_create_failed", err,
-			logx.F("application_id", applicationID),
+		logx.Error("release_order", "pipeline_replay_create_failed", err,
+			logx.F("source_order_id", sourceOrder.ID),
 			logx.F("source_order_no", sourceOrder.OrderNo),
 		)
 		return domain.ReleaseOrder{}, err
 	}
-	logx.Info("release_order", "rollback_create_success",
-		logx.F("application_id", applicationID),
+	logx.Info("release_order", "pipeline_replay_create_success",
+		logx.F("source_order_id", sourceOrder.ID),
 		logx.F("source_order_no", sourceOrder.OrderNo),
 		logx.F("new_order_id", order.ID),
 		logx.F("new_order_no", order.OrderNo),
@@ -621,6 +715,368 @@ func buildRollbackRemark(source domain.ReleaseOrder) string {
 	return fmt.Sprintf("回滚自发布单 %s", orderNo)
 }
 
+func buildReplayRemark(source domain.ReleaseOrder, scope domain.PipelineScope) string {
+	orderNo := strings.TrimSpace(source.OrderNo)
+	scopeLabel := strings.ToUpper(string(scope))
+	if scopeLabel == "" {
+		scopeLabel = "参数"
+	}
+	if orderNo == "" {
+		return scopeLabel + " 参数重放创建"
+	}
+	return fmt.Sprintf("按发布单 %s 的 %s 参数重放", orderNo, scopeLabel)
+}
+
+func (uc *ReleaseOrderManager) loadRecoverySourceOrder(
+	ctx context.Context,
+	sourceOrderID string,
+) (domain.ReleaseOrder, []domain.ReleaseOrderExecution, error) {
+	if sourceOrderID == "" {
+		return domain.ReleaseOrder{}, nil, fmt.Errorf("%w: source_order_id is required", ErrInvalidInput)
+	}
+	sourceOrder, err := uc.repo.GetByID(ctx, sourceOrderID)
+	if err != nil {
+		return domain.ReleaseOrder{}, nil, err
+	}
+	if sourceOrder.Status != domain.OrderStatusSuccess {
+		return domain.ReleaseOrder{}, nil, fmt.Errorf("%w: 仅支持从成功发布单发起恢复", ErrInvalidInput)
+	}
+	sourceExecutions, err := uc.repo.ListExecutions(ctx, sourceOrder.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, nil, err
+	}
+	return sourceOrder, sourceExecutions, nil
+}
+
+func (uc *ReleaseOrderManager) ensureRollbackDeploySnapshot(
+	ctx context.Context,
+	sourceOrder domain.ReleaseOrder,
+	sourceExecutions []domain.ReleaseOrderExecution,
+) (domain.DeploySnapshot, error) {
+	snapshot, err := uc.repo.GetDeploySnapshotByOrderID(ctx, sourceOrder.ID)
+	if err == nil {
+		return snapshot, nil
+	}
+	if !errors.Is(err, domain.ErrDeploySnapshotNotFound) {
+		return domain.DeploySnapshot{}, err
+	}
+
+	sourceCDExecution, execErr := resolveCDExecution(sourceExecutions)
+	if execErr != nil {
+		return domain.DeploySnapshot{}, execErr
+	}
+	if !isArgoCDExecution(sourceCDExecution) {
+		return domain.DeploySnapshot{}, fmt.Errorf("%w: 当前成功单不支持标准回滚", ErrInvalidInput)
+	}
+
+	sourceParams, paramErr := uc.repo.ListParams(ctx, sourceOrder.ID)
+	if paramErr != nil {
+		return domain.DeploySnapshot{}, paramErr
+	}
+	template, _, _, templateGitOpsRules, templateErr := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
+	if templateErr != nil {
+		return domain.DeploySnapshot{}, templateErr
+	}
+	gitopsType := normalizeTemplateGitOpsType(template.GitOpsType, true)
+	if gitopsType != domain.GitOpsTypeHelm {
+		return domain.DeploySnapshot{}, fmt.Errorf("%w: 当前成功单仅支持 Helm 标准回滚", ErrInvalidInput)
+	}
+
+	binding, argocdInstance, client, contextErr := uc.resolveArgoCDExecutionContext(ctx, sourceOrder, sourceCDExecution, sourceParams)
+	if contextErr != nil {
+		return domain.DeploySnapshot{}, contextErr
+	}
+	gitopsService, gitopsErr := uc.resolveGitOpsService(ctx, argocdInstance)
+	if gitopsErr != nil {
+		return domain.DeploySnapshot{}, gitopsErr
+	}
+
+	appKey := ""
+	if uc.appRepo != nil {
+		if appRecord, appErr := uc.appRepo.GetByID(ctx, strings.TrimSpace(sourceOrder.ApplicationID)); appErr == nil {
+			appKey = strings.TrimSpace(appRecord.Key)
+		}
+	}
+	environment := uc.resolveArgoCDEnvironment(sourceOrder, sourceParams)
+	appName, app, appErr := resolveArgoCDApplicationByRef(ctx, client, binding.ExternalRef, environment, gitopsType)
+	if appErr != nil {
+		return domain.DeploySnapshot{}, fmt.Errorf("%w: get argocd application failed: %v", ErrInvalidInput, appErr)
+	}
+	repoURL := strings.TrimSpace(app.GetRepoURL())
+	sourcePath := strings.TrimSpace(app.GetSourcePath())
+	if repoURL == "" || sourcePath == "" {
+		return domain.DeploySnapshot{}, fmt.Errorf("%w: argocd application source repo/path is incomplete", ErrInvalidInput)
+	}
+	imageVersion := uc.resolveArgoCDImageVersion(sourceOrder, sourceParams, sourceExecutions)
+	if imageVersion == "" {
+		return domain.DeploySnapshot{}, fmt.Errorf("%w: image_version is required when rebuilding deploy snapshot", ErrInvalidInput)
+	}
+	commitFields := buildGitOpsCommitMessageFields(sourceOrder, sourceParams, appKey, environment, imageVersion, sourcePath)
+	valuesRules, rulesErr := uc.buildArgoCDValuesRules(gitopsService, templateGitOpsRules, commitFields)
+	if rulesErr != nil {
+		return domain.DeploySnapshot{}, rulesErr
+	}
+	if saveErr := uc.saveHelmDeploySnapshot(
+		ctx,
+		sourceOrder,
+		argocdInstance,
+		appName,
+		repoURL,
+		strings.TrimSpace(app.GetTargetRevision()),
+		sourcePath,
+		environment,
+		imageVersion,
+		valuesRules,
+	); saveErr != nil {
+		return domain.DeploySnapshot{}, saveErr
+	}
+	return uc.repo.GetDeploySnapshotByOrderID(ctx, sourceOrder.ID)
+}
+
+func (uc *ReleaseOrderManager) createRecoveryOrder(
+	ctx context.Context,
+	sourceOrder domain.ReleaseOrder,
+	sourceParams []domain.ReleaseOrderParam,
+	template domain.ReleaseTemplate,
+	targetBinding domain.ReleaseTemplateBinding,
+	targetScope domain.PipelineScope,
+	paramsInput []CreateReleaseOrderParamInput,
+	operationType domain.OperationType,
+	remark string,
+	creatorUserID string,
+	triggeredBy string,
+) (domain.ReleaseOrder, error) {
+	now := uc.now()
+	executions := uc.buildCreateExecutions("", now, []domain.ReleaseTemplateBinding{targetBinding})
+	primaryExecution, ok := pickPrimaryExecution(executions)
+	if !ok {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板未配置可用执行单元", ErrInvalidInput)
+	}
+
+	order := domain.ReleaseOrder{
+		ID:              generateID("ro"),
+		OrderNo:         generateOrderNo(now),
+		PreviousOrderNo: sourceOrder.OrderNo,
+		OperationType:   operationType,
+		SourceOrderID:   sourceOrder.ID,
+		SourceOrderNo:   sourceOrder.OrderNo,
+		ApplicationID:   sourceOrder.ApplicationID,
+		ApplicationName: firstNonEmpty(template.ApplicationName, sourceOrder.ApplicationName),
+		TemplateID:      sourceOrder.TemplateID,
+		TemplateName:    firstNonEmpty(template.Name, sourceOrder.TemplateName),
+		BindingID:       primaryExecution.BindingID,
+		PipelineID:      primaryExecution.PipelineID,
+		EnvCode:         sourceOrder.EnvCode,
+		SonService:      sourceOrder.SonService,
+		GitRef:          sourceOrder.GitRef,
+		ImageTag:        sourceOrder.ImageTag,
+		TriggerType:     domain.TriggerTypeManual,
+		Status:          domain.OrderStatusPending,
+		Remark:          strings.TrimSpace(remark),
+		CreatorUserID:   creatorUserID,
+		TriggeredBy:     triggeredBy,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	executions = uc.buildCreateExecutions(order.ID, now, []domain.ReleaseTemplateBinding{targetBinding})
+	paramsInput, err := uc.buildRecoveryParamsInput(ctx, sourceOrder, sourceParams, targetScope, paramsInput)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	params, err := uc.buildCreateParams(order.ID, now, paramsInput, executions)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	steps, err := uc.buildCreateSteps(order.ID, now, executions, normalizeTemplateGitOpsType(template.GitOpsType, true), nil)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if err := uc.repo.Create(ctx, order, executions, params, steps); err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	return uc.repo.GetByID(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) buildRecoveryParamsInput(
+	ctx context.Context,
+	sourceOrder domain.ReleaseOrder,
+	sourceParams []domain.ReleaseOrderParam,
+	targetScope domain.PipelineScope,
+	base []CreateReleaseOrderParamInput,
+) ([]CreateReleaseOrderParamInput, error) {
+	result := append([]CreateReleaseOrderParamInput(nil), base...)
+	if uc == nil || uc.platformRepo == nil {
+		return result, nil
+	}
+
+	status := platformparamdomain.StatusEnabled
+	items, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
+		Status:   &status,
+		Page:     1,
+		PageSize: 1000,
+	})
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		allowed[key] = struct{}{}
+	}
+	if len(allowed) == 0 {
+		return result, nil
+	}
+
+	existing := make(map[string]struct{}, len(result))
+	for _, item := range result {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		existing[key] = struct{}{}
+	}
+	appendParam := func(key string, value string, source domain.ValueSource, executorParamName string) {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		normalizedKey := strings.ToLower(key)
+		if normalizedKey == "" || value == "" {
+			return
+		}
+		if _, ok := allowed[normalizedKey]; !ok {
+			return
+		}
+		if _, ok := existing[normalizedKey]; ok {
+			return
+		}
+		if source == "" {
+			source = domain.ValueSourceReleaseInput
+		}
+		result = append(result, CreateReleaseOrderParamInput{
+			PipelineScope:     targetScope,
+			ParamKey:          key,
+			ExecutorParamName: strings.TrimSpace(executorParamName),
+			ParamValue:        value,
+			ValueSource:       source,
+		})
+		existing[normalizedKey] = struct{}{}
+	}
+
+	for _, item := range sourceParams {
+		appendParam(item.ParamKey, item.ParamValue, item.ValueSource, item.ExecutorParamName)
+	}
+
+	appendParam("env", sourceOrder.EnvCode, domain.ValueSourceEnvironment, "")
+	appendParam("env_code", sourceOrder.EnvCode, domain.ValueSourceEnvironment, "")
+	appendParam("project_name", sourceOrder.SonService, domain.ValueSourceReleaseInput, "")
+	appendParam("branch", sourceOrder.GitRef, domain.ValueSourceReleaseInput, "")
+	appendParam("git_ref", sourceOrder.GitRef, domain.ValueSourceReleaseInput, "")
+	appendParam("image_version", sourceOrder.ImageTag, domain.ValueSourceReleaseInput, "")
+	appendParam("image_tag", sourceOrder.ImageTag, domain.ValueSourceReleaseInput, "")
+	if uc.appRepo != nil && strings.TrimSpace(sourceOrder.ApplicationID) != "" {
+		if appRecord, appErr := uc.appRepo.GetByID(ctx, strings.TrimSpace(sourceOrder.ApplicationID)); appErr == nil {
+			appendParam("app_key", appRecord.Key, domain.ValueSourceApplication, "")
+		}
+	}
+	return result, nil
+}
+
+func filterReleaseOrderParamsByScope(items []domain.ReleaseOrderParam, scope domain.PipelineScope) []domain.ReleaseOrderParam {
+	filtered := make([]domain.ReleaseOrderParam, 0)
+	for _, item := range items {
+		if item.PipelineScope != scope {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+func selectRecoveryTemplateBinding(
+	bindings []domain.ReleaseTemplateBinding,
+	scope domain.PipelineScope,
+) (domain.ReleaseTemplateBinding, bool) {
+	for _, item := range bindings {
+		if !item.Enabled || item.PipelineScope != scope {
+			continue
+		}
+		return item, true
+	}
+	return domain.ReleaseTemplateBinding{}, false
+}
+
+func resolveCDExecution(items []domain.ReleaseOrderExecution) (domain.ReleaseOrderExecution, error) {
+	for _, item := range items {
+		if item.PipelineScope == domain.PipelineScopeCD {
+			return item, nil
+		}
+	}
+	return domain.ReleaseOrderExecution{}, fmt.Errorf("%w: 来源成功单缺少 CD 执行单元", ErrInvalidInput)
+}
+
+func resolveReplayExecution(items []domain.ReleaseOrderExecution) (domain.ReleaseOrderExecution, error) {
+	for _, item := range items {
+		if item.PipelineScope == domain.PipelineScopeCD {
+			return item, nil
+		}
+	}
+	for _, item := range items {
+		if item.PipelineScope == domain.PipelineScopeCI {
+			return item, nil
+		}
+	}
+	return domain.ReleaseOrderExecution{}, fmt.Errorf("%w: 来源成功单缺少可重放执行单元", ErrInvalidInput)
+}
+
+func ensureReplayParamsMatchTemplate(
+	templateParams []domain.ReleaseTemplateParam,
+	sourceScopeParams []domain.ReleaseOrderParam,
+	scope domain.PipelineScope,
+) error {
+	allowed := make(map[string]releasedTemplateParamRule)
+	allowedByParamKey := make(map[string]releasedTemplateParamRule)
+	duplicateParamKeys := make(map[string]struct{})
+	for _, item := range templateParams {
+		if item.PipelineScope != scope {
+			continue
+		}
+		key := buildReleaseTemplateParamKey(item.PipelineScope, item.ParamKey, item.ExecutorParamName)
+		rule := releasedTemplateParamRule{
+			PipelineScope:     item.PipelineScope,
+			ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
+			ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
+			Required:          item.Required,
+		}
+		allowed[key] = rule
+		paramKey := buildReleaseTemplateScopeParamKey(item.PipelineScope, item.ParamKey)
+		if paramKey == "" {
+			continue
+		}
+		if _, exists := allowedByParamKey[paramKey]; exists {
+			delete(allowedByParamKey, paramKey)
+			duplicateParamKeys[paramKey] = struct{}{}
+			continue
+		}
+		if _, duplicated := duplicateParamKeys[paramKey]; duplicated {
+			continue
+		}
+		allowedByParamKey[paramKey] = rule
+	}
+
+	for _, item := range sourceScopeParams {
+		paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		executorParamName := strings.TrimSpace(item.ExecutorParamName)
+		if _, _, ok := resolveReleaseTemplateRule(allowed, allowedByParamKey, scope, paramKey, executorParamName); ok {
+			continue
+		}
+		return fmt.Errorf("%w: 当前模板已不再包含 %s 参数 %s，无法执行参数重放", ErrInvalidInput, strings.ToUpper(string(scope)), executorParamNameOrKey(executorParamName, paramKey))
+	}
+	return nil
+}
+
 func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderInput) ([]domain.ReleaseOrder, int64, error) {
 	const (
 		defaultPage     = 1
@@ -647,7 +1103,7 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 		input.PageSize = maxPageSize
 	}
 
-	return uc.repo.List(ctx, domain.ListFilter{
+	items, total, err := uc.repo.List(ctx, domain.ListFilter{
 		ApplicationID:  input.ApplicationID,
 		ApplicationIDs: normalizeReleaseApplicationIDs(input.ApplicationIDs),
 		CreatorUserID:  strings.TrimSpace(input.CreatorUserID),
@@ -658,6 +1114,14 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 		Page:           input.Page,
 		PageSize:       input.PageSize,
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	items, err = uc.reconcileOrderSnapshots(ctx, items)
+	if err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }
 
 func normalizeReleaseApplicationIDs(values []string) []string {
@@ -688,7 +1152,115 @@ func (uc *ReleaseOrderManager) GetByID(ctx context.Context, id string) (domain.R
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
-	return uc.repo.GetByID(ctx, id)
+	order, err := uc.repo.GetByID(ctx, id)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	return uc.reconcileOrderSnapshot(ctx, order)
+}
+
+func (uc *ReleaseOrderManager) reconcileOrderSnapshots(
+	ctx context.Context,
+	items []domain.ReleaseOrder,
+) ([]domain.ReleaseOrder, error) {
+	if len(items) == 0 {
+		return items, nil
+	}
+	result := make([]domain.ReleaseOrder, len(items))
+	for idx := range items {
+		order, err := uc.reconcileOrderSnapshot(ctx, items[idx])
+		if err != nil {
+			return nil, err
+		}
+		result[idx] = order
+	}
+	return result, nil
+}
+
+func (uc *ReleaseOrderManager) reconcileOrderSnapshot(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+) (domain.ReleaseOrder, error) {
+	if uc == nil || uc.repo == nil {
+		return order, nil
+	}
+	if order.ID == "" || order.Status.IsTerminal() {
+		return order, nil
+	}
+
+	executions, err := uc.repo.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if len(executions) == 0 {
+		return order, nil
+	}
+
+	executions, err = uc.reconcileExecutionStates(ctx, order, executions)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+
+	nextStatus, finishedAt, shouldFinalize := uc.deriveTerminalOrderState(order, executions)
+	if !shouldFinalize {
+		return order, nil
+	}
+
+	updated := false
+	if order.Status != nextStatus || order.FinishedAt == nil {
+		startedAt := firstNonNilTime(order.StartedAt, ptrTime(uc.now()))
+		order, err = uc.repo.UpdateStatus(ctx, order.ID, nextStatus, startedAt, finishedAt, uc.now())
+		if err != nil {
+			return domain.ReleaseOrder{}, err
+		}
+		updated = true
+	}
+
+	steps, err := uc.repo.ListSteps(ctx, order.ID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if _, err := uc.reconcileTerminalSteps(ctx, order, steps); err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+
+	if updated {
+		logx.Info("release_order", "reconcile_order_snapshot_success",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("status", order.Status),
+		)
+	}
+	return uc.repo.GetByID(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) deriveTerminalOrderState(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+) (domain.OrderStatus, *time.Time, bool) {
+	if len(executions) == 0 {
+		return "", nil, false
+	}
+
+	nextStatus := domain.OrderStatusSuccess
+	finishedAt := order.FinishedAt
+	for _, item := range executions {
+		switch item.Status {
+		case domain.ExecutionStatusPending, domain.ExecutionStatusRunning:
+			return "", nil, false
+		case domain.ExecutionStatusFailed:
+			nextStatus = domain.OrderStatusFailed
+		case domain.ExecutionStatusCancelled:
+			if nextStatus != domain.OrderStatusFailed {
+				nextStatus = domain.OrderStatusCancelled
+			}
+		}
+		finishedAt = firstNonNilTime(finishedAt, item.FinishedAt)
+	}
+	if finishedAt == nil {
+		finishedAt = ptrTime(uc.now())
+	}
+	return nextStatus, finishedAt, true
 }
 
 func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.ReleaseOrder, error) {
@@ -878,6 +1450,14 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		)
 		return domain.ReleaseOrder{}, err
 	}
+	if findExecutionByStatus(executions, domain.ExecutionStatusPending) == nil {
+		err := fmt.Errorf("%w: release order has no pending executions to dispatch", ErrInvalidInput)
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
 
 	startedAt := uc.now()
 	order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, &startedAt, nil, startedAt)
@@ -901,21 +1481,12 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	_ = uc.markStepRunning(ctx, order.ID, "global:param_resolve", "开始解析发布参数")
 	_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, fmt.Sprintf("参数解析完成，总计 %d 项", len(orderParams)))
 
-	if err := uc.startNextPendingExecution(ctx, order, executions, orderParams); err != nil {
-		finishedAt := uc.now()
-		_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &finishedAt, finishedAt)
-		logx.Error("release_order", "execute_failed", err,
-			logx.F("order_id", order.ID),
-			logx.F("order_no", order.OrderNo),
-		)
-		return domain.ReleaseOrder{}, err
-	}
-
 	logx.Info("release_order", "execute_dispatched",
 		logx.F("order_id", order.ID),
 		logx.F("order_no", order.OrderNo),
 		logx.F("executions_count", len(executions)),
 		logx.F("params_count", len(orderParams)),
+		logx.F("dispatch_mode", "async_tracker"),
 	)
 	return uc.repo.GetByID(ctx, order.ID)
 }
@@ -1267,15 +1838,45 @@ func (uc *ReleaseOrderManager) markExecutionStartFailed(
 		logx.F("provider", execution.Provider),
 	)
 	now := uc.now()
-	_, _ = uc.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+	persistCtx, cancel := uc.backgroundPersistenceContext()
+	defer cancel()
+	if _, err := uc.repo.UpdateExecutionByScope(persistCtx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
 		Status:     domain.ExecutionStatusFailed,
 		StartedAt:  &now,
 		FinishedAt: &now,
 		UpdatedAt:  now,
-	})
-	_ = uc.markOpenExecutionStepsFailed(ctx, order.ID, execution, message)
-	_ = uc.markStepFinished(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message)
-	_, _ = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now)
+	}); err != nil {
+		logx.Error("release_order", "execution_mark_failed_persist_execution_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+		)
+	}
+	if err := uc.markOpenExecutionStepsFailed(persistCtx, order.ID, execution, message); err != nil {
+		logx.Error("release_order", "execution_mark_failed_persist_steps_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+		)
+	}
+	if err := uc.markStepFinished(persistCtx, order.ID, "global:release_finish", domain.StepStatusFailed, message); err != nil {
+		logx.Error("release_order", "execution_mark_failed_persist_global_finish_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+		)
+	}
+	if _, err := uc.repo.UpdateStatus(persistCtx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
+		logx.Error("release_order", "execution_mark_failed_persist_order_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+		)
+	}
+}
+
+func (uc *ReleaseOrderManager) backgroundPersistenceContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Second)
 }
 
 func (uc *ReleaseOrderManager) markOpenExecutionStepsFailed(

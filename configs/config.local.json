@@ -35,7 +35,7 @@
     "author_email": "yl10115658@gmail.com",
     "author_name": "yeling",
     "command_timeout_sec": 30,
-    "commit_message_template": "chore(release): {env} -\u003e {branch}-\u003e{image_version}",
+    "commit_message_template": "chore(release): {app_key}/{project_name}/{env} -\u003e {image_version} ({branch})",
     "default_branch": "master",
     "enabled": true,
     "local_root": "/Users/lingyunxieqing/Desktop/deploy-manifests",

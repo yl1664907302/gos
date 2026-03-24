@@ -28,10 +28,13 @@ export async function createReleaseOrder(payload: CreateReleaseOrderPayload): Pr
   return response.data
 }
 
-export async function createRollbackReleaseOrderByApplication(applicationID: string): Promise<ReleaseOrderDataResponse> {
-  const response = await http.post<ReleaseOrderDataResponse>(
-    `/applications/${encodeURIComponent(String(applicationID || '').trim())}/release-orders/rollback`,
-  )
+export async function rollbackReleaseOrderByID(id: string): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(`/release-orders/${encodeURIComponent(String(id || '').trim())}/rollback`)
+  return response.data
+}
+
+export async function replayReleaseOrderByID(id: string): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(`/release-orders/${encodeURIComponent(String(id || '').trim())}/replay`)
   return response.data
 }
 

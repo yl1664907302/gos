@@ -36,11 +36,15 @@ func TestBuildCommitMessageFallsBackToDefaultTemplate(t *testing.T) {
 		map[string]string{
 			"order_no":      "RO-20260318-002",
 			"app_name":      "南通后端",
+			"app_key":       "java_nantong",
+			"project_name":  "gateway",
+			"env":           "dev",
+			"branch":        "master",
 			"image_version": "20260318.2",
 		},
 	)
 
-	want := "chore(release): {env} -> 20260318.2"
+	want := "chore(release): java_nantong/gateway/dev -> 20260318.2 (master)"
 	if got != want {
 		t.Fatalf("unexpected default commit message: got %q want %q", got, want)
 	}

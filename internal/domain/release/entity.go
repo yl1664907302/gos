@@ -52,6 +52,23 @@ func (t TriggerType) Valid() bool {
 	}
 }
 
+type OperationType string
+
+const (
+	OperationTypeDeploy   OperationType = "deploy"
+	OperationTypeRollback OperationType = "rollback"
+	OperationTypeReplay   OperationType = "replay"
+)
+
+func (t OperationType) Valid() bool {
+	switch t {
+	case OperationTypeDeploy, OperationTypeRollback, OperationTypeReplay:
+		return true
+	default:
+		return false
+	}
+}
+
 type OrderStatus string
 
 const (
@@ -154,6 +171,10 @@ type ReleaseOrder struct {
 	ID              string
 	OrderNo         string
 	PreviousOrderNo string
+	OperationType   OperationType
+	SourceOrderID   string
+	SourceOrderNo   string
+	CDProvider      string
 	ApplicationID   string
 	ApplicationName string
 	TemplateID      string
@@ -173,6 +194,22 @@ type ReleaseOrder struct {
 	FinishedAt      *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+}
+
+type DeploySnapshot struct {
+	ID               string
+	ReleaseOrderID   string
+	Provider         string
+	GitOpsType       GitOpsType
+	ArgoCDInstanceID string
+	GitOpsInstanceID string
+	ArgoCDAppName    string
+	RepoURL          string
+	Branch           string
+	SourcePath       string
+	EnvCode          string
+	SnapshotPayload  string
+	CreatedAt        time.Time
 }
 
 type ReleaseOrderParam struct {

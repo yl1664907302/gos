@@ -61,6 +61,8 @@ func NewReleaseOrderHandler(
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/applications/:id/release-orders/rollback", h.CreateRollbackByApplication)
 	router.POST("/release-orders", h.Create)
+	router.POST("/release-orders/:id/rollback", h.CreateRollbackByOrder)
+	router.POST("/release-orders/:id/replay", h.CreateReplayByOrder)
 	router.GET("/release-orders", h.List)
 	router.GET("/release-orders/:id", h.GetByID)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
@@ -119,6 +121,10 @@ type ReleaseOrderResponse struct {
 	ID              string     `json:"id"`
 	OrderNo         string     `json:"order_no"`
 	PreviousOrderNo string     `json:"previous_order_no"`
+	OperationType   string     `json:"operation_type"`
+	SourceOrderID   string     `json:"source_order_id"`
+	SourceOrderNo   string     `json:"source_order_no"`
+	CDProvider      string     `json:"cd_provider"`
 	ApplicationID   string     `json:"application_id"`
 	ApplicationName string     `json:"application_name"`
 	TemplateID      string     `json:"template_id"`
@@ -282,6 +288,7 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
 
 	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
 }
@@ -298,8 +305,20 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id}/release-orders/rollback [post]
 func (h *ReleaseOrderHandler) CreateRollbackByApplication(c *gin.Context) {
-	applicationID := strings.TrimSpace(c.Param("id"))
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", applicationID) {
+	c.JSON(http.StatusBadRequest, gin.H{"error": "按应用自动回滚已废弃，请从成功发布单发起恢复"})
+}
+
+func (h *ReleaseOrderHandler) CreateRollbackByOrder(c *gin.Context) {
+	sourceOrderID := strings.TrimSpace(c.Param("id"))
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	sourceOrder, err := h.manager.GetByID(c.Request.Context(), sourceOrderID)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID) {
 		return
 	}
 	currentUser, ok := getCurrentUser(c)
@@ -307,9 +326,9 @@ func (h *ReleaseOrderHandler) CreateRollbackByApplication(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	order, err := h.manager.CreateRollbackByApplication(
+	order, err := h.manager.CreateStandardRollbackByOrder(
 		c.Request.Context(),
-		applicationID,
+		sourceOrderID,
 		strings.TrimSpace(currentUser.ID),
 		resolveTriggeredBy(currentUser),
 	)
@@ -317,6 +336,39 @@ func (h *ReleaseOrderHandler) CreateRollbackByApplication(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
+	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
+}
+
+func (h *ReleaseOrderHandler) CreateReplayByOrder(c *gin.Context) {
+	sourceOrderID := strings.TrimSpace(c.Param("id"))
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	sourceOrder, err := h.manager.GetByID(c.Request.Context(), sourceOrderID)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	order, err := h.manager.CreatePipelineReplayByOrder(
+		c.Request.Context(),
+		sourceOrderID,
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
 	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
 }
 
@@ -386,6 +438,9 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	for idx := range items {
+		items[idx] = h.enrichReleaseOrderResponseMeta(c.Request.Context(), items[idx])
+	}
 
 	resp := make([]ReleaseOrderResponse, 0, len(items))
 	for _, item := range items {
@@ -421,6 +476,7 @@ func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, item.ApplicationID, item.CreatorUserID) {
 		return
 	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
 }
 
@@ -451,6 +507,7 @@ func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
 }
 
@@ -481,6 +538,7 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
 }
 
@@ -758,6 +816,10 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		ID:              item.ID,
 		OrderNo:         item.OrderNo,
 		PreviousOrderNo: item.PreviousOrderNo,
+		OperationType:   string(item.OperationType),
+		SourceOrderID:   item.SourceOrderID,
+		SourceOrderNo:   item.SourceOrderNo,
+		CDProvider:      item.CDProvider,
 		ApplicationID:   item.ApplicationID,
 		ApplicationName: item.ApplicationName,
 		TemplateID:      item.TemplateID,
@@ -779,6 +841,24 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		CreatedAt:       item.CreatedAt,
 		UpdatedAt:       item.UpdatedAt,
 	}
+}
+
+func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context, item domain.ReleaseOrder) domain.ReleaseOrder {
+	if h == nil || h.manager == nil || strings.TrimSpace(item.ID) == "" {
+		return item
+	}
+	executions, err := h.manager.ListExecutions(ctx, item.ID)
+	if err != nil {
+		return item
+	}
+	for _, execution := range executions {
+		if execution.PipelineScope != domain.PipelineScopeCD {
+			continue
+		}
+		item.CDProvider = strings.TrimSpace(execution.Provider)
+		break
+	}
+	return item
 }
 
 func toReleaseOrderParamResponse(item domain.ReleaseOrderParam) ReleaseOrderParamResponse {
@@ -846,7 +926,8 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrExecutionNotFound),
 		errors.Is(err, domain.ErrStepNotFound),
 		errors.Is(err, domain.ErrPipelineStageNotFound),
-		errors.Is(err, domain.ErrTemplateNotFound):
+		errors.Is(err, domain.ErrTemplateNotFound),
+		errors.Is(err, domain.ErrDeploySnapshotNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 
 	case errors.Is(err, domain.ErrOrderDuplicated),

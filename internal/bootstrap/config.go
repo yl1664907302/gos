@@ -184,7 +184,7 @@ func defaultConfig() Config {
 			DefaultBranch:         "master",
 			AuthorName:            "gos-bot",
 			AuthorEmail:           "gos@example.com",
-			CommitMessageTemplate: "chore(release): {env} -> {image_version}",
+			CommitMessageTemplate: "chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})",
 			CommandTimeoutSec:     30,
 		},
 		Release: ReleaseConfig{
@@ -455,7 +455,7 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.GitOps.AuthorEmail = "gos@example.com"
 	}
 	if cfg.GitOps.CommitMessageTemplate == "" {
-		cfg.GitOps.CommitMessageTemplate = "chore(release): {env} -> {image_version}"
+		cfg.GitOps.CommitMessageTemplate = "chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})"
 	}
 	if cfg.GitOps.CommandTimeoutSec <= 0 {
 		cfg.GitOps.CommandTimeoutSec = 30

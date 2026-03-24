@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -96,6 +97,10 @@ func (uc *ReleaseOrderManager) ListValueProgress(
 	}
 	items = append(items, builtinItems...)
 
+	if err := uc.applyRollbackSnapshotValueProgress(ctx, order, items); err != nil {
+		return nil, err
+	}
+
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].PipelineScope != items[j].PipelineScope {
 			return strings.Compare(string(items[i].PipelineScope), string(items[j].PipelineScope)) < 0
@@ -106,6 +111,56 @@ func (uc *ReleaseOrderManager) ListValueProgress(
 		return strings.Compare(items[i].ParamKey, items[j].ParamKey) < 0
 	})
 	return items, nil
+}
+
+func (uc *ReleaseOrderManager) applyRollbackSnapshotValueProgress(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	items []ReleaseOrderValueProgressItem,
+) error {
+	if uc == nil || uc.repo == nil {
+		return nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(string(order.OperationType)), string(domain.OperationTypeRollback)) {
+		return nil
+	}
+	sourceOrderID := strings.TrimSpace(order.SourceOrderID)
+	if sourceOrderID == "" {
+		return nil
+	}
+	snapshot, err := uc.repo.GetDeploySnapshotByOrderID(ctx, sourceOrderID)
+	if err != nil {
+		if errors.Is(err, domain.ErrDeploySnapshotNotFound) {
+			return nil
+		}
+		return err
+	}
+	_, imageVersion, err := decodeHelmDeploySnapshot(snapshot)
+	if err != nil {
+		return nil
+	}
+	imageVersion = strings.TrimSpace(imageVersion)
+	if imageVersion == "" {
+		return nil
+	}
+	for idx := range items {
+		if items[idx].PipelineScope != domain.PipelineScopeCD {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(items[idx].ParamKey))
+		if key != "image_version" && key != "image_tag" {
+			continue
+		}
+		if items[idx].Status == ReleaseOrderValueProgressResolved && strings.TrimSpace(items[idx].Value) != "" {
+			continue
+		}
+		items[idx].Value = imageVersion
+		items[idx].ValueSource = "deploy_snapshot"
+		items[idx].Status = ReleaseOrderValueProgressResolved
+		items[idx].Message = "已从来源成功单部署快照取值"
+		items[idx].UpdatedAt = timePointer(snapshot.CreatedAt)
+	}
+	return nil
 }
 
 func resolveReleaseOrderValueProgressItem(
@@ -183,6 +238,12 @@ func (uc *ReleaseOrderManager) buildBuiltinValueProgress(
 
 	generated := make([]ReleaseOrderValueProgressItem, 0, len(bindings)*max(1, len(builtinDicts)))
 	usesArgoCDCD := templateUsesArgoCDForCD(bindings)
+	appKey := ""
+	if uc.appRepo != nil && strings.TrimSpace(order.ApplicationID) != "" {
+		if appRecord, err := uc.appRepo.GetByID(ctx, strings.TrimSpace(order.ApplicationID)); err == nil {
+			appKey = strings.TrimSpace(appRecord.Key)
+		}
+	}
 	for _, binding := range bindings {
 		for _, dict := range builtinDicts {
 			key := strings.ToLower(strings.TrimSpace(dict.ParamKey))
@@ -196,6 +257,7 @@ func (uc *ReleaseOrderManager) buildBuiltinValueProgress(
 
 			progress, ok := buildBuiltinProgressItem(
 				order,
+				appKey,
 				binding.PipelineScope,
 				dict,
 				baseByScopeKey,
@@ -267,6 +329,7 @@ func buildMirroredBuiltinMessage(item ReleaseOrderValueProgressItem) string {
 
 func buildBuiltinProgressItem(
 	order domain.ReleaseOrder,
+	appKey string,
 	scope domain.PipelineScope,
 	dict platformparamdomain.PlatformParamDict,
 	baseByScopeKey map[string]ReleaseOrderValueProgressItem,
@@ -277,6 +340,22 @@ func buildBuiltinProgressItem(
 	paramKey := strings.TrimSpace(dict.ParamKey)
 	if paramKey == "" {
 		return ReleaseOrderValueProgressItem{}, false
+	}
+	if strings.EqualFold(paramKey, "app_key") && strings.TrimSpace(appKey) != "" {
+		progress := ReleaseOrderValueProgressItem{
+			PipelineScope:     scope,
+			ParamKey:          paramKey,
+			ParamName:         firstNonEmpty(strings.TrimSpace(dict.Name), paramKey),
+			ExecutorParamName: "系统内置",
+			Required:          dict.Required,
+			Status:            ReleaseOrderValueProgressResolved,
+			Value:             strings.TrimSpace(appKey),
+			ValueSource:       "application_key",
+			Message:           "已从应用标识取值",
+			UpdatedAt:         timePointer(order.UpdatedAt),
+			SortNo:            normalizeBuiltinProgressSortNo(dict.ParamKey),
+		}
+		return progress, true
 	}
 
 	if scope == domain.PipelineScopeCD && usesArgoCDCD {
@@ -319,6 +398,9 @@ func buildBuiltinProgressItem(
 
 func normalizeBuiltinProgressSortNo(paramKey string) int {
 	key := strings.ToLower(strings.TrimSpace(paramKey))
+	if key == "app_key" {
+		return 8990
+	}
 	if key == "image_version" {
 		return 9000
 	}

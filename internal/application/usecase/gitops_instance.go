@@ -21,9 +21,10 @@ type GitOpsServiceFactory interface {
 }
 
 type GitOpsInstanceManager struct {
-	repo    domain.Repository
-	factory GitOpsServiceFactory
-	now     func() time.Time
+	repo         domain.Repository
+	factory      GitOpsServiceFactory
+	platformRepo GitOpsCommitTemplateFieldReader
+	now          func() time.Time
 }
 
 type CreateGitOpsInstanceInput struct {
@@ -44,8 +45,8 @@ type CreateGitOpsInstanceInput struct {
 
 type UpdateGitOpsInstanceInput = CreateGitOpsInstanceInput
 
-func NewGitOpsInstanceManager(repo domain.Repository, factory GitOpsServiceFactory) *GitOpsInstanceManager {
-	return &GitOpsInstanceManager{repo: repo, factory: factory, now: func() time.Time { return time.Now().UTC() }}
+func NewGitOpsInstanceManager(repo domain.Repository, factory GitOpsServiceFactory, platformRepo GitOpsCommitTemplateFieldReader) *GitOpsInstanceManager {
+	return &GitOpsInstanceManager{repo: repo, factory: factory, platformRepo: platformRepo, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (uc *GitOpsInstanceManager) List(ctx context.Context, filter domain.InstanceListFilter) ([]domain.Instance, int64, error) {
@@ -85,7 +86,7 @@ func (uc *GitOpsInstanceManager) Create(ctx context.Context, input CreateGitOpsI
 		logx.F("default_branch", input.DefaultBranch),
 		logx.F("status", input.Status),
 	)
-	item, err := uc.normalizeCreateInput(input)
+	item, err := uc.normalizeCreateInput(ctx, input)
 	if err != nil {
 		logx.Error("gitops_instance", "create_failed", err,
 			logx.F("instance_code", input.InstanceCode),
@@ -132,7 +133,7 @@ func (uc *GitOpsInstanceManager) Update(ctx context.Context, id string, input Up
 		logx.Error("gitops_instance", "update_failed", err, logx.F("instance_id", id))
 		return domain.Instance{}, err
 	}
-	item, err := uc.normalizeUpdateInput(current, input)
+	item, err := uc.normalizeUpdateInput(ctx, current, input)
 	if err != nil {
 		logx.Error("gitops_instance", "update_failed", err,
 			logx.F("instance_id", id),
@@ -342,7 +343,7 @@ func (uc *GitOpsInstanceManager) ListValuesCandidates(ctx context.Context, appKe
 	return result, nil
 }
 
-func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstanceInput) (domain.Instance, error) {
+func (uc *GitOpsInstanceManager) normalizeCreateInput(ctx context.Context, input CreateGitOpsInstanceInput) (domain.Instance, error) {
 	code, err := normalizeGitOpsInstanceCode(input.InstanceCode)
 	if err != nil {
 		return domain.Instance{}, err
@@ -379,6 +380,10 @@ func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstance
 		return domain.Instance{}, ErrInvalidStatus
 	}
 	now := uc.now()
+	commitMessageTemplate, err := validateGitOpsCommitMessageTemplate(ctx, uc.platformRepo, input.CommitMessageTemplate)
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	return domain.Instance{
 		ID:                    generateID("gitops"),
 		InstanceCode:          code,
@@ -390,7 +395,7 @@ func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstance
 		Token:                 strings.TrimSpace(input.Token),
 		AuthorName:            authorName,
 		AuthorEmail:           authorEmail,
-		CommitMessageTemplate: gitopsinfra.NormalizeCommitMessageTemplate(input.CommitMessageTemplate),
+		CommitMessageTemplate: commitMessageTemplate,
 		CommandTimeoutSec:     commandTimeoutSec,
 		Status:                status,
 		Remark:                strings.TrimSpace(input.Remark),
@@ -399,7 +404,7 @@ func (uc *GitOpsInstanceManager) normalizeCreateInput(input CreateGitOpsInstance
 	}, nil
 }
 
-func (uc *GitOpsInstanceManager) normalizeUpdateInput(current domain.Instance, input UpdateGitOpsInstanceInput) (domain.Instance, error) {
+func (uc *GitOpsInstanceManager) normalizeUpdateInput(ctx context.Context, current domain.Instance, input UpdateGitOpsInstanceInput) (domain.Instance, error) {
 	code, err := normalizeGitOpsInstanceCode(input.InstanceCode)
 	if err != nil {
 		return domain.Instance{}, err
@@ -459,6 +464,10 @@ func (uc *GitOpsInstanceManager) normalizeUpdateInput(current domain.Instance, i
 	if username == "" {
 		username = current.Username
 	}
+	commitMessageTemplate, err := validateGitOpsCommitMessageTemplate(ctx, uc.platformRepo, firstNonEmpty(strings.TrimSpace(input.CommitMessageTemplate), current.CommitMessageTemplate))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	return domain.Instance{
 		ID:                    current.ID,
 		InstanceCode:          code,
@@ -470,7 +479,7 @@ func (uc *GitOpsInstanceManager) normalizeUpdateInput(current domain.Instance, i
 		Token:                 token,
 		AuthorName:            authorName,
 		AuthorEmail:           authorEmail,
-		CommitMessageTemplate: gitopsinfra.NormalizeCommitMessageTemplate(firstNonEmpty(strings.TrimSpace(input.CommitMessageTemplate), current.CommitMessageTemplate)),
+		CommitMessageTemplate: commitMessageTemplate,
 		CommandTimeoutSec:     commandTimeoutSec,
 		Status:                status,
 		Remark:                strings.TrimSpace(input.Remark),

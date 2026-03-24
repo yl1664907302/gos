@@ -44,6 +44,9 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	id VARCHAR(64) PRIMARY KEY,
 	order_no VARCHAR(64) NOT NULL,
 	previous_order_no VARCHAR(64) NOT NULL DEFAULT '',
+	operation_type VARCHAR(32) NOT NULL DEFAULT 'deploy',
+	source_order_id VARCHAR(64) NOT NULL DEFAULT '',
+	source_order_no VARCHAR(64) NOT NULL DEFAULT '',
 	application_id VARCHAR(64) NOT NULL,
 	application_name VARCHAR(100) NOT NULL DEFAULT '',
 	template_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -86,6 +89,22 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	updated_at BIGINT NOT NULL,
 	UNIQUE KEY uk_release_order_execution_scope (release_order_id, pipeline_scope),
 	KEY idx_release_order_execution_order (release_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_order_deploy_snapshot (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	provider VARCHAR(32) NOT NULL DEFAULT '',
+	gitops_type VARCHAR(32) NOT NULL DEFAULT '',
+	argocd_instance_id VARCHAR(64) NOT NULL DEFAULT '',
+	gitops_instance_id VARCHAR(64) NOT NULL DEFAULT '',
+	argocd_app_name VARCHAR(255) NOT NULL DEFAULT '',
+	repo_url VARCHAR(500) NOT NULL DEFAULT '',
+	branch VARCHAR(128) NOT NULL DEFAULT '',
+	source_path VARCHAR(255) NOT NULL DEFAULT '',
+	env_code VARCHAR(64) NOT NULL DEFAULT '',
+	snapshot_payload_json LONGTEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_order_snapshot_order (release_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id VARCHAR(64) PRIMARY KEY,
@@ -212,6 +231,9 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	id TEXT PRIMARY KEY,
 	order_no TEXT NOT NULL UNIQUE,
 	previous_order_no TEXT NOT NULL DEFAULT '',
+	operation_type TEXT NOT NULL DEFAULT 'deploy',
+	source_order_id TEXT NOT NULL DEFAULT '',
+	source_order_no TEXT NOT NULL DEFAULT '',
 	application_id TEXT NOT NULL,
 	application_name TEXT NOT NULL DEFAULT '',
 	template_id TEXT NOT NULL DEFAULT '',
@@ -254,6 +276,21 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE(release_order_id, pipeline_scope)
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_execution_order ON release_order_execution (release_order_id);`,
+			`CREATE TABLE IF NOT EXISTS release_order_deploy_snapshot (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL UNIQUE,
+	provider TEXT NOT NULL DEFAULT '',
+	gitops_type TEXT NOT NULL DEFAULT '',
+	argocd_instance_id TEXT NOT NULL DEFAULT '',
+	gitops_instance_id TEXT NOT NULL DEFAULT '',
+	argocd_app_name TEXT NOT NULL DEFAULT '',
+	repo_url TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL DEFAULT '',
+	source_path TEXT NOT NULL DEFAULT '',
+	env_code TEXT NOT NULL DEFAULT '',
+	snapshot_payload_json TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id TEXT PRIMARY KEY,
 	release_order_id TEXT NOT NULL,
@@ -438,6 +475,25 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		for _, columnStmt := range []struct {
+			table  string
+			column string
+			stmt   string
+		}{
+			{"release_order", "operation_type", `ALTER TABLE release_order ADD COLUMN operation_type VARCHAR(32) NOT NULL DEFAULT 'deploy' AFTER previous_order_no;`},
+			{"release_order", "source_order_id", `ALTER TABLE release_order ADD COLUMN source_order_id VARCHAR(64) NOT NULL DEFAULT '' AFTER operation_type;`},
+			{"release_order", "source_order_no", `ALTER TABLE release_order ADD COLUMN source_order_no VARCHAR(64) NOT NULL DEFAULT '' AFTER source_order_id;`},
+		} {
+			exists, err = r.mysqlColumnExists(ctx, columnStmt.table, columnStmt.column)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err = r.db.ExecContext(ctx, columnStmt.stmt); err != nil {
+					return err
+				}
+			}
+		}
 		exists, err = r.mysqlColumnExists(ctx, "release_order", "template_id")
 		if err != nil {
 			return err
@@ -517,6 +573,28 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
   AND ro.triggered_by IS NOT NULL
   AND TRIM(ro.triggered_by) <> '';`,
 		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_order_deploy_snapshot (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	provider VARCHAR(32) NOT NULL DEFAULT '',
+	gitops_type VARCHAR(32) NOT NULL DEFAULT '',
+	argocd_instance_id VARCHAR(64) NOT NULL DEFAULT '',
+	gitops_instance_id VARCHAR(64) NOT NULL DEFAULT '',
+	argocd_app_name VARCHAR(255) NOT NULL DEFAULT '',
+	repo_url VARCHAR(500) NOT NULL DEFAULT '',
+	branch VARCHAR(128) NOT NULL DEFAULT '',
+	source_path VARCHAR(255) NOT NULL DEFAULT '',
+	env_code VARCHAR(64) NOT NULL DEFAULT '',
+	snapshot_payload_json LONGTEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	UNIQUE KEY uk_release_order_snapshot_order (release_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+		)
 		return err
 	case "sqlite":
 		columns, err := r.sqliteTableColumns(ctx, "release_template_param")
@@ -559,6 +637,25 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 				ctx,
 				`ALTER TABLE release_order ADD COLUMN previous_order_no TEXT NOT NULL DEFAULT '';`,
 			); err != nil {
+				return err
+			}
+		}
+		for _, stmt := range []struct {
+			column string
+			sql    string
+		}{
+			{"operation_type", `ALTER TABLE release_order ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'deploy';`},
+			{"source_order_id", `ALTER TABLE release_order ADD COLUMN source_order_id TEXT NOT NULL DEFAULT '';`},
+			{"source_order_no", `ALTER TABLE release_order ADD COLUMN source_order_no TEXT NOT NULL DEFAULT '';`},
+		} {
+			tableColumns, tableErr := r.sqliteTableColumns(ctx, "release_order")
+			if tableErr != nil {
+				return tableErr
+			}
+			if _, ok := tableColumns[stmt.column]; ok {
+				continue
+			}
+			if _, err = r.db.ExecContext(ctx, stmt.sql); err != nil {
 				return err
 			}
 		}
@@ -620,6 +717,27 @@ SET creator_user_id = COALESCE(
 WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
   AND triggered_by IS NOT NULL
   AND TRIM(triggered_by) <> '';`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_order_deploy_snapshot (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL UNIQUE,
+	provider TEXT NOT NULL DEFAULT '',
+	gitops_type TEXT NOT NULL DEFAULT '',
+	argocd_instance_id TEXT NOT NULL DEFAULT '',
+	gitops_instance_id TEXT NOT NULL DEFAULT '',
+	argocd_app_name TEXT NOT NULL DEFAULT '',
+	repo_url TEXT NOT NULL DEFAULT '',
+	branch TEXT NOT NULL DEFAULT '',
+	source_path TEXT NOT NULL DEFAULT '',
+	env_code TEXT NOT NULL DEFAULT '',
+	snapshot_payload_json TEXT NOT NULL,
+	created_at INTEGER NOT NULL
+);`,
 		)
 		return err
 	default:
@@ -688,9 +806,9 @@ func (r *ReleaseRepository) Create(
 
 	const insertOrder = `
 INSERT INTO release_order (
-	id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
+	id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
 	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -698,6 +816,9 @@ INSERT INTO release_order (
 		order.ID,
 		order.OrderNo,
 		order.PreviousOrderNo,
+		string(order.OperationType),
+		order.SourceOrderID,
+		order.SourceOrderNo,
 		order.ApplicationID,
 		order.ApplicationName,
 		order.TemplateID,
@@ -809,7 +930,7 @@ INSERT INTO release_order_step (
 
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
-SELECT id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
@@ -878,7 +999,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 
 	listQuery := `
-SELECT id, order_no, previous_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
@@ -923,12 +1044,14 @@ func (r *ReleaseRepository) ListTrackableOrders(
 SELECT COUNT(DISTINCT ro.id)
 FROM release_order ro
 JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE roe.status IN (?, ?);`
+WHERE ro.status = ?
+  AND roe.status IN (?, ?);`
 
 	var total int64
 	if err := r.db.QueryRowContext(
 		ctx,
 		countQuery,
+		string(domain.OrderStatusRunning),
 		string(domain.ExecutionStatusPending),
 		string(domain.ExecutionStatusRunning),
 	).Scan(&total); err != nil {
@@ -936,11 +1059,12 @@ WHERE roe.status IN (?, ?);`
 	}
 
 	const listQuery = `
-SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
+SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.operation_type, ro.source_order_id, ro.source_order_no, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
 	ro.trigger_type, ro.status, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
 FROM release_order ro
 JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE roe.status IN (?, ?)
+WHERE ro.status = ?
+  AND roe.status IN (?, ?)
 ORDER BY ro.created_at DESC
 LIMIT ? OFFSET ?;`
 
@@ -948,6 +1072,7 @@ LIMIT ? OFFSET ?;`
 	rows, err := r.db.QueryContext(
 		ctx,
 		listQuery,
+		string(domain.OrderStatusRunning),
 		string(domain.ExecutionStatusPending),
 		string(domain.ExecutionStatusRunning),
 		pageSize,
@@ -1005,6 +1130,96 @@ WHERE id = ?;`
 		return domain.ReleaseOrder{}, domain.ErrOrderNotFound
 	}
 	return r.GetByID(ctx, id)
+}
+
+func (r *ReleaseRepository) CreateDeploySnapshot(ctx context.Context, snapshot domain.DeploySnapshot) error {
+	const q = `
+INSERT INTO release_order_deploy_snapshot (
+	id, release_order_id, provider, gitops_type, argocd_instance_id, gitops_instance_id, argocd_app_name, repo_url, branch, source_path, env_code, snapshot_payload_json, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		snapshot.ID,
+		snapshot.ReleaseOrderID,
+		snapshot.Provider,
+		string(snapshot.GitOpsType),
+		snapshot.ArgoCDInstanceID,
+		snapshot.GitOpsInstanceID,
+		snapshot.ArgoCDAppName,
+		snapshot.RepoURL,
+		snapshot.Branch,
+		snapshot.SourcePath,
+		snapshot.EnvCode,
+		snapshot.SnapshotPayload,
+		snapshot.CreatedAt.UTC().UnixNano(),
+	)
+	if err == nil {
+		return nil
+	}
+	if !isDuplicateKeyError(r.dbDriver, err) {
+		return err
+	}
+
+	const updateQ = `
+UPDATE release_order_deploy_snapshot
+SET provider = ?, gitops_type = ?, argocd_instance_id = ?, gitops_instance_id = ?, argocd_app_name = ?, repo_url = ?, branch = ?, source_path = ?, env_code = ?, snapshot_payload_json = ?, created_at = ?
+WHERE release_order_id = ?;`
+	_, err = r.db.ExecContext(
+		ctx,
+		updateQ,
+		snapshot.Provider,
+		string(snapshot.GitOpsType),
+		snapshot.ArgoCDInstanceID,
+		snapshot.GitOpsInstanceID,
+		snapshot.ArgoCDAppName,
+		snapshot.RepoURL,
+		snapshot.Branch,
+		snapshot.SourcePath,
+		snapshot.EnvCode,
+		snapshot.SnapshotPayload,
+		snapshot.CreatedAt.UTC().UnixNano(),
+		snapshot.ReleaseOrderID,
+	)
+	return err
+}
+
+func (r *ReleaseRepository) GetDeploySnapshotByOrderID(ctx context.Context, releaseOrderID string) (domain.DeploySnapshot, error) {
+	const q = `
+SELECT id, release_order_id, provider, gitops_type, argocd_instance_id, gitops_instance_id, argocd_app_name, repo_url, branch, source_path, env_code, snapshot_payload_json, created_at
+FROM release_order_deploy_snapshot
+WHERE release_order_id = ?;`
+
+	row := r.db.QueryRowContext(ctx, q, strings.TrimSpace(releaseOrderID))
+	var (
+		item        domain.DeploySnapshot
+		gitOpsType  string
+		createdAtNs int64
+	)
+	if err := row.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&item.Provider,
+		&gitOpsType,
+		&item.ArgoCDInstanceID,
+		&item.GitOpsInstanceID,
+		&item.ArgoCDAppName,
+		&item.RepoURL,
+		&item.Branch,
+		&item.SourcePath,
+		&item.EnvCode,
+		&item.SnapshotPayload,
+		&createdAtNs,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.DeploySnapshot{}, domain.ErrDeploySnapshotNotFound
+		}
+		return domain.DeploySnapshot{}, err
+	}
+	item.GitOpsType = domain.GitOpsType(gitOpsType)
+	item.CreatedAt = time.Unix(0, createdAtNs).UTC()
+	return item, nil
 }
 
 func (r *ReleaseRepository) ListParams(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderParam, error) {
@@ -1838,18 +2053,22 @@ ORDER BY sort_no ASC, created_at ASC;`
 
 func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	var (
-		item        domain.ReleaseOrder
-		triggerType string
-		status      string
-		startedAt   sql.NullInt64
-		finishedAt  sql.NullInt64
-		createdAt   int64
-		updatedAt   int64
+		item          domain.ReleaseOrder
+		operationType string
+		triggerType   string
+		status        string
+		startedAt     sql.NullInt64
+		finishedAt    sql.NullInt64
+		createdAt     int64
+		updatedAt     int64
 	)
 	if err := s.Scan(
 		&item.ID,
 		&item.OrderNo,
 		&item.PreviousOrderNo,
+		&operationType,
+		&item.SourceOrderID,
+		&item.SourceOrderNo,
 		&item.ApplicationID,
 		&item.ApplicationName,
 		&item.TemplateID,
@@ -1873,6 +2092,7 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		return domain.ReleaseOrder{}, err
 	}
 
+	item.OperationType = domain.OperationType(operationType)
 	item.TriggerType = domain.TriggerType(triggerType)
 	item.Status = domain.OrderStatus(status)
 	if startedAt.Valid {

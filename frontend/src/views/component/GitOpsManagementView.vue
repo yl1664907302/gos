@@ -49,7 +49,7 @@ const instanceForm = reactive<UpsertGitOpsInstancePayload>({
   token: '',
   author_name: 'gos-bot',
   author_email: 'gos@example.com',
-  commit_message_template: 'chore(release): {env} -> {image_version}',
+  commit_message_template: 'chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})',
   command_timeout_sec: 30,
   status: 'active',
   remark: '',
@@ -94,7 +94,7 @@ function resetInstanceForm() {
   instanceForm.token = ''
   instanceForm.author_name = 'gos-bot'
   instanceForm.author_email = 'gos@example.com'
-  instanceForm.commit_message_template = 'chore(release): {env} -> {image_version}'
+  instanceForm.commit_message_template = 'chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})'
   instanceForm.command_timeout_sec = 30
   instanceForm.status = 'active'
   instanceForm.remark = ''
@@ -116,7 +116,7 @@ function openEditInstance(record: GitOpsInstance) {
   instanceForm.token = ''
   instanceForm.author_name = record.author_name || 'gos-bot'
   instanceForm.author_email = record.author_email || 'gos@example.com'
-  instanceForm.commit_message_template = record.commit_message_template || 'chore(release): {env} -> {image_version}'
+  instanceForm.commit_message_template = record.commit_message_template || 'chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})'
   instanceForm.command_timeout_sec = record.command_timeout_sec || 30
   instanceForm.status = (record.status || 'active') as GitOpsRecordStatus
   instanceForm.remark = record.remark || ''
@@ -453,6 +453,7 @@ onUnmounted(() => {
         </a-row>
         <a-form-item label="提交模版">
           <a-textarea v-model:value="instanceForm.commit_message_template" :rows="3" />
+          <div class="field-help">仅允许使用平台字段字典中的标准字段占位符，例如 `app_key`、`project_name`、`env`、`image_version`、`branch`。</div>
         </a-form-item>
         <a-form-item label="命令超时（秒）">
           <a-input-number v-model:value="instanceForm.command_timeout_sec" :min="1" :max="600" style="width: 100%" />
@@ -508,6 +509,13 @@ onUnmounted(() => {
   color: var(--color-text-main);
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   word-break: break-word;
+}
+
+.field-help {
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .status-panel {

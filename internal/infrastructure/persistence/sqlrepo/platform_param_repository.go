@@ -137,6 +137,20 @@ func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error
 	now := time.Now().UTC()
 	items := []domain.PlatformParamDict{
 		{
+			ID:            "ppd-app-key",
+			ParamKey:      "app_key",
+			Name:          "应用标识",
+			Description:   "平台内置；默认取应用 Key，用于审计、GitOps 提交信息与跨环境识别。",
+			ParamType:     domain.ParamTypeString,
+			Required:      false,
+			GitOpsLocator: false,
+			CDSelfFill:    false,
+			Builtin:       true,
+			Status:        domain.StatusEnabled,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+		{
 			ID:            "ppd-image-version",
 			ParamKey:      "image_version",
 			Name:          "镜像版本",
@@ -159,7 +173,7 @@ func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error
 			return err
 		}
 	}
-	return r.normalizeBuiltinFlags(ctx, []string{"image_version"}, now)
+	return r.normalizeBuiltinFlags(ctx, []string{"app_key", "image_version"}, now)
 }
 
 func (r *PlatformParamRepository) upsertBuiltinParam(ctx context.Context, item domain.PlatformParamDict) error {

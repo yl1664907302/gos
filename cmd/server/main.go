@@ -116,7 +116,7 @@ func main() {
 	syncPipelines := usecase.NewSyncPipelines(pipelineRepo, jenkinsClient)
 	syncExecutorParamDefs := usecase.NewSyncExecutorParamDefs(executorParamRepo, jenkinsClient)
 	syncArgoCDApplications := usecase.NewSyncArgoCDApplications(argocdAppRepo, argocdClientFactory)
-	gitopsInstanceManager := usecase.NewGitOpsInstanceManager(gitopsRepo, gitopsServiceFactory)
+	gitopsInstanceManager := usecase.NewGitOpsInstanceManager(gitopsRepo, gitopsServiceFactory, platformParamRepo)
 	argocdInstanceManager := usecase.NewArgoCDInstanceManager(argocdAppRepo, gitopsRepo, argocdClientFactory)
 	userManagement := usecase.NewUserManagement(userRepo)
 	authSessionManager := usecase.NewAuthSessionManager(
@@ -177,6 +177,7 @@ func main() {
 			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
 			gitopsService,
 			gitopsStatusQuery,
+			platformParamRepo,
 		),
 		gitopsInstanceManager,
 		authSessionManager,

@@ -85,7 +85,7 @@ type BindingTarget struct {
 	AvailableEnvironments []string
 }
 
-const defaultCommitMessageTemplate = "chore(release): {env} -> {image_version}"
+const defaultCommitMessageTemplate = "chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})"
 
 var commitTemplateTokenPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
 var repoBranchLocks sync.Map
@@ -981,7 +981,10 @@ func (s *Service) gitSingleLine(ctx context.Context, workspacePath string, args 
 func (s *Service) runCommand(ctx context.Context, workspacePath string, name string, args ...string) (string, error) {
 	timeout := time.Duration(s.commandTimeoutSec) * time.Second
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = 120 * time.Second
+	}
+	if timeout < 120*time.Second {
+		timeout = 120 * time.Second
 	}
 	lockMaxAge := timeout
 	if lockMaxAge < 60*time.Second {

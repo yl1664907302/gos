@@ -27,10 +27,13 @@ import {
   listReleaseOrderValueProgress,
   listReleaseOrderPipelineStages,
   listReleaseOrderSteps,
+  replayReleaseOrderByID,
+  rollbackReleaseOrderByID,
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import { useAuthStore } from '../../stores/auth'
 import type {
+  ReleaseOperationType,
   ReleaseOrder,
   ReleaseOrderExecution,
   ReleaseOrderLogStreamEvent,
@@ -89,6 +92,7 @@ const loading = ref(false)
 const querying = ref(false)
 const cancelling = ref(false)
 const executing = ref(false)
+const recovering = ref(false)
 const autoRefreshTimer = ref<number | null>(null)
 const executeLocked = ref(false)
 
@@ -120,6 +124,14 @@ const orderID = computed(() => String(route.params.id || '').trim())
 const canViewParamSnapshot = computed(() => authStore.hasPermission('release.param_snapshot.view'))
 const canCancel = computed(() => order.value?.status === 'pending' || order.value?.status === 'running')
 const canExecute = computed(() => order.value?.status === 'pending' && !executeLocked.value)
+const canRollback = computed(
+  () => order.value?.status === 'success' && String(order.value?.cd_provider || '').trim().toLowerCase() === 'argocd',
+)
+const canReplay = computed(
+  () =>
+    order.value?.status === 'success' &&
+    String(order.value?.cd_provider || '').trim().toLowerCase() !== 'argocd',
+)
 const shouldAutoRefresh = computed(() => {
   if (!order.value) {
     return true
@@ -146,10 +158,10 @@ const detailItems = computed(() => {
   if (!order.value) {
     return []
   }
-  return [
+  const items = [
     { key: 'order_no', label: '发布单号', value: order.value.order_no },
     { key: 'created_at', label: '创建时间', value: formatTime(order.value.created_at) },
-    { key: 'previous_order_no', label: '上次发布单号', value: order.value.previous_order_no || '-' },
+    { key: 'operation_type', label: '操作类型', value: operationTypeText(order.value.operation_type) },
     { label: '应用名称', value: order.value.application_name || '-' },
     { label: '模板名称', value: order.value.template_name || '-' },
     { label: '模板 ID', value: order.value.template_id || '-' },
@@ -162,6 +174,10 @@ const detailItems = computed(() => {
     { label: '结束时间', value: formatTime(order.value.finished_at) },
     { label: '更新时间', value: formatTime(order.value.updated_at) },
   ]
+  if (order.value.operation_type !== 'deploy' && order.value.source_order_no) {
+    items.splice(3, 0, { key: 'source_order_no', label: '来源发布单号', value: order.value.source_order_no })
+  }
+  return items
 })
 
 const heroFacts = computed(() => {
@@ -534,6 +550,37 @@ function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined
     default:
       return triggerType || '-'
   }
+}
+
+function operationTypeText(operationType: ReleaseOperationType | '' | null | undefined) {
+  switch (String(operationType || '').trim().toLowerCase()) {
+    case 'rollback':
+      return '标准回滚'
+    case 'replay':
+      return '重放回滚'
+    default:
+      return '普通发布'
+  }
+}
+
+function isCiOnlyRecovery(record?: ReleaseOrder | null) {
+  return String(record?.cd_provider || '').trim() === ''
+}
+
+function replayActionText(record?: ReleaseOrder | null) {
+  return '回滚到此版本'
+}
+
+function replayConfirmTitle(record?: ReleaseOrder | null) {
+  return isCiOnlyRecovery(record) ? '确认基于这张成功单创建 CI 重放回滚吗？' : '确认基于这张成功单创建重放回滚吗？'
+}
+
+function replaySuccessText(record: ReleaseOrder, orderNo: string) {
+  return isCiOnlyRecovery(record) ? `已创建 CI 重放回滚单：${orderNo}` : `已创建重放回滚单：${orderNo}`
+}
+
+function replayFailureText(record?: ReleaseOrder | null) {
+  return isCiOnlyRecovery(record) ? 'CI 重放回滚创建失败' : '重放回滚创建失败'
 }
 
 function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
@@ -1119,12 +1166,44 @@ async function handleExecute() {
   try {
     const response = await executeReleaseOrder(order.value.id)
     order.value = response.data
-    message.success('发布已触发，后端开始执行')
+    message.success('发布已提交，正在调度执行')
     await loadDetail({ silent: true })
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '发布执行失败'))
   } finally {
     executing.value = false
+  }
+}
+
+async function handleRollback() {
+  if (!order.value || !canRollback.value) {
+    return
+  }
+  recovering.value = true
+  try {
+    const response = await rollbackReleaseOrderByID(order.value.id)
+    message.success(`已创建标准回滚单：${response.data.order_no}`)
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '标准回滚创建失败'))
+  } finally {
+    recovering.value = false
+  }
+}
+
+async function handleReplay() {
+  if (!order.value || !canReplay.value) {
+    return
+  }
+  recovering.value = true
+  try {
+    const response = await replayReleaseOrderByID(order.value.id)
+    message.success(replaySuccessText(order.value, response.data.order_no))
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, replayFailureText(order.value)))
+  } finally {
+    recovering.value = false
   }
 }
 
@@ -1202,6 +1281,30 @@ onBeforeUnmount(() => {
         </a-popconfirm>
         <a-button v-else type="primary" disabled>发布</a-button>
         <a-popconfirm
+          v-if="canRollback"
+          title="确认基于这张成功单创建标准回滚吗？"
+          ok-text="确认回滚"
+          cancel-text="取消"
+          @confirm="handleRollback"
+        >
+          <template #icon>
+            <ExclamationCircleOutlined class="danger-icon" />
+          </template>
+          <a-button danger :loading="recovering">回滚到此版本</a-button>
+        </a-popconfirm>
+        <a-popconfirm
+          v-else-if="canReplay"
+          :title="replayConfirmTitle(order)"
+          :ok-text="isCiOnlyRecovery(order) ? '确认恢复' : '确认重放'"
+          cancel-text="取消"
+          @confirm="handleReplay"
+        >
+          <template #icon>
+            <ExclamationCircleOutlined />
+          </template>
+          <a-button :loading="recovering">{{ replayActionText(order) }}</a-button>
+        </a-popconfirm>
+        <a-popconfirm
           v-if="canCancel"
           title="确认取消当前发布单吗？"
           ok-text="确认"
@@ -1224,7 +1327,12 @@ onBeforeUnmount(() => {
               <div class="release-hero-label">发布单号</div>
               <div class="release-hero-order">
                 <span>{{ order?.order_no || '-' }}</span>
-                <a-tag v-if="order?.previous_order_no" class="status-chip status-chip-danger">回滚</a-tag>
+                <a-tag v-if="order?.operation_type === 'rollback'" class="status-chip status-chip-danger">
+                  {{ operationTypeText(order?.operation_type) }}
+                </a-tag>
+                <a-tag v-else-if="order?.operation_type === 'replay'" class="status-chip status-chip-warning">
+                  {{ operationTypeText(order?.operation_type) }}
+                </a-tag>
               </div>
             </div>
           </div>
@@ -1418,11 +1526,16 @@ onBeforeUnmount(() => {
           <a-collapse-panel key="base-info" header="基础信息与参数快照">
             <a-card class="nested-card" title="基础信息" :loading="loading" :bordered="false">
                 <a-descriptions :column="{ xs: 1, md: 2 }" bordered>
-                  <a-descriptions-item v-for="item in detailItems" :key="item.key || item.label" :label="item.label">
+                <a-descriptions-item v-for="item in detailItems" :key="item.key || item.label" :label="item.label">
                     <template v-if="item.key === 'order_no'">
                       <a-space :size="6">
                         <span>{{ item.value }}</span>
-                        <a-tag v-if="order?.previous_order_no" class="status-chip status-chip-danger">回滚</a-tag>
+                        <a-tag v-if="order?.operation_type === 'rollback'" class="status-chip status-chip-danger">
+                          {{ operationTypeText(order?.operation_type) }}
+                        </a-tag>
+                        <a-tag v-else-if="order?.operation_type === 'replay'" class="status-chip status-chip-warning">
+                          {{ operationTypeText(order?.operation_type) }}
+                        </a-tag>
                       </a-space>
                     </template>
                   <template v-else>
