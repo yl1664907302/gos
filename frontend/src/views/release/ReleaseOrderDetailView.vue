@@ -1290,7 +1290,7 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined class="danger-icon" />
           </template>
-          <a-button danger :loading="recovering">回滚到此版本</a-button>
+          <a-button class="rollback-trigger-button" :loading="recovering">回滚到此版本</a-button>
         </a-popconfirm>
         <a-popconfirm
           v-else-if="canReplay"
@@ -1302,7 +1302,7 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined />
           </template>
-          <a-button :loading="recovering">{{ replayActionText(order) }}</a-button>
+          <a-button class="rollback-trigger-button" :loading="recovering">{{ replayActionText(order) }}</a-button>
         </a-popconfirm>
         <a-popconfirm
           v-if="canCancel"
@@ -2298,6 +2298,18 @@ onBeforeUnmount(() => {
 
 .stage-log-panel {
   min-height: 220px;
+}
+
+.rollback-trigger-button {
+  color: #0f172a;
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.rollback-trigger-button:hover,
+.rollback-trigger-button:focus {
+  color: #020617;
+  border-color: rgba(15, 23, 42, 0.36);
+  background: rgba(15, 23, 42, 0.04);
 }
 
 @media (max-width: 768px) {

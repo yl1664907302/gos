@@ -856,7 +856,7 @@ onBeforeUnmount(() => {
                 <template #icon>
                   <ExclamationCircleOutlined class="danger-icon" />
                 </template>
-                <a-button type="link" size="small" danger :loading="recoveringID === record.id">回滚到此版本</a-button>
+                <a-button type="link" size="small" class="rollback-trigger-link" :loading="recoveringID === record.id">回滚到此版本</a-button>
               </a-popconfirm>
               <a-popconfirm
                 v-else-if="canReplay(record)"
@@ -868,7 +868,7 @@ onBeforeUnmount(() => {
                 <template #icon>
                   <ExclamationCircleOutlined />
                 </template>
-                <a-button type="link" size="small" :loading="recoveringID === record.id">{{ replayActionText(record) }}</a-button>
+                <a-button type="link" size="small" class="rollback-trigger-link" :loading="recoveringID === record.id">{{ replayActionText(record) }}</a-button>
               </a-popconfirm>
               <a-popconfirm
                 v-if="canCancel(record)"
@@ -1212,6 +1212,15 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.rollback-trigger-link {
+  color: #0f172a;
+}
+
+.rollback-trigger-link:hover,
+.rollback-trigger-link:focus {
+  color: #020617;
 }
 
 .pagination-area {

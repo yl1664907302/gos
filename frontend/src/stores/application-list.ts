@@ -7,7 +7,7 @@ export const useApplicationListStore = defineStore('application-list', {
     name: '',
     status: '' as ApplicationStatus | '',
     page: 1,
-    pageSize: 20,
+    pageSize: 6,
   }),
   actions: {
     setPage(page: number, pageSize: number) {
@@ -19,7 +19,7 @@ export const useApplicationListStore = defineStore('application-list', {
       this.name = ''
       this.status = ''
       this.page = 1
-      this.pageSize = 20
+      this.pageSize = 6
     },
   },
 })
