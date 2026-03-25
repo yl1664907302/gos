@@ -9,10 +9,56 @@ import (
 type ReleaseSettingsStore interface {
 	LoadEnvOptions(ctx context.Context) ([]string, error)
 	SaveEnvOptions(ctx context.Context, values []string) error
+	LoadConcurrencySettings(ctx context.Context) (ReleaseConcurrencySettingsOutput, error)
+	SaveConcurrencySettings(ctx context.Context, input ReleaseConcurrencySettingsInput) error
 }
 
+type ReleaseConcurrencyLockScope string
+
+const (
+	ReleaseConcurrencyLockScopeApplication      ReleaseConcurrencyLockScope = "application"
+	ReleaseConcurrencyLockScopeApplicationEnv   ReleaseConcurrencyLockScope = "application_env"
+	ReleaseConcurrencyLockScopeGitOpsRepoBranch ReleaseConcurrencyLockScope = "gitops_repo_branch"
+)
+
+func (s ReleaseConcurrencyLockScope) Valid() bool {
+	switch s {
+	case ReleaseConcurrencyLockScopeApplication, ReleaseConcurrencyLockScopeApplicationEnv, ReleaseConcurrencyLockScopeGitOpsRepoBranch:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseConcurrencyConflictStrategy string
+
+const (
+	ReleaseConcurrencyConflictStrategyReject ReleaseConcurrencyConflictStrategy = "reject"
+	ReleaseConcurrencyConflictStrategyQueue  ReleaseConcurrencyConflictStrategy = "queue"
+)
+
+func (s ReleaseConcurrencyConflictStrategy) Valid() bool {
+	switch s {
+	case ReleaseConcurrencyConflictStrategyReject, ReleaseConcurrencyConflictStrategyQueue:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseConcurrencySettingsOutput struct {
+	Enabled            bool                               `json:"enabled"`
+	LockScope          ReleaseConcurrencyLockScope        `json:"lock_scope"`
+	ConflictStrategy   ReleaseConcurrencyConflictStrategy `json:"conflict_strategy"`
+	LockTimeoutSec     int                                `json:"lock_timeout_sec"`
+	AllowAdminOverride bool                               `json:"allow_admin_override"`
+}
+
+type ReleaseConcurrencySettingsInput = ReleaseConcurrencySettingsOutput
+
 type ReleaseSettingsOutput struct {
-	EnvOptions []string `json:"env_options"`
+	EnvOptions  []string                         `json:"env_options"`
+	Concurrency ReleaseConcurrencySettingsOutput `json:"concurrency"`
 }
 
 type QueryReleaseSettings struct {
@@ -31,11 +77,19 @@ func (uc *QueryReleaseSettings) Execute(ctx context.Context) (ReleaseSettingsOut
 	if err != nil {
 		return ReleaseSettingsOutput{}, err
 	}
-	return ReleaseSettingsOutput{EnvOptions: normalizeReleaseEnvOptions(options)}, nil
+	concurrency, err := uc.store.LoadConcurrencySettings(ctx)
+	if err != nil {
+		return ReleaseSettingsOutput{}, err
+	}
+	return ReleaseSettingsOutput{
+		EnvOptions:  normalizeReleaseEnvOptions(options),
+		Concurrency: normalizeConcurrencySettings(concurrency),
+	}, nil
 }
 
 type UpdateReleaseSettingsInput struct {
-	EnvOptions []string
+	EnvOptions  []string
+	Concurrency ReleaseConcurrencySettingsInput
 }
 
 type UpdateReleaseSettings struct {
@@ -58,6 +112,9 @@ func (uc *UpdateReleaseSettings) Execute(ctx context.Context, input UpdateReleas
 	if err := uc.store.SaveEnvOptions(ctx, options); err != nil {
 		return ReleaseSettingsOutput{}, err
 	}
+	if err := uc.store.SaveConcurrencySettings(ctx, normalizeConcurrencySettings(input.Concurrency)); err != nil {
+		return ReleaseSettingsOutput{}, err
+	}
 	return uc.reader.Execute(ctx)
 }
 
@@ -76,4 +133,35 @@ func normalizeReleaseEnvOptions(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func normalizeConcurrencySettings(input ReleaseConcurrencySettingsInput) ReleaseConcurrencySettingsOutput {
+	scope := ReleaseConcurrencyLockScope(strings.TrimSpace(string(input.LockScope)))
+	if !scope.Valid() {
+		scope = ReleaseConcurrencyLockScopeApplicationEnv
+	}
+
+	strategy := ReleaseConcurrencyConflictStrategy(strings.TrimSpace(string(input.ConflictStrategy)))
+	if !strategy.Valid() {
+		strategy = ReleaseConcurrencyConflictStrategyReject
+	}
+
+	timeout := input.LockTimeoutSec
+	if timeout <= 0 {
+		timeout = 1800
+	}
+	if timeout < 30 {
+		timeout = 30
+	}
+	if timeout > 86400 {
+		timeout = 86400
+	}
+
+	return ReleaseConcurrencySettingsOutput{
+		Enabled:            input.Enabled,
+		LockScope:          scope,
+		ConflictStrategy:   strategy,
+		LockTimeoutSec:     timeout,
+		AllowAdminOverride: input.AllowAdminOverride,
+	}
 }

@@ -173,6 +173,10 @@ func (c *Client) GetApplication(ctx context.Context, name string) (Application, 
 }
 
 func (c *Client) SyncApplication(ctx context.Context, name string) error {
+	return c.SyncApplicationWithRevision(ctx, name, "")
+}
+
+func (c *Client) SyncApplicationWithRevision(ctx context.Context, name string, revision string) error {
 	if !c.Enabled() {
 		return fmt.Errorf("argocd client is not configured")
 	}
@@ -182,6 +186,9 @@ func (c *Client) SyncApplication(ctx context.Context, name string) error {
 	}
 	body := map[string]any{
 		"prune": false,
+	}
+	if strings.TrimSpace(revision) != "" {
+		body["revision"] = strings.TrimSpace(revision)
 	}
 	return c.doJSON(ctx, http.MethodPost, "/api/v1/applications/"+url.PathEscape(name)+"/sync", body, nil)
 }

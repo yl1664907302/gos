@@ -24,6 +24,8 @@ import type {
   ReleasePipelineScope,
   ReleaseTemplate,
   ReleaseTemplateBinding,
+  ReleaseTemplateParamConfigPayload,
+  ReleaseTemplateParamValueSource,
   ReleaseTemplateGitOpsRule,
   ReleaseTemplateGitOpsRulePayload,
   ReleaseTemplateGitOpsType,
@@ -42,6 +44,12 @@ type ScopeState = {
   selected_param_def_ids: string[]
   selectable_params: ExecutorParamDef[]
   loading_params: boolean
+}
+
+type TemplateParamConfigState = {
+  value_source: ReleaseTemplateParamValueSource
+  source_param_key: string
+  fixed_value: string
 }
 
 interface TemplateFormState {
@@ -74,6 +82,17 @@ interface GitOpsRuleFormItem {
   target_path: string
   value_template: string
 }
+
+const builtinTemplateSourceKeys = new Set([
+  'app_key',
+  'app_name',
+  'env',
+  'env_code',
+  'branch',
+  'git_ref',
+  'image_version',
+  'image_tag',
+])
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -110,6 +129,11 @@ const scopeStates = reactive<Record<ReleasePipelineScope, ScopeState>>({
   },
 })
 
+const scopeParamConfigs = reactive<Record<ReleasePipelineScope, Record<string, TemplateParamConfigState>>>({
+  ci: {},
+  cd: {},
+})
+
 const filters = reactive({
   application_id: '',
   status: '' as '' | ReleaseTemplateStatus,
@@ -140,7 +164,7 @@ const scopeTitles: Record<ReleasePipelineScope, string> = {
 
 const scopeDescriptions: Record<ReleasePipelineScope, string> = {
   ci: 'CI 固定使用 Jenkins；参数仅允许来自 CI 绑定管线，并且必须已完成平台标准 Key 映射。',
-  cd: '先明确当前模板的 CD 方式：选择管线时只配置 CD 绑定管线；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
+  cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或内置字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
 }
 
 const initialColumns: TableColumnsType<ReleaseTemplate> = [
@@ -223,6 +247,37 @@ const gitOpsSourceOptions = computed<SelectOption[]>(() => {
   return options
 })
 
+const ciTemplateSourceOptions = computed<SelectOption[]>(() => {
+  const options: SelectOption[] = []
+  const selectedCIParamIDs = new Set(scopeStates.ci.selected_param_def_ids)
+  scopeStates.ci.selectable_params.forEach((item) => {
+    if (!selectedCIParamIDs.has(item.id)) {
+      return
+    }
+    const key = String(item.param_key || '').trim().toLowerCase()
+    if (!key) {
+      return
+    }
+    options.push({
+      label: `${resolvePlatformParamName(key)} (${key})`,
+      value: key,
+    })
+  })
+  return options
+})
+
+const builtinTemplateSourceOptions = computed<SelectOption[]>(() =>
+  platformParamDicts.value
+    .filter((item) => {
+      const key = String(item.param_key || '').trim().toLowerCase()
+      return item.status === 1 && (item.builtin || builtinTemplateSourceKeys.has(key))
+    })
+    .map((item) => ({
+      label: `${item.name} (${item.param_key})`,
+      value: String(item.param_key || '').trim().toLowerCase(),
+    })),
+)
+
 const selectedApplicationRecord = computed(() =>
   applicationRecords.value.find((item) => item.id === formState.application_id.trim()) || null,
 )
@@ -257,6 +312,95 @@ function isCDUsingArgoCD() {
 
 function isCDUsingPipeline() {
   return scopeStates.cd.enabled && cdMode.value === 'pipeline'
+}
+
+function defaultTemplateParamValueSource(scope: ReleasePipelineScope): ReleaseTemplateParamValueSource {
+  return 'release_input'
+}
+
+function createTemplateParamConfigState(
+  scope: ReleasePipelineScope,
+  partial?: Partial<TemplateParamConfigState>,
+): TemplateParamConfigState {
+  return {
+    value_source: partial?.value_source || defaultTemplateParamValueSource(scope),
+    source_param_key: String(partial?.source_param_key || '').trim().toLowerCase(),
+    fixed_value: String(partial?.fixed_value || ''),
+  }
+}
+
+function selectedScopeParamDefs(scope: ReleasePipelineScope) {
+  const selected = new Set(scopeStates[scope].selected_param_def_ids)
+  return scopeStates[scope].selectable_params.filter((item) => selected.has(item.id))
+}
+
+function syncScopeParamConfigs(scope: ReleasePipelineScope) {
+  const state = scopeStates[scope]
+  const nextConfigs: Record<string, TemplateParamConfigState> = {}
+  state.selected_param_def_ids.forEach((id) => {
+    nextConfigs[id] = createTemplateParamConfigState(scope, scopeParamConfigs[scope][id])
+  })
+  scopeParamConfigs[scope] = nextConfigs
+}
+
+function getTemplateParamConfig(scope: ReleasePipelineScope, paramDefID: string) {
+  if (!scopeParamConfigs[scope][paramDefID]) {
+    scopeParamConfigs[scope][paramDefID] = createTemplateParamConfigState(scope)
+  }
+  return scopeParamConfigs[scope][paramDefID]
+}
+
+function handleTemplateParamValueSourceChange(
+  scope: ReleasePipelineScope,
+  paramDefID: string,
+  value: ReleaseTemplateParamValueSource,
+) {
+  const config = getTemplateParamConfig(scope, paramDefID)
+  config.value_source = value
+  if (value !== 'fixed') {
+    config.fixed_value = ''
+  }
+  if (value !== 'ci_param' && value !== 'builtin') {
+    config.source_param_key = ''
+  }
+}
+
+function resolveTemplateParamSourceOptions(scope: ReleasePipelineScope, config: TemplateParamConfigState) {
+  if (scope === 'cd' && config.value_source === 'ci_param') {
+    return ciTemplateSourceOptions.value
+  }
+  if (scope === 'cd' && config.value_source === 'builtin') {
+    return builtinTemplateSourceOptions.value
+  }
+  return []
+}
+
+function resolveTemplateParamSourceLabel(scope: ReleasePipelineScope, config: TemplateParamConfigState) {
+  if (scope === 'ci') {
+    return config.value_source === 'fixed' ? '固定值' : '发布时填写'
+  }
+  switch (config.value_source) {
+    case 'fixed':
+      return '固定值'
+    case 'ci_param':
+      return '沿用 CI 标准字段'
+    case 'builtin':
+      return '内置字段'
+    default:
+      return '发布时填写'
+  }
+}
+
+function buildTemplateParamConfigs(scope: ReleasePipelineScope): ReleaseTemplateParamConfigPayload[] {
+  return scopeStates[scope].selected_param_def_ids.map((id) => {
+    const config = getTemplateParamConfig(scope, id)
+    return {
+      executor_param_def_id: id,
+      value_source: config.value_source,
+      source_param_key: config.source_param_key || undefined,
+      fixed_value: config.fixed_value || undefined,
+    }
+  })
 }
 
 function normalizedGitOpsType(type?: string): ReleaseTemplateGitOpsType {
@@ -572,6 +716,7 @@ function resetScopeState(scope: ReleasePipelineScope) {
   scopeStates[scope].selected_param_def_ids = []
   scopeStates[scope].selectable_params = []
   scopeStates[scope].loading_params = false
+  scopeParamConfigs[scope] = {}
 }
 
 function resetFormState() {
@@ -636,7 +781,9 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     status: formState.status,
     remark: formState.remark.trim() || undefined,
     ci_param_def_ids: scopeStates.ci.enabled ? [...scopeStates.ci.selected_param_def_ids] : [],
-    cd_param_def_ids: [],
+    cd_param_def_ids: scopeStates.cd.enabled && isCDUsingPipeline() ? [...scopeStates.cd.selected_param_def_ids] : [],
+    ci_param_configs: scopeStates.ci.enabled ? buildTemplateParamConfigs('ci') : [],
+    cd_param_configs: scopeStates.cd.enabled && isCDUsingPipeline() ? buildTemplateParamConfigs('cd') : [],
     gitops_rules:
       scopeStates.cd.enabled && isCDUsingArgoCD()
         ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item))
@@ -765,11 +912,12 @@ async function loadSelectableParams(scope: ReleasePipelineScope, preserveSelecti
   const appID = formState.application_id.trim()
   const binding = selectedBinding(scope)
 
-  if (scope === 'cd') {
+  if (scope === 'cd' && !isCDUsingPipeline()) {
     state.selectable_params = []
     if (!preserveSelection) {
       state.selected_param_def_ids = []
     }
+    scopeParamConfigs.cd = {}
     return
   }
 
@@ -798,9 +946,11 @@ async function loadSelectableParams(scope: ReleasePipelineScope, preserveSelecti
     state.selectable_params = response.data.filter((item) => String(item.param_key || '').trim().toLowerCase() !== '')
     const allowed = new Set(state.selectable_params.map((item) => item.id))
     state.selected_param_def_ids = state.selected_param_def_ids.filter((item) => allowed.has(item))
+    syncScopeParamConfigs(scope)
   } catch (error) {
     state.selectable_params = []
     state.selected_param_def_ids = []
+    scopeParamConfigs[scope] = {}
     message.error(extractHTTPErrorMessage(error, `${scope.toUpperCase()} 模板参数加载失败`))
   } finally {
     state.loading_params = false
@@ -823,6 +973,7 @@ async function handleApplicationChange(value: string | undefined) {
 async function handleScopeBindingChange(scope: ReleasePipelineScope, value: string | undefined) {
   scopeStates[scope].binding_id = String(value || '')
   scopeStates[scope].selected_param_def_ids = []
+  scopeParamConfigs[scope] = {}
   await loadSelectableParams(scope)
 }
 
@@ -837,9 +988,12 @@ function handleCDModeChange(value: string | number) {
     scopeStates.cd.selected_param_def_ids = []
     scopeStates.cd.selectable_params = []
     scopeStates.cd.loading_params = false
+    scopeParamConfigs.cd = {}
     return
   }
   scopeStates.cd.selected_param_def_ids = []
+  scopeParamConfigs.cd = {}
+  void loadSelectableParams('cd')
 }
 
 async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: boolean) {
@@ -877,6 +1031,7 @@ function getRowSelection(scope: ReleasePipelineScope) {
     selectedRowKeys: scopeStates[scope].selected_param_def_ids,
     onChange: (keys: Array<string | number>) => {
       scopeStates[scope].selected_param_def_ids = keys.map((item) => String(item))
+      syncScopeParamConfigs(scope)
     },
   }
 }
@@ -1034,10 +1189,30 @@ async function openEditModal(record: ReleaseTemplate) {
     scopeStates.cd.selected_param_def_ids = params
       .filter((item) => item.pipeline_scope === 'cd')
       .map((item) => item.executor_param_def_id)
+    scopeParamConfigs.ci = {}
+    params
+      .filter((item) => item.pipeline_scope === 'ci')
+      .forEach((item) => {
+        scopeParamConfigs.ci[item.executor_param_def_id] = createTemplateParamConfigState('ci', {
+          value_source: item.value_source,
+          source_param_key: item.source_param_key,
+          fixed_value: item.fixed_value,
+        })
+      })
+    scopeParamConfigs.cd = {}
+    params
+      .filter((item) => item.pipeline_scope === 'cd')
+      .forEach((item) => {
+        scopeParamConfigs.cd[item.executor_param_def_id] = createTemplateParamConfigState('cd', {
+          value_source: item.value_source,
+          source_param_key: item.source_param_key,
+          fixed_value: item.fixed_value,
+        })
+      })
 
     await Promise.all([
       loadSelectableParams('ci', true),
-      Promise.resolve(),
+      loadSelectableParams('cd', true),
     ])
 
     gitopsRules.value = (gitops_rules || []).map((item: ReleaseTemplateGitOpsRule) =>
@@ -1086,11 +1261,13 @@ function validateScopeState() {
       if (!scopeStates[scope].binding_id.trim()) {
         throw new Error('请选择 CD 绑定管线')
       }
+      validateTemplateParamConfigs('cd')
       continue
     }
     if (!scopeStates[scope].binding_id.trim()) {
       throw new Error(`请选择 ${scope.toUpperCase()} 绑定管线`)
     }
+    validateTemplateParamConfigs(scope)
   }
   if (isCDUsingArgoCD()) {
     if (isUnsupportedKustomizeGitOps()) {
@@ -1110,6 +1287,25 @@ function validateScopeState() {
       } else if (!item.file_path_template.trim() || !item.document_kind.trim() || !item.target_path.trim()) {
         throw new Error('请为 GitOps 替换规则选择 YAML 字段')
       }
+    }
+  }
+}
+
+function validateTemplateParamConfigs(scope: ReleasePipelineScope) {
+  for (const item of selectedScopeParamDefs(scope)) {
+    const config = getTemplateParamConfig(scope, item.id)
+    const label = `${resolvePlatformParamName(String(item.param_key || '').trim().toLowerCase())} / ${item.executor_param_name}`
+    if (scope === 'ci') {
+      if (config.value_source === 'fixed' && !String(config.fixed_value || '').trim()) {
+        throw new Error(`请为 ${label} 填写模板固定值`)
+      }
+      continue
+    }
+    if (config.value_source === 'fixed' && !String(config.fixed_value || '').trim()) {
+      throw new Error(`请为 ${label} 填写模板固定值`)
+    }
+    if ((config.value_source === 'ci_param' || config.value_source === 'builtin') && !String(config.source_param_key || '').trim()) {
+      throw new Error(`请为 ${label} 选择来源字段`)
     }
   }
 }
@@ -1392,6 +1588,51 @@ onMounted(async () => {
                   </template>
                 </a-table>
               </div>
+
+              <div v-if="selectedScopeParamDefs('ci').length" class="template-param-config-panel">
+                <div class="template-param-config-header">
+                  <div class="template-param-config-title">CI 参数取值规则</div>
+                  <div class="template-param-config-subtitle">已选择的平台标准字段可在发布时填写，或由模板直接写死。</div>
+                </div>
+                <div
+                  v-for="item in selectedScopeParamDefs('ci')"
+                  :key="`ci-config-${item.id}`"
+                  class="template-param-config-item"
+                >
+                  <div class="template-param-config-item-header">
+                    <div>
+                      <div class="template-param-config-item-title">{{ resolvePlatformParamName(String(item.param_key || '').trim().toLowerCase()) }}</div>
+                      <div class="template-param-config-item-meta">{{ item.executor_param_name }}</div>
+                    </div>
+                    <a-tag class="dashboard-chip dashboard-chip-neutral">
+                      {{ resolveTemplateParamSourceLabel('ci', getTemplateParamConfig('ci', item.id)) }}
+                    </a-tag>
+                  </div>
+                  <a-row :gutter="12">
+                    <a-col :span="10">
+                      <a-form-item label="取值方式" class="template-param-inline-item">
+                        <a-segmented
+                          :value="getTemplateParamConfig('ci', item.id).value_source"
+                          :options="[
+                            { label: '发布时填写', value: 'release_input' },
+                            { label: '固定值', value: 'fixed' },
+                          ]"
+                          @change="(value: string | number) => handleTemplateParamValueSourceChange('ci', item.id, String(value) as ReleaseTemplateParamValueSource)"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col v-if="getTemplateParamConfig('ci', item.id).value_source === 'fixed'" :span="14">
+                      <a-form-item label="固定值" class="template-param-inline-item">
+                        <a-input
+                          :value="getTemplateParamConfig('ci', item.id).fixed_value"
+                          placeholder="请输入模板固定值"
+                          @update:value="(value: string) => (getTemplateParamConfig('ci', item.id).fixed_value = value)"
+                        />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                </div>
+              </div>
             </a-card>
           </a-col>
 
@@ -1452,6 +1693,98 @@ onMounted(async () => {
                 show-icon
                 :message="`当前执行器：${selectedBinding('cd')?.provider}`"
               />
+
+              <div v-if="isCDUsingPipeline() && selectedBinding('cd')" class="scope-table-wrapper">
+                <a-table
+                  row-key="id"
+                  size="small"
+                  :columns="selectableParamColumns"
+                  :data-source="scopeStates.cd.selectable_params"
+                  :loading="scopeStates.cd.loading_params"
+                  :pagination="false"
+                  :row-selection="getRowSelection('cd')"
+                  :scroll="{ x: 860, y: 300 }"
+                >
+                  <template #bodyCell="{ column, record }">
+                    <template v-if="column.key === 'param_name'">
+                      <div class="param-name-cell">
+                        <span class="param-name">{{ resolvePlatformParamName(record.param_key) }}</span>
+                        <span class="param-executor">{{ record.executor_param_name }}</span>
+                      </div>
+                    </template>
+                    <template v-else-if="column.key === 'required'">
+                      <a-tag :class="record.required ? 'dashboard-chip dashboard-chip-warning' : 'dashboard-chip dashboard-chip-neutral'">
+                        {{ record.required ? '必填' : '可选' }}
+                      </a-tag>
+                    </template>
+                  </template>
+                </a-table>
+              </div>
+
+              <div v-if="isCDUsingPipeline() && selectedScopeParamDefs('cd').length" class="template-param-config-panel">
+                <div class="template-param-config-header">
+                  <div class="template-param-config-title">CD 管线参数规则</div>
+                  <div class="template-param-config-subtitle">
+                    CD 为管线时，参数可配置固定值，或沿用 CI 标准字段、系统内置字段。CD 自填字段在这里作为普通标准字段使用。
+                  </div>
+                </div>
+                <div
+                  v-for="item in selectedScopeParamDefs('cd')"
+                  :key="`cd-config-${item.id}`"
+                  class="template-param-config-item"
+                >
+                  <div class="template-param-config-item-header">
+                    <div>
+                      <div class="template-param-config-item-title">{{ resolvePlatformParamName(String(item.param_key || '').trim().toLowerCase()) }}</div>
+                      <div class="template-param-config-item-meta">{{ item.executor_param_name }}</div>
+                    </div>
+                    <a-tag class="dashboard-chip dashboard-chip-neutral">
+                      {{ resolveTemplateParamSourceLabel('cd', getTemplateParamConfig('cd', item.id)) }}
+                    </a-tag>
+                  </div>
+                  <a-row :gutter="12">
+                    <a-col :span="10">
+                      <a-form-item label="取值方式" class="template-param-inline-item">
+                        <a-segmented
+                          :value="getTemplateParamConfig('cd', item.id).value_source"
+                          :options="[
+                            { label: '发布时填写', value: 'release_input' },
+                            { label: '固定值', value: 'fixed' },
+                            { label: '沿用 CI 字段', value: 'ci_param' },
+                            { label: '内置字段', value: 'builtin' },
+                          ]"
+                          @change="(value: string | number) => handleTemplateParamValueSourceChange('cd', item.id, String(value) as ReleaseTemplateParamValueSource)"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col v-if="getTemplateParamConfig('cd', item.id).value_source === 'fixed'" :span="14">
+                      <a-form-item label="固定值" class="template-param-inline-item">
+                        <a-input
+                          :value="getTemplateParamConfig('cd', item.id).fixed_value"
+                          placeholder="请输入模板固定值"
+                          @update:value="(value: string) => (getTemplateParamConfig('cd', item.id).fixed_value = value)"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col
+                      v-else-if="['ci_param', 'builtin'].includes(getTemplateParamConfig('cd', item.id).value_source)"
+                      :span="14"
+                    >
+                      <a-form-item :label="getTemplateParamConfig('cd', item.id).value_source === 'ci_param' ? 'CI 来源字段' : '内置字段'" class="template-param-inline-item">
+                        <a-select
+                          :value="getTemplateParamConfig('cd', item.id).source_param_key || undefined"
+                          allow-clear
+                          show-search
+                          option-filter-prop="label"
+                          placeholder="请选择来源字段"
+                          :options="resolveTemplateParamSourceOptions('cd', getTemplateParamConfig('cd', item.id))"
+                          @change="(value: string | undefined) => (getTemplateParamConfig('cd', item.id).source_param_key = String(value || '').trim().toLowerCase())"
+                        />
+                      </a-form-item>
+                    </a-col>
+                  </a-row>
+                </div>
+              </div>
 
               <div v-if="isCDUsingArgoCD()" class="gitops-rule-panel">
                 <a-form-item label="GitOps 类型" class="gitops-type-item">
@@ -1894,6 +2227,7 @@ onMounted(async () => {
 }
 
 .scope-table-wrapper {
+  margin-top: 12px;
   min-height: 320px;
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 14px;
@@ -1937,6 +2271,60 @@ onMounted(async () => {
 .scope-table-wrapper :deep(.ant-checkbox-wrapper),
 .scope-table-wrapper :deep(.ant-checkbox + span) {
   color: var(--color-text-main);
+}
+
+.template-param-config-panel {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.template-param-config-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.template-param-config-title {
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.template-param-config-subtitle {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-soft);
+}
+
+.template-param-config-item {
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.97) 100%);
+}
+
+.template-param-config-item-header {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.template-param-config-item-title {
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.template-param-config-item-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-soft);
+}
+
+.template-param-inline-item {
+  margin-bottom: 0;
 }
 
 .gitops-rule-panel {

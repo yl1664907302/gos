@@ -11,4 +11,5 @@ var (
 	ErrTemplateNotFound       = errors.New("release template not found")
 	ErrTemplateDuplicated     = errors.New("release template already exists")
 	ErrDeploySnapshotNotFound = errors.New("release order deploy snapshot not found")
+	ErrExecutionLockNotFound  = errors.New("release execution lock not found")
 )

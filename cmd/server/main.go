@@ -142,13 +142,12 @@ func main() {
 		userManagement,
 		authSessionManager,
 	)
-	releaseSettingsQuery := usecase.NewQueryReleaseSettings(
-		configstore.NewReleaseStore(bootstrap.ResolveConfigPath()),
-	)
+	releaseStore := configstore.NewReleaseStore(bootstrap.ResolveConfigPath())
+	releaseSettingsQuery := usecase.NewQueryReleaseSettings(releaseStore)
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(
 		releaseSettingsQuery,
 		usecase.NewUpdateReleaseSettings(
-			configstore.NewReleaseStore(bootstrap.ResolveConfigPath()),
+			releaseStore,
 			releaseSettingsQuery,
 		),
 		authSessionManager,
@@ -198,6 +197,7 @@ func main() {
 		pipelineRepo,
 		executorParamRepo,
 		platformParamRepo,
+		releaseStore,
 		jenkinsClient,
 		argocdAppRepo,
 		argocdClientFactory,
@@ -481,6 +481,13 @@ func (c argoCDUsecaseClient) SyncApplication(ctx context.Context, name string) e
 		return errors.New("argocd client is not configured")
 	}
 	return c.client.SyncApplication(ctx, name)
+}
+
+func (c argoCDUsecaseClient) SyncApplicationWithRevision(ctx context.Context, name string, revision string) error {
+	if c.client == nil {
+		return errors.New("argocd client is not configured")
+	}
+	return c.client.SyncApplicationWithRevision(ctx, name, revision)
 }
 
 func (c argoCDUsecaseClient) BuildApplicationURL(name string) string {

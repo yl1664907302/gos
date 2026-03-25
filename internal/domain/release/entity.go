@@ -156,11 +156,13 @@ const (
 	ValueSourceEnvironment  ValueSource = "environment"
 	ValueSourceReleaseInput ValueSource = "release_input"
 	ValueSourceFixed        ValueSource = "fixed"
+	ValueSourceCIParam      ValueSource = "ci_param"
+	ValueSourceBuiltin      ValueSource = "builtin"
 )
 
 func (s ValueSource) Valid() bool {
 	switch s {
-	case ValueSourceApplication, ValueSourceEnvironment, ValueSourceReleaseInput, ValueSourceFixed:
+	case ValueSourceApplication, ValueSourceEnvironment, ValueSourceReleaseInput, ValueSourceFixed, ValueSourceCIParam, ValueSourceBuiltin:
 		return true
 	default:
 		return false
@@ -168,32 +170,35 @@ func (s ValueSource) Valid() bool {
 }
 
 type ReleaseOrder struct {
-	ID              string
-	OrderNo         string
-	PreviousOrderNo string
-	OperationType   OperationType
-	SourceOrderID   string
-	SourceOrderNo   string
-	CDProvider      string
-	ApplicationID   string
-	ApplicationName string
-	TemplateID      string
-	TemplateName    string
-	BindingID       string
-	PipelineID      string
-	EnvCode         string
-	SonService      string
-	GitRef          string
-	ImageTag        string
-	TriggerType     TriggerType
-	Status          OrderStatus
-	Remark          string
-	CreatorUserID   string
-	TriggeredBy     string
-	StartedAt       *time.Time
-	FinishedAt      *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                 string
+	OrderNo            string
+	PreviousOrderNo    string
+	OperationType      OperationType
+	SourceOrderID      string
+	SourceOrderNo      string
+	IsConcurrent       bool
+	ConcurrentBatchNo  string
+	ConcurrentBatchSeq int
+	CDProvider         string
+	ApplicationID      string
+	ApplicationName    string
+	TemplateID         string
+	TemplateName       string
+	BindingID          string
+	PipelineID         string
+	EnvCode            string
+	SonService         string
+	GitRef             string
+	ImageTag           string
+	TriggerType        TriggerType
+	Status             OrderStatus
+	Remark             string
+	CreatorUserID      string
+	TriggeredBy        string
+	StartedAt          *time.Time
+	FinishedAt         *time.Time
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type DeploySnapshot struct {
@@ -240,6 +245,55 @@ type ReleaseOrderExecution struct {
 	FinishedAt     *time.Time
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+type ExecutionLockScope string
+
+const (
+	ExecutionLockScopeApplication      ExecutionLockScope = "application"
+	ExecutionLockScopeApplicationEnv   ExecutionLockScope = "application_env"
+	ExecutionLockScopeGitOpsRepoBranch ExecutionLockScope = "gitops_repo_branch"
+)
+
+func (s ExecutionLockScope) Valid() bool {
+	switch s {
+	case ExecutionLockScopeApplication, ExecutionLockScopeApplicationEnv, ExecutionLockScopeGitOpsRepoBranch:
+		return true
+	default:
+		return false
+	}
+}
+
+type ExecutionLockStatus string
+
+const (
+	ExecutionLockStatusActive   ExecutionLockStatus = "active"
+	ExecutionLockStatusReleased ExecutionLockStatus = "released"
+	ExecutionLockStatusExpired  ExecutionLockStatus = "expired"
+)
+
+func (s ExecutionLockStatus) Valid() bool {
+	switch s {
+	case ExecutionLockStatusActive, ExecutionLockStatusReleased, ExecutionLockStatusExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseExecutionLock struct {
+	ID             string
+	LockScope      ExecutionLockScope
+	LockKey        string
+	ApplicationID  string
+	EnvCode        string
+	ReleaseOrderID string
+	ReleaseOrderNo string
+	Status         ExecutionLockStatus
+	OwnerType      string
+	CreatedAt      time.Time
+	ExpiredAt      *time.Time
+	ReleasedAt     *time.Time
 }
 
 type ReleaseOrderStep struct {
@@ -370,10 +424,32 @@ type ReleaseTemplateParam struct {
 	ParamKey           string
 	ParamName          string
 	ExecutorParamName  string
+	ValueSource        TemplateParamValueSource
+	SourceParamKey     string
+	SourceParamName    string
+	FixedValue         string
 	Required           bool
 	SortNo             int
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+}
+
+type TemplateParamValueSource string
+
+const (
+	TemplateParamValueSourceReleaseInput TemplateParamValueSource = "release_input"
+	TemplateParamValueSourceFixed        TemplateParamValueSource = "fixed"
+	TemplateParamValueSourceCIParam      TemplateParamValueSource = "ci_param"
+	TemplateParamValueSourceBuiltin      TemplateParamValueSource = "builtin"
+)
+
+func (s TemplateParamValueSource) Valid() bool {
+	switch s {
+	case TemplateParamValueSourceReleaseInput, TemplateParamValueSourceFixed, TemplateParamValueSourceCIParam, TemplateParamValueSourceBuiltin:
+		return true
+	default:
+		return false
+	}
 }
 
 type GitOpsRuleSourceFrom string

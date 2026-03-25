@@ -7,9 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gos/internal/application/usecase"
 )
 
 var defaultReleaseEnvOptions = []string{"dev", "test", "prod"}
+
+var defaultReleaseConcurrencySettings = usecase.ReleaseConcurrencySettingsOutput{
+	Enabled:            false,
+	LockScope:          usecase.ReleaseConcurrencyLockScopeApplicationEnv,
+	ConflictStrategy:   usecase.ReleaseConcurrencyConflictStrategyReject,
+	LockTimeoutSec:     1800,
+	AllowAdminOverride: true,
+}
 
 type ReleaseStore struct {
 	configPath string
@@ -44,6 +54,51 @@ func (s *ReleaseStore) LoadEnvOptions(_ context.Context) ([]string, error) {
 		return cloneStringList(defaultReleaseEnvOptions), nil
 	}
 	return options, nil
+}
+
+func (s *ReleaseStore) LoadConcurrencySettings(_ context.Context) (usecase.ReleaseConcurrencySettingsOutput, error) {
+	path := strings.TrimSpace(s.configPath)
+	if path == "" {
+		return defaultReleaseConcurrencySettings, nil
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultReleaseConcurrencySettings, nil
+		}
+		return usecase.ReleaseConcurrencySettingsOutput{}, fmt.Errorf("read config file failed: %w", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return usecase.ReleaseConcurrencySettingsOutput{}, fmt.Errorf("decode config file failed: %w", err)
+	}
+
+	releaseNode := readMapNode(payload, "release")
+	concurrencyNode := readMapNode(releaseNode, "concurrency")
+
+	settings := defaultReleaseConcurrencySettings
+	settings.Enabled = boolFromAny(concurrencyNode["enabled"])
+	if value := strings.TrimSpace(fmt.Sprint(concurrencyNode["lock_scope"])); value != "" {
+		settings.LockScope = usecase.ReleaseConcurrencyLockScope(value)
+	}
+	if value := strings.TrimSpace(fmt.Sprint(concurrencyNode["conflict_strategy"])); value != "" {
+		settings.ConflictStrategy = usecase.ReleaseConcurrencyConflictStrategy(value)
+	}
+	if value := intFromAny(concurrencyNode["lock_timeout_sec"]); value > 0 {
+		settings.LockTimeoutSec = value
+	}
+	if _, ok := concurrencyNode["allow_admin_override"]; ok {
+		settings.AllowAdminOverride = boolFromAny(concurrencyNode["allow_admin_override"])
+	}
+	return usecase.ReleaseConcurrencySettingsOutput{
+		Enabled:            settings.Enabled,
+		LockScope:          settings.LockScope,
+		ConflictStrategy:   settings.ConflictStrategy,
+		LockTimeoutSec:     settings.LockTimeoutSec,
+		AllowAdminOverride: settings.AllowAdminOverride,
+	}, nil
 }
 
 func (s *ReleaseStore) SaveEnvOptions(_ context.Context, values []string) error {
@@ -86,6 +141,47 @@ func (s *ReleaseStore) SaveEnvOptions(_ context.Context, values []string) error 
 	return nil
 }
 
+func (s *ReleaseStore) SaveConcurrencySettings(_ context.Context, input usecase.ReleaseConcurrencySettingsInput) error {
+	path := strings.TrimSpace(s.configPath)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config file failed: %w", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return fmt.Errorf("decode config file failed: %w", err)
+	}
+
+	releaseNode := readMapNode(payload, "release")
+	releaseNode["concurrency"] = map[string]interface{}{
+		"enabled":              input.Enabled,
+		"lock_scope":           strings.TrimSpace(string(input.LockScope)),
+		"conflict_strategy":    strings.TrimSpace(string(input.ConflictStrategy)),
+		"lock_timeout_sec":     input.LockTimeoutSec,
+		"allow_admin_override": input.AllowAdminOverride,
+	}
+	payload["release"] = releaseNode
+
+	updated, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config file failed: %w", err)
+	}
+	updated = append(updated, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("prepare config directory failed: %w", err)
+	}
+	if err := os.WriteFile(path, updated, 0o644); err != nil {
+		return fmt.Errorf("write config file failed: %w", err)
+	}
+	return nil
+}
+
 func readMapNode(payload map[string]interface{}, key string) map[string]interface{} {
 	if payload == nil {
 		return map[string]interface{}{}
@@ -94,6 +190,40 @@ func readMapNode(payload map[string]interface{}, key string) map[string]interfac
 		return node
 	}
 	return map[string]interface{}{}
+}
+
+func boolFromAny(raw interface{}) bool {
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	default:
+		return false
+	}
+}
+
+func intFromAny(raw interface{}) int {
+	switch value := raw.(type) {
+	case float64:
+		return int(value)
+	case int:
+		return value
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case string:
+		text := strings.TrimSpace(value)
+		if text == "" {
+			return 0
+		}
+		var result int
+		_, _ = fmt.Sscanf(text, "%d", &result)
+		return result
+	default:
+		return 0
+	}
 }
 
 func normalizeStringListFromAny(raw interface{}) []string {

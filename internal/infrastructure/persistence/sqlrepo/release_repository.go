@@ -47,6 +47,9 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	operation_type VARCHAR(32) NOT NULL DEFAULT 'deploy',
 	source_order_id VARCHAR(64) NOT NULL DEFAULT '',
 	source_order_no VARCHAR(64) NOT NULL DEFAULT '',
+	is_concurrent TINYINT(1) NOT NULL DEFAULT 0,
+	concurrent_batch_no VARCHAR(64) NOT NULL DEFAULT '',
+	concurrent_batch_seq INT NOT NULL DEFAULT 0,
 	application_id VARCHAR(64) NOT NULL,
 	application_name VARCHAR(100) NOT NULL DEFAULT '',
 	template_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -69,6 +72,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	UNIQUE KEY uk_release_order_no (order_no),
 	KEY idx_release_order_application (application_id),
 	KEY idx_release_order_binding (binding_id),
+	KEY idx_release_order_batch (concurrent_batch_no),
 	KEY idx_release_order_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_order_execution (
@@ -105,6 +109,22 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	snapshot_payload_json LONGTEXT NOT NULL,
 	created_at BIGINT NOT NULL,
 	UNIQUE KEY uk_release_order_snapshot_order (release_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_execution_lock (
+	id VARCHAR(64) PRIMARY KEY,
+	lock_scope VARCHAR(32) NOT NULL,
+	lock_key VARCHAR(500) NOT NULL,
+	application_id VARCHAR(64) NOT NULL DEFAULT '',
+	env_code VARCHAR(64) NOT NULL DEFAULT '',
+	release_order_id VARCHAR(64) NOT NULL DEFAULT '',
+	release_order_no VARCHAR(64) NOT NULL DEFAULT '',
+	status VARCHAR(32) NOT NULL DEFAULT 'active',
+	owner_type VARCHAR(32) NOT NULL DEFAULT 'release_order',
+	created_at BIGINT NOT NULL,
+	expired_at BIGINT NULL,
+	released_at BIGINT NULL,
+	KEY idx_release_execution_lock_key_status (lock_key, status),
+	KEY idx_release_execution_lock_order (release_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id VARCHAR(64) PRIMARY KEY,
@@ -197,6 +217,10 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	param_key VARCHAR(100) NOT NULL,
 	param_name VARCHAR(100) NOT NULL DEFAULT '',
 	executor_param_name VARCHAR(100) NOT NULL DEFAULT '',
+	value_source VARCHAR(32) NOT NULL DEFAULT 'release_input',
+	source_param_key VARCHAR(100) NOT NULL DEFAULT '',
+	source_param_name VARCHAR(100) NOT NULL DEFAULT '',
+	fixed_value VARCHAR(500) NOT NULL DEFAULT '',
 	required TINYINT(1) NOT NULL DEFAULT 0,
 	sort_no INT NOT NULL DEFAULT 0,
 	created_at BIGINT NOT NULL,
@@ -234,6 +258,9 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	operation_type TEXT NOT NULL DEFAULT 'deploy',
 	source_order_id TEXT NOT NULL DEFAULT '',
 	source_order_no TEXT NOT NULL DEFAULT '',
+	is_concurrent INTEGER NOT NULL DEFAULT 0,
+	concurrent_batch_no TEXT NOT NULL DEFAULT '',
+	concurrent_batch_seq INTEGER NOT NULL DEFAULT 0,
 	application_id TEXT NOT NULL,
 	application_name TEXT NOT NULL DEFAULT '',
 	template_id TEXT NOT NULL DEFAULT '',
@@ -256,6 +283,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_application ON release_order (application_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_binding ON release_order (binding_id);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_order_batch ON release_order (concurrent_batch_no);`,
 			`CREATE INDEX IF NOT EXISTS idx_release_order_created_at ON release_order (created_at);`,
 			`CREATE TABLE IF NOT EXISTS release_order_execution (
 	id TEXT PRIMARY KEY,
@@ -291,6 +319,22 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	snapshot_payload_json TEXT NOT NULL,
 	created_at INTEGER NOT NULL
 );`,
+			`CREATE TABLE IF NOT EXISTS release_execution_lock (
+	id TEXT PRIMARY KEY,
+	lock_scope TEXT NOT NULL,
+	lock_key TEXT NOT NULL,
+	application_id TEXT NOT NULL DEFAULT '',
+	env_code TEXT NOT NULL DEFAULT '',
+	release_order_id TEXT NOT NULL DEFAULT '',
+	release_order_no TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'active',
+	owner_type TEXT NOT NULL DEFAULT 'release_order',
+	created_at INTEGER NOT NULL,
+	expired_at INTEGER NULL,
+	released_at INTEGER NULL
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_execution_lock_key_status ON release_execution_lock (lock_key, status);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_execution_lock_order ON release_execution_lock (release_order_id);`,
 			`CREATE TABLE IF NOT EXISTS release_order_param (
 	id TEXT PRIMARY KEY,
 	release_order_id TEXT NOT NULL,
@@ -382,6 +426,10 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	param_key TEXT NOT NULL,
 	param_name TEXT NOT NULL DEFAULT '',
 	executor_param_name TEXT NOT NULL DEFAULT '',
+	value_source TEXT NOT NULL DEFAULT 'release_input',
+	source_param_key TEXT NOT NULL DEFAULT '',
+	source_param_name TEXT NOT NULL DEFAULT '',
+	fixed_value TEXT NOT NULL DEFAULT '',
 	required INTEGER NOT NULL DEFAULT 0,
 	sort_no INTEGER NOT NULL DEFAULT 0,
 	created_at INTEGER NOT NULL,
@@ -483,6 +531,9 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			{"release_order", "operation_type", `ALTER TABLE release_order ADD COLUMN operation_type VARCHAR(32) NOT NULL DEFAULT 'deploy' AFTER previous_order_no;`},
 			{"release_order", "source_order_id", `ALTER TABLE release_order ADD COLUMN source_order_id VARCHAR(64) NOT NULL DEFAULT '' AFTER operation_type;`},
 			{"release_order", "source_order_no", `ALTER TABLE release_order ADD COLUMN source_order_no VARCHAR(64) NOT NULL DEFAULT '' AFTER source_order_id;`},
+			{"release_order", "is_concurrent", `ALTER TABLE release_order ADD COLUMN is_concurrent TINYINT(1) NOT NULL DEFAULT 0 AFTER source_order_no;`},
+			{"release_order", "concurrent_batch_no", `ALTER TABLE release_order ADD COLUMN concurrent_batch_no VARCHAR(64) NOT NULL DEFAULT '' AFTER is_concurrent;`},
+			{"release_order", "concurrent_batch_seq", `ALTER TABLE release_order ADD COLUMN concurrent_batch_seq INT NOT NULL DEFAULT 0 AFTER concurrent_batch_no;`},
 		} {
 			exists, err = r.mysqlColumnExists(ctx, columnStmt.table, columnStmt.column)
 			if err != nil {
@@ -526,6 +577,10 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER template_id;`},
 			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope VARCHAR(20) NOT NULL DEFAULT '' AFTER template_binding_id;`},
 			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id VARCHAR(64) NOT NULL DEFAULT '' AFTER pipeline_scope;`},
+			{"release_template_param", "value_source", `ALTER TABLE release_template_param ADD COLUMN value_source VARCHAR(32) NOT NULL DEFAULT 'release_input' AFTER executor_param_name;`},
+			{"release_template_param", "source_param_key", `ALTER TABLE release_template_param ADD COLUMN source_param_key VARCHAR(100) NOT NULL DEFAULT '' AFTER value_source;`},
+			{"release_template_param", "source_param_name", `ALTER TABLE release_template_param ADD COLUMN source_param_name VARCHAR(100) NOT NULL DEFAULT '' AFTER source_param_key;`},
+			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value VARCHAR(500) NOT NULL DEFAULT '' AFTER source_param_name;`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key VARCHAR(100) NOT NULL DEFAULT '' AFTER source_from;`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name VARCHAR(100) NOT NULL DEFAULT '' AFTER locator_param_key;`},
 		} {
@@ -595,7 +650,36 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 	UNIQUE KEY uk_release_order_snapshot_order (release_order_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_execution_lock (
+	id VARCHAR(64) PRIMARY KEY,
+	lock_scope VARCHAR(32) NOT NULL,
+	lock_key VARCHAR(500) NOT NULL,
+	application_id VARCHAR(64) NOT NULL DEFAULT '',
+	env_code VARCHAR(64) NOT NULL DEFAULT '',
+	release_order_id VARCHAR(64) NOT NULL DEFAULT '',
+	release_order_no VARCHAR(64) NOT NULL DEFAULT '',
+	status VARCHAR(32) NOT NULL DEFAULT 'active',
+	owner_type VARCHAR(32) NOT NULL DEFAULT 'release_order',
+	created_at BIGINT NOT NULL,
+	expired_at BIGINT NULL,
+	released_at BIGINT NULL,
+	KEY idx_release_execution_lock_key_status (lock_key, status),
+	KEY idx_release_execution_lock_order (release_order_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(ctx, `CREATE INDEX idx_release_order_batch ON release_order (concurrent_batch_no);`)
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate key name") {
+			return err
+		}
+		return nil
 	case "sqlite":
 		columns, err := r.sqliteTableColumns(ctx, "release_template_param")
 		if err != nil {
@@ -647,6 +731,9 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			{"operation_type", `ALTER TABLE release_order ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'deploy';`},
 			{"source_order_id", `ALTER TABLE release_order ADD COLUMN source_order_id TEXT NOT NULL DEFAULT '';`},
 			{"source_order_no", `ALTER TABLE release_order ADD COLUMN source_order_no TEXT NOT NULL DEFAULT '';`},
+			{"is_concurrent", `ALTER TABLE release_order ADD COLUMN is_concurrent INTEGER NOT NULL DEFAULT 0;`},
+			{"concurrent_batch_no", `ALTER TABLE release_order ADD COLUMN concurrent_batch_no TEXT NOT NULL DEFAULT '';`},
+			{"concurrent_batch_seq", `ALTER TABLE release_order ADD COLUMN concurrent_batch_seq INTEGER NOT NULL DEFAULT 0;`},
 		} {
 			tableColumns, tableErr := r.sqliteTableColumns(ctx, "release_order")
 			if tableErr != nil {
@@ -683,6 +770,10 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			{"release_template_param", "template_binding_id", `ALTER TABLE release_template_param ADD COLUMN template_binding_id TEXT NOT NULL DEFAULT '';`},
 			{"release_template_param", "pipeline_scope", `ALTER TABLE release_template_param ADD COLUMN pipeline_scope TEXT NOT NULL DEFAULT '';`},
 			{"release_template_param", "binding_id", `ALTER TABLE release_template_param ADD COLUMN binding_id TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "value_source", `ALTER TABLE release_template_param ADD COLUMN value_source TEXT NOT NULL DEFAULT 'release_input';`},
+			{"release_template_param", "source_param_key", `ALTER TABLE release_template_param ADD COLUMN source_param_key TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "source_param_name", `ALTER TABLE release_template_param ADD COLUMN source_param_name TEXT NOT NULL DEFAULT '';`},
+			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name TEXT NOT NULL DEFAULT '';`},
 		} {
@@ -704,6 +795,9 @@ SET status = 'pending'
 WHERE status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pengding';`,
 		)
 		if err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_release_order_batch ON release_order (concurrent_batch_no);`); err != nil {
 			return err
 		}
 		_, err = r.db.ExecContext(
@@ -739,7 +833,36 @@ WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
 	created_at INTEGER NOT NULL
 );`,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_execution_lock (
+	id TEXT PRIMARY KEY,
+	lock_scope TEXT NOT NULL,
+	lock_key TEXT NOT NULL,
+	application_id TEXT NOT NULL DEFAULT '',
+	env_code TEXT NOT NULL DEFAULT '',
+	release_order_id TEXT NOT NULL DEFAULT '',
+	release_order_no TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'active',
+	owner_type TEXT NOT NULL DEFAULT 'release_order',
+	created_at INTEGER NOT NULL,
+	expired_at INTEGER NULL,
+	released_at INTEGER NULL
+);`,
+		)
+		if err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_release_execution_lock_key_status ON release_execution_lock (lock_key, status);`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_release_execution_lock_order ON release_execution_lock (release_order_id);`); err != nil {
+			return err
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
 	}
@@ -806,9 +929,9 @@ func (r *ReleaseRepository) Create(
 
 	const insertOrder = `
 INSERT INTO release_order (
-	id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
+	id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
 	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -819,6 +942,9 @@ INSERT INTO release_order (
 		string(order.OperationType),
 		order.SourceOrderID,
 		order.SourceOrderNo,
+		boolToDBValue(r.dbDriver, order.IsConcurrent),
+		order.ConcurrentBatchNo,
+		order.ConcurrentBatchSeq,
 		order.ApplicationID,
 		order.ApplicationName,
 		order.TemplateID,
@@ -930,7 +1056,7 @@ INSERT INTO release_order_step (
 
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
-SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
@@ -999,7 +1125,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 
 	listQuery := `
-SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
 	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
@@ -1059,7 +1185,7 @@ WHERE ro.status = ?
 	}
 
 	const listQuery = `
-SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.operation_type, ro.source_order_id, ro.source_order_no, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
+SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.operation_type, ro.source_order_id, ro.source_order_no, ro.is_concurrent, ro.concurrent_batch_no, ro.concurrent_batch_seq, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
 	ro.trigger_type, ro.status, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
 FROM release_order ro
 JOIN release_order_execution roe ON roe.release_order_id = ro.id
@@ -1220,6 +1346,288 @@ WHERE release_order_id = ?;`
 	item.GitOpsType = domain.GitOpsType(gitOpsType)
 	item.CreatedAt = time.Unix(0, createdAtNs).UTC()
 	return item, nil
+}
+
+func (r *ReleaseRepository) UpdateConcurrentBatch(
+	ctx context.Context,
+	orderIDs []string,
+	batchNo string,
+	isConcurrent bool,
+) error {
+	batchNo = strings.TrimSpace(batchNo)
+	if len(orderIDs) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const q = `
+UPDATE release_order
+SET is_concurrent = ?, concurrent_batch_no = ?, concurrent_batch_seq = ?, updated_at = ?
+WHERE id = ?;`
+
+	now := time.Now().UTC().UnixNano()
+	for idx, item := range orderIDs {
+		orderID := strings.TrimSpace(item)
+		if orderID == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(
+			ctx,
+			q,
+			boolToDBValue(r.dbDriver, isConcurrent),
+			batchNo,
+			idx+1,
+			now+int64(idx),
+			orderID,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (r *ReleaseRepository) ListByConcurrentBatchNo(ctx context.Context, batchNo string) ([]domain.ReleaseOrder, error) {
+	batchNo = strings.TrimSpace(batchNo)
+	if batchNo == "" {
+		return []domain.ReleaseOrder{}, nil
+	}
+	const q = `
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+FROM release_order
+WHERE concurrent_batch_no = ?
+ORDER BY concurrent_batch_seq ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, batchNo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrder, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) FindActiveExecutionLock(
+	ctx context.Context,
+	lockKey string,
+	excludeReleaseOrderID string,
+	now time.Time,
+) (domain.ReleaseExecutionLock, error) {
+	lockKey = strings.TrimSpace(lockKey)
+	if lockKey == "" {
+		return domain.ReleaseExecutionLock{}, domain.ErrExecutionLockNotFound
+	}
+	if err := r.expireExecutionLocks(ctx, now); err != nil {
+		return domain.ReleaseExecutionLock{}, err
+	}
+	if err := r.releaseTerminalOrderExecutionLocks(ctx, now); err != nil {
+		return domain.ReleaseExecutionLock{}, err
+	}
+
+	const q = `
+SELECT id, lock_scope, lock_key, application_id, env_code, release_order_id, release_order_no, status, owner_type, created_at, expired_at, released_at
+FROM release_execution_lock
+WHERE lock_key = ?
+  AND status = ?
+  AND released_at IS NULL
+ORDER BY created_at ASC
+LIMIT 1;`
+
+	row := r.db.QueryRowContext(ctx, q, lockKey, string(domain.ExecutionLockStatusActive))
+	item, err := scanExecutionLock(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, domain.ErrExecutionLockNotFound) {
+			return domain.ReleaseExecutionLock{}, domain.ErrExecutionLockNotFound
+		}
+		return domain.ReleaseExecutionLock{}, err
+	}
+	if strings.TrimSpace(excludeReleaseOrderID) != "" && strings.TrimSpace(item.ReleaseOrderID) == strings.TrimSpace(excludeReleaseOrderID) {
+		return domain.ReleaseExecutionLock{}, domain.ErrExecutionLockNotFound
+	}
+	return item, nil
+}
+
+func (r *ReleaseRepository) AcquireExecutionLock(
+	ctx context.Context,
+	lock domain.ReleaseExecutionLock,
+	now time.Time,
+) (domain.ReleaseExecutionLock, bool, error) {
+	lock.LockKey = strings.TrimSpace(lock.LockKey)
+	lock.ReleaseOrderID = strings.TrimSpace(lock.ReleaseOrderID)
+	if lock.LockKey == "" || lock.ReleaseOrderID == "" {
+		return domain.ReleaseExecutionLock{}, false, fmt.Errorf("lock_key and release_order_id are required")
+	}
+	if !lock.LockScope.Valid() {
+		return domain.ReleaseExecutionLock{}, false, fmt.Errorf("invalid lock_scope")
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.ReleaseExecutionLock{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := r.expireExecutionLocksTx(ctx, tx, now); err != nil {
+		return domain.ReleaseExecutionLock{}, false, err
+	}
+	if err := r.releaseTerminalOrderExecutionLocksTx(ctx, tx, now); err != nil {
+		return domain.ReleaseExecutionLock{}, false, err
+	}
+
+	const findQ = `
+SELECT id, lock_scope, lock_key, application_id, env_code, release_order_id, release_order_no, status, owner_type, created_at, expired_at, released_at
+FROM release_execution_lock
+WHERE lock_key = ?
+  AND status = ?
+  AND released_at IS NULL
+ORDER BY created_at ASC
+LIMIT 1;`
+
+	row := tx.QueryRowContext(ctx, findQ, lock.LockKey, string(domain.ExecutionLockStatusActive))
+	existing, scanErr := scanExecutionLock(row)
+	switch {
+	case scanErr == nil:
+		if strings.TrimSpace(existing.ReleaseOrderID) == lock.ReleaseOrderID {
+			if err := tx.Commit(); err != nil {
+				return domain.ReleaseExecutionLock{}, false, err
+			}
+			return existing, true, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return domain.ReleaseExecutionLock{}, false, err
+		}
+		return existing, false, nil
+	case errors.Is(scanErr, sql.ErrNoRows), errors.Is(scanErr, domain.ErrExecutionLockNotFound):
+		// continue insert
+	default:
+		return domain.ReleaseExecutionLock{}, false, scanErr
+	}
+
+	const insertQ = `
+INSERT INTO release_execution_lock (
+	id, lock_scope, lock_key, application_id, env_code, release_order_id, release_order_no, status, owner_type, created_at, expired_at, released_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL);`
+
+	_, err = tx.ExecContext(
+		ctx,
+		insertQ,
+		lock.ID,
+		string(lock.LockScope),
+		lock.LockKey,
+		lock.ApplicationID,
+		lock.EnvCode,
+		lock.ReleaseOrderID,
+		lock.ReleaseOrderNo,
+		string(lock.Status),
+		lock.OwnerType,
+		lock.CreatedAt.UTC().UnixNano(),
+		timePtrToUnixNano(lock.ExpiredAt),
+	)
+	if err != nil {
+		return domain.ReleaseExecutionLock{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.ReleaseExecutionLock{}, false, err
+	}
+	return lock, true, nil
+}
+
+func (r *ReleaseRepository) TouchExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, expiredAt time.Time) error {
+	const q = `
+UPDATE release_execution_lock
+SET expired_at = ?
+WHERE release_order_id = ?
+  AND status = ?
+  AND released_at IS NULL;`
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		expiredAt.UTC().UnixNano(),
+		strings.TrimSpace(releaseOrderID),
+		string(domain.ExecutionLockStatusActive),
+	)
+	return err
+}
+
+func (r *ReleaseRepository) ReleaseExecutionLocksByOrderID(
+	ctx context.Context,
+	releaseOrderID string,
+	status domain.ExecutionLockStatus,
+	releasedAt time.Time,
+) error {
+	if !status.Valid() {
+		status = domain.ExecutionLockStatusReleased
+	}
+	const q = `
+UPDATE release_execution_lock
+SET status = ?, released_at = ?
+WHERE release_order_id = ?
+  AND released_at IS NULL;`
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		string(status),
+		releasedAt.UTC().UnixNano(),
+		strings.TrimSpace(releaseOrderID),
+	)
+	return err
+}
+
+func (r *ReleaseRepository) releaseTerminalOrderExecutionLocks(ctx context.Context, releasedAt time.Time) error {
+	const q = `
+UPDATE release_execution_lock l
+JOIN release_order o ON o.id = l.release_order_id
+SET l.status = ?, l.released_at = ?
+WHERE l.released_at IS NULL
+  AND l.status = ?
+  AND o.status IN (?, ?, ?);`
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		string(domain.ExecutionLockStatusReleased),
+		releasedAt.UTC().UnixNano(),
+		string(domain.ExecutionLockStatusActive),
+		string(domain.OrderStatusSuccess),
+		string(domain.OrderStatusFailed),
+		string(domain.OrderStatusCancelled),
+	)
+	return err
+}
+
+func (r *ReleaseRepository) releaseTerminalOrderExecutionLocksTx(ctx context.Context, tx *sql.Tx, releasedAt time.Time) error {
+	const q = `
+UPDATE release_execution_lock l
+JOIN release_order o ON o.id = l.release_order_id
+SET l.status = ?, l.released_at = ?
+WHERE l.released_at IS NULL
+  AND l.status = ?
+  AND o.status IN (?, ?, ?);`
+	_, err := tx.ExecContext(
+		ctx,
+		q,
+		string(domain.ExecutionLockStatusReleased),
+		releasedAt.UTC().UnixNano(),
+		string(domain.ExecutionLockStatusActive),
+		string(domain.OrderStatusSuccess),
+		string(domain.OrderStatusFailed),
+		string(domain.OrderStatusCancelled),
+	)
+	return err
 }
 
 func (r *ReleaseRepository) ListParams(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderParam, error) {
@@ -1897,8 +2305,8 @@ func (r *ReleaseRepository) insertTemplateParams(
 ) error {
 	const insertParam = `
 INSERT INTO release_template_param (
-	id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, value_source, source_param_key, source_param_name, fixed_value, required, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	for _, item := range params {
 		if _, err := tx.ExecContext(
@@ -1913,6 +2321,10 @@ INSERT INTO release_template_param (
 			item.ParamKey,
 			item.ParamName,
 			item.ExecutorParamName,
+			string(item.ValueSource),
+			item.SourceParamKey,
+			item.SourceParamName,
+			item.FixedValue,
 			boolToInt(item.Required),
 			item.SortNo,
 			item.CreatedAt.UTC().UnixNano(),
@@ -1996,7 +2408,7 @@ func (r *ReleaseRepository) listTemplateParams(
 	templateID string,
 ) ([]domain.ReleaseTemplateParam, error) {
 	const q = `
-SELECT id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, required, sort_no, created_at, updated_at
+SELECT id, template_id, template_binding_id, pipeline_scope, binding_id, executor_param_def_id, param_key, param_name, executor_param_name, value_source, source_param_key, source_param_name, fixed_value, required, sort_no, created_at, updated_at
 FROM release_template_param
 WHERE template_id = ?
 ORDER BY pipeline_scope ASC, sort_no ASC, created_at ASC;`
@@ -2053,14 +2465,15 @@ ORDER BY sort_no ASC, created_at ASC;`
 
 func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	var (
-		item          domain.ReleaseOrder
-		operationType string
-		triggerType   string
-		status        string
-		startedAt     sql.NullInt64
-		finishedAt    sql.NullInt64
-		createdAt     int64
-		updatedAt     int64
+		item              domain.ReleaseOrder
+		operationType     string
+		triggerType       string
+		status            string
+		isConcurrentValue any
+		startedAt         sql.NullInt64
+		finishedAt        sql.NullInt64
+		createdAt         int64
+		updatedAt         int64
 	)
 	if err := s.Scan(
 		&item.ID,
@@ -2069,6 +2482,9 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		&operationType,
 		&item.SourceOrderID,
 		&item.SourceOrderNo,
+		&isConcurrentValue,
+		&item.ConcurrentBatchNo,
+		&item.ConcurrentBatchSeq,
 		&item.ApplicationID,
 		&item.ApplicationName,
 		&item.TemplateID,
@@ -2093,6 +2509,7 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	}
 
 	item.OperationType = domain.OperationType(operationType)
+	item.IsConcurrent = scanBoolValue(isConcurrentValue)
 	item.TriggerType = domain.TriggerType(triggerType)
 	item.Status = domain.OrderStatus(status)
 	if startedAt.Valid {
@@ -2358,6 +2775,7 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 	var (
 		item          domain.ReleaseTemplateParam
 		pipelineScope string
+		valueSource   string
 		required      int
 		createdAt     int64
 		updatedAt     int64
@@ -2372,6 +2790,10 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 		&item.ParamKey,
 		&item.ParamName,
 		&item.ExecutorParamName,
+		&valueSource,
+		&item.SourceParamKey,
+		&item.SourceParamName,
+		&item.FixedValue,
 		&required,
 		&item.SortNo,
 		&createdAt,
@@ -2380,6 +2802,7 @@ func scanReleaseTemplateParam(s scanner) (domain.ReleaseTemplateParam, error) {
 		return domain.ReleaseTemplateParam{}, err
 	}
 	item.PipelineScope = domain.PipelineScope(pipelineScope)
+	item.ValueSource = domain.TemplateParamValueSource(valueSource)
 	item.Required = required > 0
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
@@ -2421,7 +2844,119 @@ func scanReleaseTemplateGitOpsRule(s scanner) (domain.ReleaseTemplateGitOpsRule,
 	return item, nil
 }
 
+func scanExecutionLock(s scanner) (domain.ReleaseExecutionLock, error) {
+	var (
+		item       domain.ReleaseExecutionLock
+		lockScope  string
+		status     string
+		createdAt  int64
+		expiredAt  sql.NullInt64
+		releasedAt sql.NullInt64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&lockScope,
+		&item.LockKey,
+		&item.ApplicationID,
+		&item.EnvCode,
+		&item.ReleaseOrderID,
+		&item.ReleaseOrderNo,
+		&status,
+		&item.OwnerType,
+		&createdAt,
+		&expiredAt,
+		&releasedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ReleaseExecutionLock{}, domain.ErrExecutionLockNotFound
+		}
+		return domain.ReleaseExecutionLock{}, err
+	}
+	item.LockScope = domain.ExecutionLockScope(lockScope)
+	item.Status = domain.ExecutionLockStatus(status)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	if expiredAt.Valid {
+		value := time.Unix(0, expiredAt.Int64).UTC()
+		item.ExpiredAt = &value
+	}
+	if releasedAt.Valid {
+		value := time.Unix(0, releasedAt.Int64).UTC()
+		item.ReleasedAt = &value
+	}
+	return item, nil
+}
+
+func (r *ReleaseRepository) expireExecutionLocks(ctx context.Context, now time.Time) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`UPDATE release_execution_lock
+SET status = ?, released_at = ?
+WHERE status = ?
+  AND released_at IS NULL
+  AND expired_at IS NOT NULL
+  AND expired_at <= ?;`,
+		string(domain.ExecutionLockStatusExpired),
+		now.UTC().UnixNano(),
+		string(domain.ExecutionLockStatusActive),
+		now.UTC().UnixNano(),
+	)
+	return err
+}
+
+func (r *ReleaseRepository) expireExecutionLocksTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	_, err := tx.ExecContext(
+		ctx,
+		`UPDATE release_execution_lock
+SET status = ?, released_at = ?
+WHERE status = ?
+  AND released_at IS NULL
+  AND expired_at IS NOT NULL
+  AND expired_at <= ?;`,
+		string(domain.ExecutionLockStatusExpired),
+		now.UTC().UnixNano(),
+		string(domain.ExecutionLockStatusActive),
+		now.UTC().UnixNano(),
+	)
+	return err
+}
+
 func nullableUnixNano(t *time.Time) any {
+	if t == nil {
+		return nil
+	}
+	return t.UTC().UnixNano()
+}
+
+func boolToDBValue(driver string, value bool) any {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "sqlite":
+		if value {
+			return 1
+		}
+		return 0
+	default:
+		return value
+	}
+}
+
+func scanBoolValue(raw any) bool {
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case int64:
+		return value != 0
+	case []byte:
+		text := strings.TrimSpace(string(value))
+		return text == "1" || strings.EqualFold(text, "true")
+	case string:
+		text := strings.TrimSpace(value)
+		return text == "1" || strings.EqualFold(text, "true")
+	default:
+		return false
+	}
+}
+
+func timePtrToUnixNano(t *time.Time) any {
 	if t == nil {
 		return nil
 	}

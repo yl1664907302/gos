@@ -61,10 +61,13 @@ func NewReleaseOrderHandler(
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/applications/:id/release-orders/rollback", h.CreateRollbackByApplication)
 	router.POST("/release-orders", h.Create)
+	router.POST("/release-orders/batch-execute", h.BatchExecute)
 	router.POST("/release-orders/:id/rollback", h.CreateRollbackByOrder)
 	router.POST("/release-orders/:id/replay", h.CreateReplayByOrder)
 	router.GET("/release-orders", h.List)
 	router.GET("/release-orders/:id", h.GetByID)
+	router.GET("/release-orders/:id/precheck", h.GetPrecheck)
+	router.GET("/release-orders/:id/concurrent-batch-progress", h.GetConcurrentBatchProgress)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
 	router.POST("/release-orders/:id/execute", h.Execute)
 	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
@@ -117,34 +120,41 @@ type FinishReleaseOrderStepRequest struct {
 	Message string `json:"message"`
 }
 
+type BatchExecuteReleaseOrdersRequest struct {
+	OrderIDs []string `json:"order_ids"`
+}
+
 type ReleaseOrderResponse struct {
-	ID              string     `json:"id"`
-	OrderNo         string     `json:"order_no"`
-	PreviousOrderNo string     `json:"previous_order_no"`
-	OperationType   string     `json:"operation_type"`
-	SourceOrderID   string     `json:"source_order_id"`
-	SourceOrderNo   string     `json:"source_order_no"`
-	CDProvider      string     `json:"cd_provider"`
-	ApplicationID   string     `json:"application_id"`
-	ApplicationName string     `json:"application_name"`
-	TemplateID      string     `json:"template_id"`
-	TemplateName    string     `json:"template_name"`
-	BindingID       string     `json:"binding_id"`
-	PipelineID      string     `json:"pipeline_id"`
-	EnvCode         string     `json:"env_code"`
-	ProjectName     string     `json:"project_name"`
-	SonService      string     `json:"son_service"`
-	GitRef          string     `json:"git_ref"`
-	ImageTag        string     `json:"image_tag"`
-	TriggerType     string     `json:"trigger_type"`
-	Status          string     `json:"status"`
-	Remark          string     `json:"remark"`
-	CreatorUserID   string     `json:"creator_user_id"`
-	TriggeredBy     string     `json:"triggered_by"`
-	StartedAt       *time.Time `json:"started_at"`
-	FinishedAt      *time.Time `json:"finished_at"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                 string     `json:"id"`
+	OrderNo            string     `json:"order_no"`
+	PreviousOrderNo    string     `json:"previous_order_no"`
+	OperationType      string     `json:"operation_type"`
+	SourceOrderID      string     `json:"source_order_id"`
+	SourceOrderNo      string     `json:"source_order_no"`
+	IsConcurrent       bool       `json:"is_concurrent"`
+	ConcurrentBatchNo  string     `json:"concurrent_batch_no"`
+	ConcurrentBatchSeq int        `json:"concurrent_batch_seq"`
+	CDProvider         string     `json:"cd_provider"`
+	ApplicationID      string     `json:"application_id"`
+	ApplicationName    string     `json:"application_name"`
+	TemplateID         string     `json:"template_id"`
+	TemplateName       string     `json:"template_name"`
+	BindingID          string     `json:"binding_id"`
+	PipelineID         string     `json:"pipeline_id"`
+	EnvCode            string     `json:"env_code"`
+	ProjectName        string     `json:"project_name"`
+	SonService         string     `json:"son_service"`
+	GitRef             string     `json:"git_ref"`
+	ImageTag           string     `json:"image_tag"`
+	TriggerType        string     `json:"trigger_type"`
+	Status             string     `json:"status"`
+	Remark             string     `json:"remark"`
+	CreatorUserID      string     `json:"creator_user_id"`
+	TriggeredBy        string     `json:"triggered_by"`
+	StartedAt          *time.Time `json:"started_at"`
+	FinishedAt         *time.Time `json:"finished_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type ReleaseOrderParamResponse struct {
@@ -222,6 +232,69 @@ type ReleaseOrderStepActionResponse struct {
 	} `json:"data"`
 }
 
+type ReleaseOrderPrecheckItemResponse struct {
+	Key     string `json:"key"`
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+type ReleaseOrderPrecheckResponse struct {
+	Data struct {
+		OrderID          string                             `json:"order_id"`
+		OrderNo          string                             `json:"order_no"`
+		Executable       bool                               `json:"executable"`
+		WaitingForLock   bool                               `json:"waiting_for_lock"`
+		LockEnabled      bool                               `json:"lock_enabled"`
+		LockScope        string                             `json:"lock_scope"`
+		ConflictStrategy string                             `json:"conflict_strategy"`
+		LockKey          string                             `json:"lock_key"`
+		ConflictOrderNo  string                             `json:"conflict_order_no"`
+		ConflictMessage  string                             `json:"conflict_message"`
+		Items            []ReleaseOrderPrecheckItemResponse `json:"items"`
+	} `json:"data"`
+}
+
+type ReleaseOrderConcurrentBatchProgressItemResponse struct {
+	OrderID             string     `json:"order_id"`
+	OrderNo             string     `json:"order_no"`
+	ApplicationID       string     `json:"application_id"`
+	ApplicationName     string     `json:"application_name"`
+	EnvCode             string     `json:"env_code"`
+	Status              string     `json:"status"`
+	OperationType       string     `json:"operation_type"`
+	ConcurrentBatchSeq  int        `json:"concurrent_batch_seq"`
+	QueueState          string     `json:"queue_state"`
+	QueuePosition       int        `json:"queue_position"`
+	HasRunningExecution bool       `json:"has_running_execution"`
+	StartedAt           *time.Time `json:"started_at"`
+	FinishedAt          *time.Time `json:"finished_at"`
+}
+
+type ReleaseOrderConcurrentBatchProgressResponse struct {
+	Data struct {
+		OrderID      string                                            `json:"order_id"`
+		OrderNo      string                                            `json:"order_no"`
+		BatchNo      string                                            `json:"batch_no"`
+		IsConcurrent bool                                              `json:"is_concurrent"`
+		Total        int                                               `json:"total"`
+		Queued       int                                               `json:"queued"`
+		Executing    int                                               `json:"executing"`
+		Success      int                                               `json:"success"`
+		Failed       int                                               `json:"failed"`
+		Cancelled    int                                               `json:"cancelled"`
+		Items        []ReleaseOrderConcurrentBatchProgressItemResponse `json:"items"`
+	} `json:"data"`
+}
+
+type ReleaseOrderBatchExecuteResponse struct {
+	Data struct {
+		BatchNo        string                 `json:"batch_no"`
+		Orders         []ReleaseOrderResponse `json:"orders"`
+		DispatchErrors []string               `json:"dispatch_errors"`
+	} `json:"data"`
+}
+
 // Create godoc
 // @Summary      Create release order
 // @Tags         release-orders
@@ -291,6 +364,50 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
 
 	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
+}
+
+func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	var req BatchExecuteReleaseOrdersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	if len(req.OrderIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is required"})
+		return
+	}
+	for _, orderID := range req.OrderIDs {
+		item, err := h.manager.GetByID(c.Request.Context(), orderID)
+		if err != nil {
+			writeReleaseOrderHTTPError(c, err)
+			return
+		}
+		if !ensureReleaseOrderVisible(c, h.authz, item.ApplicationID, item.CreatorUserID) {
+			return
+		}
+		if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", item.ApplicationID) {
+			return
+		}
+	}
+	output, err := h.manager.BatchExecute(c.Request.Context(), usecase.BatchExecuteReleaseOrdersInput{
+		OrderIDs: req.OrderIDs,
+	})
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := ReleaseOrderBatchExecuteResponse{}
+	resp.Data.BatchNo = output.BatchNo
+	resp.Data.DispatchErrors = append(resp.Data.DispatchErrors, output.DispatchErrors...)
+	resp.Data.Orders = make([]ReleaseOrderResponse, 0, len(output.Orders))
+	for _, item := range output.Orders {
+		enriched := h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+		resp.Data.Orders = append(resp.Data.Orders, toReleaseOrderResponse(enriched))
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // CreateRollbackByApplication godoc
@@ -478,6 +595,89 @@ func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
 	}
 	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
 	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+func (h *ReleaseOrderHandler) GetPrecheck(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	output, err := h.manager.PrecheckExecute(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := ReleaseOrderPrecheckResponse{}
+	resp.Data.OrderID = output.OrderID
+	resp.Data.OrderNo = output.OrderNo
+	resp.Data.Executable = output.Executable
+	resp.Data.WaitingForLock = output.WaitingForLock
+	resp.Data.LockEnabled = output.LockEnabled
+	resp.Data.LockScope = output.LockScope
+	resp.Data.ConflictStrategy = output.ConflictStrategy
+	resp.Data.LockKey = output.LockKey
+	resp.Data.ConflictOrderNo = output.ConflictOrderNo
+	resp.Data.ConflictMessage = output.ConflictMessage
+	resp.Data.Items = make([]ReleaseOrderPrecheckItemResponse, 0, len(output.Items))
+	for _, item := range output.Items {
+		resp.Data.Items = append(resp.Data.Items, ReleaseOrderPrecheckItemResponse{
+			Key:     item.Key,
+			Name:    item.Name,
+			Status:  string(item.Status),
+			Message: item.Message,
+		})
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *ReleaseOrderHandler) GetConcurrentBatchProgress(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	output, err := h.manager.GetConcurrentBatchProgress(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := ReleaseOrderConcurrentBatchProgressResponse{}
+	resp.Data.OrderID = output.OrderID
+	resp.Data.OrderNo = output.OrderNo
+	resp.Data.BatchNo = output.BatchNo
+	resp.Data.IsConcurrent = output.IsConcurrent
+	resp.Data.Total = output.Total
+	resp.Data.Queued = output.Queued
+	resp.Data.Executing = output.Executing
+	resp.Data.Success = output.Success
+	resp.Data.Failed = output.Failed
+	resp.Data.Cancelled = output.Cancelled
+	resp.Data.Items = make([]ReleaseOrderConcurrentBatchProgressItemResponse, 0, len(output.Items))
+	for _, item := range output.Items {
+		resp.Data.Items = append(resp.Data.Items, ReleaseOrderConcurrentBatchProgressItemResponse{
+			OrderID:             item.OrderID,
+			OrderNo:             item.OrderNo,
+			ApplicationID:       item.ApplicationID,
+			ApplicationName:     item.ApplicationName,
+			EnvCode:             item.EnvCode,
+			Status:              string(item.Status),
+			OperationType:       string(item.OperationType),
+			ConcurrentBatchSeq:  item.ConcurrentBatchSeq,
+			QueueState:          string(item.QueueState),
+			QueuePosition:       item.QueuePosition,
+			HasRunningExecution: item.HasRunningExecution,
+			StartedAt:           item.StartedAt,
+			FinishedAt:          item.FinishedAt,
+		})
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // Cancel godoc
@@ -813,33 +1013,36 @@ func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
 
 func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 	return ReleaseOrderResponse{
-		ID:              item.ID,
-		OrderNo:         item.OrderNo,
-		PreviousOrderNo: item.PreviousOrderNo,
-		OperationType:   string(item.OperationType),
-		SourceOrderID:   item.SourceOrderID,
-		SourceOrderNo:   item.SourceOrderNo,
-		CDProvider:      item.CDProvider,
-		ApplicationID:   item.ApplicationID,
-		ApplicationName: item.ApplicationName,
-		TemplateID:      item.TemplateID,
-		TemplateName:    item.TemplateName,
-		BindingID:       item.BindingID,
-		PipelineID:      item.PipelineID,
-		EnvCode:         item.EnvCode,
-		ProjectName:     item.SonService,
-		SonService:      item.SonService,
-		GitRef:          item.GitRef,
-		ImageTag:        item.ImageTag,
-		TriggerType:     string(item.TriggerType),
-		Status:          string(item.Status),
-		Remark:          item.Remark,
-		CreatorUserID:   item.CreatorUserID,
-		TriggeredBy:     item.TriggeredBy,
-		StartedAt:       item.StartedAt,
-		FinishedAt:      item.FinishedAt,
-		CreatedAt:       item.CreatedAt,
-		UpdatedAt:       item.UpdatedAt,
+		ID:                 item.ID,
+		OrderNo:            item.OrderNo,
+		PreviousOrderNo:    item.PreviousOrderNo,
+		OperationType:      string(item.OperationType),
+		SourceOrderID:      item.SourceOrderID,
+		SourceOrderNo:      item.SourceOrderNo,
+		IsConcurrent:       item.IsConcurrent,
+		ConcurrentBatchNo:  item.ConcurrentBatchNo,
+		ConcurrentBatchSeq: item.ConcurrentBatchSeq,
+		CDProvider:         item.CDProvider,
+		ApplicationID:      item.ApplicationID,
+		ApplicationName:    item.ApplicationName,
+		TemplateID:         item.TemplateID,
+		TemplateName:       item.TemplateName,
+		BindingID:          item.BindingID,
+		PipelineID:         item.PipelineID,
+		EnvCode:            item.EnvCode,
+		ProjectName:        item.SonService,
+		SonService:         item.SonService,
+		GitRef:             item.GitRef,
+		ImageTag:           item.ImageTag,
+		TriggerType:        string(item.TriggerType),
+		Status:             string(item.Status),
+		Remark:             item.Remark,
+		CreatorUserID:      item.CreatorUserID,
+		TriggeredBy:        item.TriggeredBy,
+		StartedAt:          item.StartedAt,
+		FinishedAt:         item.FinishedAt,
+		CreatedAt:          item.CreatedAt,
+		UpdatedAt:          item.UpdatedAt,
 	}
 }
 
@@ -931,7 +1134,8 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 
 	case errors.Is(err, domain.ErrOrderDuplicated),
-		errors.Is(err, domain.ErrTemplateDuplicated):
+		errors.Is(err, domain.ErrTemplateDuplicated),
+		errors.Is(err, usecase.ErrConcurrentReleaseBlocked):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 
 	default:

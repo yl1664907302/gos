@@ -38,30 +38,41 @@ func (h *ReleaseTemplateHandler) RegisterRoutes(router gin.IRouter) {
 }
 
 type CreateReleaseTemplateRequest struct {
-	Name          string                             `json:"name"`
-	ApplicationID string                             `json:"application_id"`
-	CIBindingID   string                             `json:"ci_binding_id"`
-	CDBindingID   string                             `json:"cd_binding_id"`
-	CDProvider    string                             `json:"cd_provider"`
-	GitOpsType    string                             `json:"gitops_type"`
-	Status        string                             `json:"status"`
-	Remark        string                             `json:"remark"`
-	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
-	CDParamDefIDs []string                           `json:"cd_param_def_ids"`
-	GitOpsRules   []ReleaseTemplateGitOpsRuleRequest `json:"gitops_rules"`
+	Name           string                              `json:"name"`
+	ApplicationID  string                              `json:"application_id"`
+	CIBindingID    string                              `json:"ci_binding_id"`
+	CDBindingID    string                              `json:"cd_binding_id"`
+	CDProvider     string                              `json:"cd_provider"`
+	GitOpsType     string                              `json:"gitops_type"`
+	Status         string                              `json:"status"`
+	Remark         string                              `json:"remark"`
+	CIParamDefIDs  []string                            `json:"ci_param_def_ids"`
+	CDParamDefIDs  []string                            `json:"cd_param_def_ids"`
+	CIParamConfigs []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
+	CDParamConfigs []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
+	GitOpsRules    []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
 }
 
 type UpdateReleaseTemplateRequest struct {
-	Name          string                             `json:"name"`
-	CIBindingID   string                             `json:"ci_binding_id"`
-	CDBindingID   string                             `json:"cd_binding_id"`
-	CDProvider    string                             `json:"cd_provider"`
-	GitOpsType    string                             `json:"gitops_type"`
-	Status        string                             `json:"status"`
-	Remark        string                             `json:"remark"`
-	CIParamDefIDs []string                           `json:"ci_param_def_ids"`
-	CDParamDefIDs []string                           `json:"cd_param_def_ids"`
-	GitOpsRules   []ReleaseTemplateGitOpsRuleRequest `json:"gitops_rules"`
+	Name           string                              `json:"name"`
+	CIBindingID    string                              `json:"ci_binding_id"`
+	CDBindingID    string                              `json:"cd_binding_id"`
+	CDProvider     string                              `json:"cd_provider"`
+	GitOpsType     string                              `json:"gitops_type"`
+	Status         string                              `json:"status"`
+	Remark         string                              `json:"remark"`
+	CIParamDefIDs  []string                            `json:"ci_param_def_ids"`
+	CDParamDefIDs  []string                            `json:"cd_param_def_ids"`
+	CIParamConfigs []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
+	CDParamConfigs []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
+	GitOpsRules    []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
+}
+
+type ReleaseTemplateParamConfigRequest struct {
+	ExecutorParamDefID string `json:"executor_param_def_id"`
+	ValueSource        string `json:"value_source"`
+	SourceParamKey     string `json:"source_param_key"`
+	FixedValue         string `json:"fixed_value"`
 }
 
 type ReleaseTemplateResponse struct {
@@ -90,6 +101,10 @@ type ReleaseTemplateParamResponse struct {
 	ParamKey           string    `json:"param_key"`
 	ParamName          string    `json:"param_name"`
 	ExecutorParamName  string    `json:"executor_param_name"`
+	ValueSource        string    `json:"value_source"`
+	SourceParamKey     string    `json:"source_param_key"`
+	SourceParamName    string    `json:"source_param_name"`
+	FixedValue         string    `json:"fixed_value"`
 	Required           bool      `json:"required"`
 	SortNo             int       `json:"sort_no"`
 	CreatedAt          time.Time `json:"created_at"`
@@ -167,17 +182,19 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 	}
 
 	template, bindings, params, gitopsRules, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
-		Name:          req.Name,
-		ApplicationID: req.ApplicationID,
-		CIBindingID:   req.CIBindingID,
-		CDBindingID:   req.CDBindingID,
-		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
-		GitOpsType:    releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
-		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
-		Remark:        req.Remark,
-		CIParamDefIDs: req.CIParamDefIDs,
-		CDParamDefIDs: req.CDParamDefIDs,
-		GitOpsRules:   toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+		Name:           req.Name,
+		ApplicationID:  req.ApplicationID,
+		CIBindingID:    req.CIBindingID,
+		CDBindingID:    req.CDBindingID,
+		CDProvider:     pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:     releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
+		Status:         releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
+		Remark:         req.Remark,
+		CIParamDefIDs:  req.CIParamDefIDs,
+		CDParamDefIDs:  req.CDParamDefIDs,
+		CIParamConfigs: toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
+		CDParamConfigs: toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
+		GitOpsRules:    toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -252,16 +269,18 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		return
 	}
 	updated, bindings, params, gitopsRules, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
-		Name:          req.Name,
-		CIBindingID:   req.CIBindingID,
-		CDBindingID:   req.CDBindingID,
-		CDProvider:    pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
-		GitOpsType:    releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
-		Status:        releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
-		Remark:        req.Remark,
-		CIParamDefIDs: req.CIParamDefIDs,
-		CDParamDefIDs: req.CDParamDefIDs,
-		GitOpsRules:   toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+		Name:           req.Name,
+		CIBindingID:    req.CIBindingID,
+		CDBindingID:    req.CDBindingID,
+		CDProvider:     pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:     releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
+		Status:         releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
+		Remark:         req.Remark,
+		CIParamDefIDs:  req.CIParamDefIDs,
+		CDParamDefIDs:  req.CDParamDefIDs,
+		CIParamConfigs: toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
+		CDParamConfigs: toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
+		GitOpsRules:    toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -425,6 +444,10 @@ func toReleaseTemplateParamResponse(item releasedomain.ReleaseTemplateParam) Rel
 		ParamKey:           item.ParamKey,
 		ParamName:          item.ParamName,
 		ExecutorParamName:  item.ExecutorParamName,
+		ValueSource:        string(item.ValueSource),
+		SourceParamKey:     item.SourceParamKey,
+		SourceParamName:    item.SourceParamName,
+		FixedValue:         item.FixedValue,
 		Required:           item.Required,
 		SortNo:             item.SortNo,
 		CreatedAt:          item.CreatedAt,
@@ -460,6 +483,19 @@ func toReleaseTemplateGitOpsRuleInputs(items []ReleaseTemplateGitOpsRuleRequest)
 			DocumentName:     item.DocumentName,
 			TargetPath:       item.TargetPath,
 			ValueTemplate:    item.ValueTemplate,
+		})
+	}
+	return result
+}
+
+func toReleaseTemplateParamConfigInputs(items []ReleaseTemplateParamConfigRequest) []usecase.ReleaseTemplateParamConfigInput {
+	result := make([]usecase.ReleaseTemplateParamConfigInput, 0, len(items))
+	for _, item := range items {
+		result = append(result, usecase.ReleaseTemplateParamConfigInput{
+			ExecutorParamDefID: item.ExecutorParamDefID,
+			ValueSource:        releasedomain.TemplateParamValueSource(strings.ToLower(strings.TrimSpace(item.ValueSource))),
+			SourceParamKey:     item.SourceParamKey,
+			FixedValue:         item.FixedValue,
 		})
 	}
 	return result

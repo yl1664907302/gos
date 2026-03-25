@@ -171,6 +171,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 
 	repoURL := strings.TrimSpace(app.GetRepoURL())
 	sourcePath := strings.TrimSpace(app.GetSourcePath())
+	gitopsBranch := uc.resolveGitOpsTargetBranch(ctx, order, orderParams, argocdInstance, app)
 	if repoURL == "" || sourcePath == "" {
 		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "ArgoCD Application 缺少仓库地址或源路径")
 		err := fmt.Errorf("%w: argocd application source repo/path is incomplete", ErrInvalidInput)
@@ -220,7 +221,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		_, valuesFiles, valuesCommitSHA, valuesChanged, applyErr := gitopsService.ApplyValuesRules(
 			ctx,
 			repoURL,
-			strings.TrimSpace(app.GetTargetRevision()),
+			gitopsBranch,
 			valuesRules,
 			commitMessage,
 		)
@@ -231,6 +232,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 				logx.F("order_no", order.OrderNo),
 				logx.F("repo_url", repoURL),
 				logx.F("target_revision", app.GetTargetRevision()),
+				logx.F("gitops_branch", gitopsBranch),
 				logx.F("rules_count", len(valuesRules)),
 			)
 			return fmt.Errorf("%w: apply gitops values rules failed: %v", ErrInvalidInput, applyErr)
@@ -246,7 +248,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 			commitSHA = strings.TrimSpace(valuesCommitSHA)
 		}
 		manifestChanged = valuesChanged
-		if snapshotErr := uc.saveHelmDeploySnapshot(ctx, order, argocdInstance, appName, repoURL, strings.TrimSpace(app.GetTargetRevision()), sourcePath, environment, imageVersion, valuesRules); snapshotErr != nil {
+		if snapshotErr := uc.saveHelmDeploySnapshot(ctx, order, argocdInstance, appName, repoURL, gitopsBranch, sourcePath, environment, imageVersion, valuesRules); snapshotErr != nil {
 			_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "保存部署快照失败: "+snapshotErr.Error())
 			return fmt.Errorf("%w: save deploy snapshot failed: %v", ErrInvalidInput, snapshotErr)
 		}
@@ -261,7 +263,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 				_, manifestFiles, manifestCommitSHA, changed, applyErr := gitopsService.ApplyManifestRules(
 					ctx,
 					repoURL,
-					strings.TrimSpace(app.GetTargetRevision()),
+					gitopsBranch,
 					manifestRules,
 					commitMessage,
 				)
@@ -271,6 +273,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 						logx.F("order_id", order.ID),
 						logx.F("repo_url", repoURL),
 						logx.F("target_revision", app.GetTargetRevision()),
+						logx.F("gitops_branch", gitopsBranch),
 						logx.F("rules_count", len(manifestRules)),
 					)
 					return fmt.Errorf("%w: apply gitops manifest rules failed: %v", ErrInvalidInput, applyErr)
@@ -297,7 +300,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 			ctx,
 			repoURL,
 			sourcePath,
-			strings.TrimSpace(app.GetTargetRevision()),
+			gitopsBranch,
 			imageVersion,
 			commitMessage,
 		)
@@ -308,6 +311,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 				logx.F("repo_url", repoURL),
 				logx.F("source_path", sourcePath),
 				logx.F("target_revision", app.GetTargetRevision()),
+				logx.F("gitops_branch", gitopsBranch),
 				logx.F("image_version", imageVersion),
 			)
 			return fmt.Errorf("%w: update gitops repo failed: %v", ErrInvalidInput, updateErr)
@@ -362,12 +366,13 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, syncCode, "开始触发 ArgoCD Sync")
-	if err := client.SyncApplication(ctx, appName); err != nil {
+	if err := client.SyncApplicationWithRevision(ctx, appName, gitopsBranch); err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, syncCode, domain.StepStatusFailed, "触发 ArgoCD Sync 失败: "+err.Error())
 		logx.Error("argocd_cd", "sync_application_failed", err,
 			logx.F("order_id", order.ID),
 			logx.F("app_name", appName),
 			logx.F("argocd_instance_code", argocdInstance.InstanceCode),
+			logx.F("gitops_branch", gitopsBranch),
 		)
 		return fmt.Errorf("%w: trigger argocd sync failed: %v", ErrInvalidInput, err)
 	}
@@ -498,11 +503,12 @@ func (uc *ReleaseOrderManager) startArgoCDRollbackExecution(
 	}
 	commitFields := buildGitOpsCommitMessageFields(order, orderParams, appKey, environment, firstNonEmpty(imageVersion, strings.TrimSpace(order.ImageTag)), snapshot.SourcePath)
 	commitMessage := gitopsService.BuildCommitMessage(commitFields)
+	gitopsBranch := uc.resolveGitOpsBranchByEnv(environment, argocdInstance, strings.TrimSpace(snapshot.Branch))
 
 	_, changedFiles, commitSHA, changed, applyErr := gitopsService.ApplyValuesRules(
 		ctx,
 		strings.TrimSpace(snapshot.RepoURL),
-		strings.TrimSpace(snapshot.Branch),
+		gitopsBranch,
 		valuesRules,
 		commitMessage,
 	)
@@ -524,7 +530,7 @@ func (uc *ReleaseOrderManager) startArgoCDRollbackExecution(
 		argocdInstance,
 		appName,
 		strings.TrimSpace(snapshot.RepoURL),
-		strings.TrimSpace(snapshot.Branch),
+		gitopsBranch,
 		strings.TrimSpace(snapshot.SourcePath),
 		environment,
 		firstNonEmpty(imageVersion, strings.TrimSpace(order.ImageTag)),
@@ -545,7 +551,7 @@ func (uc *ReleaseOrderManager) startArgoCDRollbackExecution(
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, syncCode, "开始触发 ArgoCD Sync")
-	if err := client.SyncApplication(ctx, appName); err != nil {
+	if err := client.SyncApplicationWithRevision(ctx, appName, gitopsBranch); err != nil {
 		_ = uc.markStepFinished(ctx, order.ID, syncCode, domain.StepStatusFailed, "触发 ArgoCD Sync 失败: "+err.Error())
 		return fmt.Errorf("%w: trigger argocd sync failed: %v", ErrInvalidInput, err)
 	}
@@ -1112,4 +1118,31 @@ func normalizeArgoCDSourcePath(value string) string {
 	normalized = strings.TrimPrefix(normalized, "./")
 	normalized = strings.TrimPrefix(normalized, "/")
 	return strings.TrimSuffix(normalized, "/")
+}
+
+func (uc *ReleaseOrderManager) resolveGitOpsTargetBranch(
+	_ context.Context,
+	order domain.ReleaseOrder,
+	orderParams []domain.ReleaseOrderParam,
+	argocdInstance argocddomain.Instance,
+	app ArgoCDApplicationSnapshot,
+) string {
+	environment := uc.resolveArgoCDEnvironment(order, orderParams)
+	return uc.resolveGitOpsBranchByEnv(environment, argocdInstance, strings.TrimSpace(app.GetTargetRevision()))
+}
+
+func (uc *ReleaseOrderManager) resolveGitOpsBranchByEnv(
+	environment string,
+	_ argocddomain.Instance,
+	fallback string,
+) string {
+	envBranch := strings.TrimSpace(environment)
+	if envBranch != "" {
+		return envBranch
+	}
+	revision := strings.TrimSpace(fallback)
+	if revision != "" && !strings.EqualFold(revision, "HEAD") {
+		return revision
+	}
+	return firstNonEmpty(revision, "master")
 }

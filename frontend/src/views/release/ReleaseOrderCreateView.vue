@@ -10,6 +10,7 @@ import { listApplicationExecutorParamDefs } from '../../api/pipeline'
 import { createReleaseOrder, getReleaseTemplateByID, listAllReleaseTemplates } from '../../api/release'
 import { getReleaseSettings } from '../../api/system'
 import { useAuthStore } from '../../stores/auth'
+import type { Application } from '../../types/application'
 import type { ExecutorParamDef } from '../../types/pipeline'
 import type {
   CreateReleaseOrderParamPayload,
@@ -57,6 +58,7 @@ const submitting = ref(false)
 const templateWarning = ref('')
 
 const allApplicationOptions = ref<SelectOption[]>([])
+const applicationRecords = ref<Application[]>([])
 const envOptions = ref<SelectOption[]>([])
 const templateOptions = ref<SelectOption[]>([])
 const templateList = ref<ReleaseTemplate[]>([])
@@ -76,6 +78,11 @@ const scopeStates = reactive<Record<ReleasePipelineScope, ScopeRuntimeState>>({
     error: '',
     param_defs: [],
   },
+})
+
+const collapsedScopes = reactive<Record<ReleasePipelineScope, boolean>>({
+  ci: true,
+  cd: true,
 })
 
 const preferredTemplateID = ref('')
@@ -132,6 +139,10 @@ const currentUserDisplayName = computed(() => {
   return String(profile.display_name || '').trim() || String(profile.username || '').trim() || '-'
 })
 
+const selectedApplicationRecord = computed(() =>
+  applicationRecords.value.find((item) => item.id === formState.application_id.trim()) || null,
+)
+
 const bindingMapByScope = computed<Record<ReleasePipelineScope, ReleaseTemplateBinding | null>>(() => ({
   ci: templateBindings.value.find((item) => item.pipeline_scope === 'ci' && item.enabled) || null,
   cd: templateBindings.value.find((item) => item.pipeline_scope === 'cd' && item.enabled) || null,
@@ -187,6 +198,8 @@ function resetTemplateState() {
   scopeStates.cd.error = ''
   scopeStates.cd.param_defs = []
   scopeStates.cd.loading = false
+  collapsedScopes.ci = true
+  collapsedScopes.cd = true
   resetParamValues()
 }
 
@@ -213,6 +226,7 @@ async function loadApplicationOptions() {
   loadingApplications.value = true
   try {
     const response = await listApplications({ page: 1, page_size: 200 })
+    applicationRecords.value = response.data
     allApplicationOptions.value = response.data.map((item) => ({
       label: `${item.name} (${item.key})`,
       value: item.id,
@@ -387,6 +401,8 @@ async function loadSelectedTemplateDetail() {
     selectedTemplate.value = response.data.template
     templateBindings.value = response.data.bindings
     templateParams.value = response.data.params
+    collapsedScopes.ci = true
+    collapsedScopes.cd = true
     resetParamValues()
     await Promise.all([
       loadScopeParamDefs('ci'),
@@ -403,6 +419,10 @@ async function loadSelectedTemplateDetail() {
   } finally {
     loadingTemplateDetail.value = false
   }
+}
+
+function toggleScopeCollapsed(scope: ReleasePipelineScope) {
+  collapsedScopes[scope] = !collapsedScopes[scope]
 }
 
 async function handleApplicationChange(value: string | undefined) {
@@ -428,6 +448,107 @@ function resolveTemplateParamLabel(scope: ReleasePipelineScope, item: ExecutorPa
 
 function scopeTemplateParamDefs(scope: ReleasePipelineScope) {
   return scopeStates[scope].param_defs
+}
+
+function resolveTemplateParamValueSource(meta?: ReleaseTemplateParam | null) {
+  const value = String(meta?.value_source || '').trim().toLowerCase()
+  if (value === 'fixed' || value === 'ci_param' || value === 'builtin' || value === 'release_input') {
+    return value
+  }
+  return 'release_input'
+}
+
+function isTemplateParamEditable(scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  const meta = templateParamMetaByScope.value[scope][item.id]
+  return resolveTemplateParamValueSource(meta) === 'release_input'
+}
+
+function resolveTemplateParamBuiltinPreview(paramKey: string) {
+  const normalizedKey = String(paramKey || '').trim().toLowerCase()
+  if (!normalizedKey) {
+    return ''
+  }
+  switch (normalizedKey) {
+    case 'env':
+    case 'env_code':
+      return formState.env_code.trim()
+    case 'project_name':
+      return resolveTemplateParamPreviewByParamKey('ci', 'project_name')
+    case 'branch':
+    case 'git_ref':
+      return resolveTemplateParamPreviewByParamKey('ci', 'branch') || resolveTemplateParamPreviewByParamKey('ci', 'git_ref')
+    case 'image_version':
+    case 'image_tag':
+      return resolveTemplateParamPreviewByParamKey('ci', 'image_version') || resolveTemplateParamPreviewByParamKey('ci', 'image_tag')
+    case 'app_key':
+      return String(selectedApplicationRecord.value?.key || '').trim()
+    case 'app_name':
+      return String(selectedApplicationRecord.value?.name || '').trim()
+    default:
+      return resolveTemplateParamPreviewByParamKey('ci', normalizedKey) || resolveTemplateParamPreviewByParamKey('cd', normalizedKey)
+  }
+}
+
+function resolveTemplateParamPreviewByParamKey(scope: ReleasePipelineScope, paramKey: string) {
+  const normalizedKey = String(paramKey || '').trim().toLowerCase()
+  if (!normalizedKey) {
+    return ''
+  }
+  const target = scopeTemplateParamDefs(scope).find(
+    (item) => String(item.param_key || '').trim().toLowerCase() === normalizedKey,
+  )
+  if (!target) {
+    return ''
+  }
+  const meta = templateParamMetaByScope.value[scope][target.id]
+  if (!meta) {
+    return String(paramValues[target.id] || '').trim()
+  }
+  const valueSource = resolveTemplateParamValueSource(meta)
+  if (valueSource === 'fixed') {
+    return String(meta.fixed_value || '').trim()
+  }
+  if (valueSource === 'ci_param') {
+    return resolveTemplateParamPreviewByParamKey('ci', meta.source_param_key)
+  }
+  if (valueSource === 'builtin') {
+    return resolveTemplateParamBuiltinPreview(meta.source_param_key)
+  }
+  return String(paramValues[target.id] || '').trim()
+}
+
+function resolveTemplateParamDisplayValue(scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  const meta = templateParamMetaByScope.value[scope][item.id]
+  if (!meta) {
+    return String(paramValues[item.id] || '').trim()
+  }
+  switch (resolveTemplateParamValueSource(meta)) {
+    case 'fixed':
+      return String(meta.fixed_value || '').trim()
+    case 'ci_param':
+      return resolveTemplateParamPreviewByParamKey('ci', meta.source_param_key)
+    case 'builtin':
+      return resolveTemplateParamBuiltinPreview(meta.source_param_key)
+    default:
+      return String(paramValues[item.id] || '').trim()
+  }
+}
+
+function resolveTemplateParamDisplayPlaceholder(scope: ReleasePipelineScope, item: ExecutorParamDef) {
+  const meta = templateParamMetaByScope.value[scope][item.id]
+  if (!meta) {
+    return '必填，请输入发布值'
+  }
+  switch (resolveTemplateParamValueSource(meta)) {
+    case 'fixed':
+      return '模板已固定此参数'
+    case 'ci_param':
+      return `沿用 CI 标准字段：${meta.source_param_name || meta.source_param_key || '-'}`
+    case 'builtin':
+      return `内置字段：${meta.source_param_name || meta.source_param_key || '-'}`
+    default:
+      return '必填，请输入发布值'
+  }
 }
 
 const defaultChoiceMeta: ChoiceMeta = {
@@ -620,13 +741,13 @@ function buildParamsPayload(): CreateReleaseOrderParamPayload[] {
   for (const scope of visibleScopes.value) {
     const items = scopeTemplateParamDefs(scope)
     for (const item of items) {
+      if (!isTemplateParamEditable(scope, item)) {
+        continue
+      }
       const value = String(paramValues[item.id] || '').trim()
       const label = resolveTemplateParamLabel(scope, item)
-      if (item.required && !value) {
-        throw new Error(`参数 ${label} 为必填，请填写发布值`)
-      }
       if (!value) {
-        continue
+        throw new Error(`参数 ${label} 为必填，请填写发布值`)
       }
       payload.push({
         pipeline_scope: scope,
@@ -814,62 +935,77 @@ onMounted(async () => {
             <a-space>
               <a-tag class="dashboard-chip dashboard-chip-running">{{ item.binding?.provider || '-' }}</a-tag>
               <a-tag class="dashboard-chip dashboard-chip-neutral">{{ item.binding?.binding_name || '-' }}</a-tag>
+              <a-button type="text" size="small" class="scope-toggle-btn" @click="toggleScopeCollapsed(item.scope)">
+                {{ collapsedScopes[item.scope] ? '展开' : '折叠' }}
+              </a-button>
             </a-space>
           </template>
 
-          <a-alert class="scope-alert scope-alert-info" type="info" show-icon :message="scopeHint(item.scope)" />
-          <a-alert v-if="item.error" class="scope-alert scope-alert-error" type="error" show-icon :message="item.error" />
+          <div v-show="!collapsedScopes[item.scope]" class="scope-card-body">
+            <a-alert class="scope-alert scope-alert-info" type="info" show-icon :message="scopeHint(item.scope)" />
+            <a-alert v-if="item.error" class="scope-alert scope-alert-error" type="error" show-icon :message="item.error" />
 
-          <a-spin :spinning="item.loading" tip="正在加载额外参数...">
-            <a-empty
-              v-if="!item.loading && item.params.length === 0"
-                :description="item.binding?.provider === 'jenkins'
-                ? '当前执行单元未配置额外参数'
-                : item.binding?.provider === 'argocd'
-                  ? '当前执行单元会沿用 CI 中映射并勾选的内置字段自动完成 GitOps 配置更新；其中 image_version 在 Jenkins CI 下默认取 BUILD_NUMBER'
-                  : '当前执行单元暂无可填写的参数表单'"
-            />
-            <div v-else class="scope-param-form">
-              <a-row v-for="rowIndex in Math.ceil(item.params.length / 2)" :key="`${item.scope}-row-${rowIndex}`" :gutter="16">
-                <a-col
-                  v-for="param in item.params.slice((rowIndex - 1) * 2, (rowIndex - 1) * 2 + 2)"
-                  :key="param.id"
-                  :xs="24"
-                  :md="12"
-                >
-                  <a-form-item :label="resolveTemplateParamLabel(item.scope, param)" :required="param.required">
-                    <a-select
-                      v-if="useSelectForChoice(param) && isMultipleChoice(item.scope, param)"
-                      mode="multiple"
-                      class="param-value-control"
-                      :value="getChoiceMultiValues(param)"
-                      :options="getChoiceMeta(param).options"
-                      :placeholder="param.required ? '必填，请选择发布值' : '选填，可多选'"
-                      allow-clear
-                      @change="handleChoiceMultiChange(param, $event)"
-                    />
-                    <a-select
-                      v-else-if="useSelectForChoice(param)"
-                      class="param-value-control"
-                      :value="getChoiceSingleValue(item.scope, param)"
-                      :options="getChoiceMeta(param).options"
-                      :placeholder="param.required ? '必填，请选择发布值' : '选填，留空将不下发'"
-                      allow-clear
-                      @change="handleChoiceSingleChange(param, $event)"
-                    />
-                    <a-input
-                      v-else
-                      :value="paramValues[param.id]"
-                      class="param-value-control"
-                      :placeholder="param.required ? '必填，请输入发布值' : '选填，留空将不下发'"
-                      allow-clear
-                      @update:value="handleParamValueInput(param, String($event || ''))"
-                    />
-                  </a-form-item>
-                </a-col>
-              </a-row>
-            </div>
-          </a-spin>
+            <a-spin :spinning="item.loading" tip="正在加载额外参数...">
+              <a-empty
+                v-if="!item.loading && item.params.length === 0"
+                  :description="item.binding?.provider === 'jenkins'
+                  ? '当前执行单元未配置额外参数'
+                  : item.binding?.provider === 'argocd'
+                    ? '当前执行单元会沿用 CI 中映射并勾选的内置字段自动完成 GitOps 配置更新；其中 image_version 在 Jenkins CI 下默认取 BUILD_NUMBER'
+                    : '当前执行单元暂无可填写的参数表单'"
+              />
+              <div v-else class="scope-param-form">
+                <a-row v-for="rowIndex in Math.ceil(item.params.length / 2)" :key="`${item.scope}-row-${rowIndex}`" :gutter="16">
+                  <a-col
+                    v-for="param in item.params.slice((rowIndex - 1) * 2, (rowIndex - 1) * 2 + 2)"
+                    :key="param.id"
+                    :xs="24"
+                    :md="12"
+                  >
+                  <a-form-item :label="resolveTemplateParamLabel(item.scope, param)" :required="isTemplateParamEditable(item.scope, param) || param.required">
+                    <template v-if="isTemplateParamEditable(item.scope, param)">
+                      <a-select
+                        v-if="useSelectForChoice(param) && isMultipleChoice(item.scope, param)"
+                        mode="multiple"
+                        class="param-value-control"
+                        :value="getChoiceMultiValues(param)"
+                        :options="getChoiceMeta(param).options"
+                        placeholder="必填，请选择发布值"
+                        allow-clear
+                        @change="handleChoiceMultiChange(param, $event)"
+                      />
+                      <a-select
+                        v-else-if="useSelectForChoice(param)"
+                        class="param-value-control"
+                        :value="getChoiceSingleValue(item.scope, param)"
+                        :options="getChoiceMeta(param).options"
+                        placeholder="必填，请选择发布值"
+                        allow-clear
+                        @change="handleChoiceSingleChange(param, $event)"
+                      />
+                        <a-input
+                          v-else
+                          :value="paramValues[param.id]"
+                          class="param-value-control"
+                          :placeholder="resolveTemplateParamDisplayPlaceholder(item.scope, param)"
+                          allow-clear
+                          @update:value="handleParamValueInput(param, String($event || ''))"
+                        />
+                      </template>
+                      <template v-else>
+                        <a-input
+                          :value="resolveTemplateParamDisplayValue(item.scope, param)"
+                          class="param-value-control"
+                          :placeholder="resolveTemplateParamDisplayPlaceholder(item.scope, param)"
+                          disabled
+                        />
+                      </template>
+                    </a-form-item>
+                  </a-col>
+                </a-row>
+              </div>
+            </a-spin>
+          </div>
         </a-card>
       </template>
 
@@ -931,6 +1067,20 @@ onMounted(async () => {
 
 .scope-card {
   margin-top: 0;
+}
+
+.scope-card-body {
+  margin-top: 6px;
+}
+
+.scope-toggle-btn {
+  color: var(--color-dashboard-900);
+  font-weight: 700;
+}
+
+.scope-toggle-btn:hover {
+  color: var(--color-primary-600);
+  background: rgba(37, 99, 235, 0.06);
 }
 
 .template-alert,

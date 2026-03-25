@@ -10,17 +10,26 @@ import {
   ReloadOutlined,
   StopFilled,
   SyncOutlined,
-} from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
-import type { TableColumnsType } from 'ant-design-vue'
-import dayjs from 'dayjs'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+} from "@ant-design/icons-vue";
+import { message } from "ant-design-vue";
+import type { TableColumnsType } from "ant-design-vue";
+import dayjs from "dayjs";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+} from "vue";
+import { useRoute, useRouter } from "vue-router";
 import {
   buildReleaseOrderLogStreamURL,
   cancelReleaseOrder,
   executeReleaseOrder,
+  getReleaseOrderConcurrentBatchProgress,
   getReleaseOrderByID,
+  getReleaseOrderPrecheck,
   getReleaseOrderPipelineStageLog,
   listReleaseOrderExecutions,
   listReleaseOrderParams,
@@ -29,15 +38,19 @@ import {
   listReleaseOrderSteps,
   replayReleaseOrderByID,
   rollbackReleaseOrderByID,
-} from '../../api/release'
-import { useResizableColumns } from '../../composables/useResizableColumns'
-import { useAuthStore } from '../../stores/auth'
+} from "../../api/release";
+import { useResizableColumns } from "../../composables/useResizableColumns";
+import { useAuthStore } from "../../stores/auth";
 import type {
   ReleaseOperationType,
   ReleaseOrder,
   ReleaseOrderExecution,
+  ReleaseOrderConcurrentBatchProgress,
+  ReleaseOrderConcurrentBatchQueueState,
   ReleaseOrderLogStreamEvent,
   ReleaseOrderParam,
+  ReleaseOrderPrecheck,
+  ReleaseOrderPrecheckItem,
   ReleaseOrderValueProgress,
   ReleaseOrderValueProgressStatus,
   ReleaseOrderPipelineStage,
@@ -46,261 +59,399 @@ import type {
   ReleasePipelineScope,
   ReleasePipelineStageStatus,
   ReleaseTriggerType,
-} from '../../types/release'
-import { extractHTTPErrorMessage } from '../../utils/http-error'
+} from "../../types/release";
+import { extractHTTPErrorMessage } from "../../utils/http-error";
 
-const route = useRoute()
-const router = useRouter()
-const authStore = useAuthStore()
-const AUTO_REFRESH_INTERVAL_MS = 5000
+const route = useRoute();
+const router = useRouter();
+const authStore = useAuthStore();
+const AUTO_REFRESH_INTERVAL_MS = 5000;
 // Keep pipeline stages in sync with the main release polling cadence so progress feels responsive.
-const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 5000
+const PIPELINE_STAGE_REFRESH_INTERVAL_MS = 5000;
 
 type ScopeLogState = {
-  text: string
-  offset: number
-  connected: boolean
-  connecting: boolean
-  ended: boolean
-  error: string
-  statusText: string
-  panelRef: HTMLElement | null
-  stream: EventSource | null
-  reconnectTimer: number | null
-  closeIntentional: boolean
-  autoFollow: boolean
-}
+  text: string;
+  offset: number;
+  connected: boolean;
+  connecting: boolean;
+  ended: boolean;
+  error: string;
+  statusText: string;
+  panelRef: HTMLElement | null;
+  stream: EventSource | null;
+  reconnectTimer: number | null;
+  closeIntentional: boolean;
+  autoFollow: boolean;
+};
 
 function createScopeLogState(): ScopeLogState {
   return {
-    text: '',
+    text: "",
     offset: 0,
     connected: false,
     connecting: false,
     ended: false,
-    error: '',
-    statusText: '未连接',
+    error: "",
+    statusText: "未连接",
     panelRef: null,
     stream: null,
     reconnectTimer: null,
     closeIntentional: false,
     autoFollow: true,
-  }
+  };
 }
 
-const loading = ref(false)
-const querying = ref(false)
-const cancelling = ref(false)
-const executing = ref(false)
-const recovering = ref(false)
-const autoRefreshTimer = ref<number | null>(null)
-const executeLocked = ref(false)
+const loading = ref(false);
+const querying = ref(false);
+const cancelling = ref(false);
+const executing = ref(false);
+const recovering = ref(false);
+const autoRefreshTimer = ref<number | null>(null);
+const executeLocked = ref(false);
 
-const order = ref<ReleaseOrder | null>(null)
-const params = ref<ReleaseOrderParam[]>([])
-const valueProgress = ref<ReleaseOrderValueProgress[]>([])
-const steps = ref<ReleaseOrderStep[]>([])
-const executions = ref<ReleaseOrderExecution[]>([])
-const pipelineStages = ref<ReleaseOrderPipelineStage[]>([])
-const pipelineStageModuleVisible = ref(false)
-const pipelineStageExecutorType = ref('')
-const pipelineStageMessage = ref('')
-const pipelineStageLoading = ref(false)
-const lastPipelineStageRefreshAt = ref(0)
+const order = ref<ReleaseOrder | null>(null);
+const params = ref<ReleaseOrderParam[]>([]);
+const valueProgress = ref<ReleaseOrderValueProgress[]>([]);
+const steps = ref<ReleaseOrderStep[]>([]);
+const executions = ref<ReleaseOrderExecution[]>([]);
+const pipelineStages = ref<ReleaseOrderPipelineStage[]>([]);
+const precheck = ref<ReleaseOrderPrecheck | null>(null);
+const precheckLoading = ref(false);
+const pipelineStageModuleVisible = ref(false);
+const pipelineStageExecutorType = ref("");
+const pipelineStageMessage = ref("");
+const pipelineStageLoading = ref(false);
+const lastPipelineStageRefreshAt = ref(0);
 
-const stageLogDrawerVisible = ref(false)
-const stageLogLoading = ref(false)
-const stageLogContent = ref('')
-const stageLogHasMore = ref(false)
-const stageLogFetchedAt = ref('')
-const selectedPipelineStage = ref<ReleaseOrderPipelineStage | null>(null)
+const stageLogDrawerVisible = ref(false);
+const stageLogLoading = ref(false);
+const stageLogContent = ref("");
+const stageLogHasMore = ref(false);
+const stageLogFetchedAt = ref("");
+const selectedPipelineStage = ref<ReleaseOrderPipelineStage | null>(null);
+const concurrentBatchProgress = ref<ReleaseOrderConcurrentBatchProgress | null>(
+  null,
+);
+const concurrentBatchLoading = ref(false);
 
 const scopeLogStates = reactive<Record<ReleasePipelineScope, ScopeLogState>>({
   ci: createScopeLogState(),
   cd: createScopeLogState(),
-})
+});
 
-const orderID = computed(() => String(route.params.id || '').trim())
-const canViewParamSnapshot = computed(() => authStore.hasPermission('release.param_snapshot.view'))
-const canCancel = computed(() => order.value?.status === 'pending' || order.value?.status === 'running')
-const canExecute = computed(() => order.value?.status === 'pending' && !executeLocked.value)
+const orderID = computed(() => String(route.params.id || "").trim());
+const canViewParamSnapshot = computed(() =>
+  authStore.hasPermission("release.param_snapshot.view"),
+);
+const canCancel = computed(
+  () => order.value?.status === "pending" || order.value?.status === "running",
+);
+const precheckBlocked = computed(
+  () => Boolean(precheck.value) && !precheck.value?.executable,
+);
+const canExecute = computed(
+  () =>
+    order.value?.status === "pending" &&
+    !executeLocked.value &&
+    !precheckBlocked.value,
+);
 const canRollback = computed(
-  () => order.value?.status === 'success' && String(order.value?.cd_provider || '').trim().toLowerCase() === 'argocd',
-)
+  () =>
+    order.value?.status === "success" &&
+    String(order.value?.cd_provider || "")
+      .trim()
+      .toLowerCase() === "argocd",
+);
 const canReplay = computed(
   () =>
-    order.value?.status === 'success' &&
-    String(order.value?.cd_provider || '').trim().toLowerCase() !== 'argocd',
-)
+    order.value?.status === "success" &&
+    String(order.value?.cd_provider || "")
+      .trim()
+      .toLowerCase() !== "argocd",
+);
 const shouldAutoRefresh = computed(() => {
   if (!order.value) {
-    return true
+    return true;
   }
-  return order.value.status === 'pending' || order.value.status === 'running'
-})
+  return order.value.status === "pending" || order.value.status === "running";
+});
 const shouldKeepLogStreaming = computed(() => {
   if (!order.value) {
-    return true
+    return true;
   }
-  return order.value.status === 'pending' || order.value.status === 'running'
-})
+  return order.value.status === "pending" || order.value.status === "running";
+});
+const shouldLoadPrecheck = computed(() => {
+  if (!order.value) {
+    return false;
+  }
+  return order.value.status === "pending" || order.value.status === "running";
+});
+const showPrecheckCard = computed(() => {
+  if (precheckLoading.value) {
+    return true;
+  }
+  if (order.value?.status === "pending") {
+    return true;
+  }
+  return Boolean(
+    order.value?.status === "running" && precheck.value?.waiting_for_lock,
+  );
+});
 
-const executionMapByScope = computed<Record<ReleasePipelineScope, ReleaseOrderExecution | null>>(() => ({
-  ci: executions.value.find((item) => item.pipeline_scope === 'ci') || null,
-  cd: executions.value.find((item) => item.pipeline_scope === 'cd') || null,
-}))
+const executionMapByScope = computed<
+  Record<ReleasePipelineScope, ReleaseOrderExecution | null>
+>(() => ({
+  ci: executions.value.find((item) => item.pipeline_scope === "ci") || null,
+  cd: executions.value.find((item) => item.pipeline_scope === "cd") || null,
+}));
 
 const visibleScopes = computed(() => {
-  return (['ci', 'cd'] as ReleasePipelineScope[]).filter((scope) => Boolean(executionMapByScope.value[scope]))
-})
+  return (["ci", "cd"] as ReleasePipelineScope[]).filter((scope) =>
+    Boolean(executionMapByScope.value[scope]),
+  );
+});
 
 const detailItems = computed(() => {
   if (!order.value) {
-    return []
+    return [];
   }
   const items = [
-    { key: 'order_no', label: '发布单号', value: order.value.order_no },
-    { key: 'created_at', label: '创建时间', value: formatTime(order.value.created_at) },
-    { key: 'operation_type', label: '操作类型', value: operationTypeText(order.value.operation_type) },
-    { label: '应用名称', value: order.value.application_name || '-' },
-    { label: '模板名称', value: order.value.template_name || '-' },
-    { label: '模板 ID', value: order.value.template_id || '-' },
-    { label: '触发方式', value: triggerTypeText(order.value.trigger_type) },
-    { label: '创建者', value: order.value.triggered_by || '-' },
-    { label: 'Git 版本', value: order.value.git_ref || '-' },
-    { label: '镜像版本', value: order.value.image_tag || '-' },
-    { label: '备注', value: order.value.remark || '-' },
-    { label: '开始时间', value: formatTime(order.value.started_at) },
-    { label: '结束时间', value: formatTime(order.value.finished_at) },
-    { label: '更新时间', value: formatTime(order.value.updated_at) },
-  ]
-  if (order.value.operation_type !== 'deploy' && order.value.source_order_no) {
-    items.splice(3, 0, { key: 'source_order_no', label: '来源发布单号', value: order.value.source_order_no })
+    { key: "order_no", label: "发布单号", value: order.value.order_no },
+    {
+      key: "created_at",
+      label: "创建时间",
+      value: formatTime(order.value.created_at),
+    },
+    {
+      key: "operation_type",
+      label: "操作类型",
+      value: operationTypeText(order.value.operation_type),
+    },
+    { label: "应用名称", value: order.value.application_name || "-" },
+    { label: "模板名称", value: order.value.template_name || "-" },
+    { label: "模板 ID", value: order.value.template_id || "-" },
+    { label: "触发方式", value: triggerTypeText(order.value.trigger_type) },
+    { label: "创建者", value: order.value.triggered_by || "-" },
+    { label: "Git 版本", value: order.value.git_ref || "-" },
+    { label: "镜像版本", value: order.value.image_tag || "-" },
+    { label: "备注", value: order.value.remark || "-" },
+    { label: "开始时间", value: formatTime(order.value.started_at) },
+    { label: "结束时间", value: formatTime(order.value.finished_at) },
+    { label: "更新时间", value: formatTime(order.value.updated_at) },
+  ];
+  if (order.value.operation_type !== "deploy" && order.value.source_order_no) {
+    items.splice(3, 0, {
+      key: "source_order_no",
+      label: "来源发布单号",
+      value: order.value.source_order_no,
+    });
   }
-  return items
-})
+  return items;
+});
 
 const heroFacts = computed(() => {
   if (!order.value) {
-    return []
+    return [];
   }
   return [
-    { label: '应用', value: order.value.application_name || '-' },
-    { label: '环境', value: order.value.env_code || '-' },
-    { label: 'Git 版本', value: order.value.git_ref || '-' },
-  ]
-})
+    { label: "应用", value: order.value.application_name || "-" },
+    { label: "环境", value: order.value.env_code || "-" },
+    { label: "Git 版本", value: order.value.git_ref || "-" },
+  ];
+});
 
 const contextFacts = computed(() => {
   if (!order.value) {
-    return []
+    return [];
+  }
+  const items = [
+    { label: "模板", value: order.value.template_name || "-" },
+    { label: "模板 ID", value: order.value.template_id || "-" },
+    { label: "触发方式", value: triggerTypeText(order.value.trigger_type) },
+    { label: "创建者", value: order.value.triggered_by || "-" },
+    { label: "创建时间", value: formatTime(order.value.created_at) },
+    { label: "开始时间", value: formatTime(order.value.started_at) },
+    { label: "结束时间", value: formatTime(order.value.finished_at) },
+    { label: "更新时间", value: formatTime(order.value.updated_at) },
+  ];
+  if (order.value.is_concurrent) {
+    items.splice(3, 0, { label: "并发执行", value: "是" });
+    items.splice(4, 0, {
+      label: "并发批次",
+      value: order.value.concurrent_batch_no || "-",
+    });
+  }
+  return items;
+});
+
+const showConcurrentBatchCard = computed(() =>
+  Boolean(order.value?.is_concurrent && order.value?.concurrent_batch_no),
+);
+
+const concurrentBatchSummary = computed(() => {
+  const progress = concurrentBatchProgress.value;
+  if (!progress) {
+    return [];
   }
   return [
-    { label: '模板', value: order.value.template_name || '-' },
-    { label: '模板 ID', value: order.value.template_id || '-' },
-    { label: '触发方式', value: triggerTypeText(order.value.trigger_type) },
-    { label: '创建者', value: order.value.triggered_by || '-' },
-    { label: '创建时间', value: formatTime(order.value.created_at) },
-    { label: '开始时间', value: formatTime(order.value.started_at) },
-    { label: '结束时间', value: formatTime(order.value.finished_at) },
-    { label: '更新时间', value: formatTime(order.value.updated_at) },
-  ]
-})
+    { label: "总单数", value: progress.total },
+    { label: "等待中", value: progress.queued },
+    { label: "执行中", value: progress.executing },
+    { label: "已完成", value: progress.success },
+    { label: "失败", value: progress.failed },
+  ];
+});
+
+const currentConcurrentBatchItem = computed(() => {
+  if (!order.value?.id || !concurrentBatchProgress.value?.items?.length) {
+    return null;
+  }
+  return (
+    concurrentBatchProgress.value.items.find(
+      (item) => item.order_id === order.value?.id,
+    ) || null
+  );
+});
+
+const isQueuedInConcurrentBatch = computed(
+  () =>
+    currentConcurrentBatchItem.value?.queue_state === "queued" ||
+    Boolean(
+      order.value?.status === "running" && precheck.value?.waiting_for_lock,
+    ),
+);
 
 const spotlightStep = computed(() => {
-  const failedSteps = [...steps.value].filter((item) => item.status === 'failed').sort(sortSteps)
+  const failedSteps = [...steps.value]
+    .filter((item) => item.status === "failed")
+    .sort(sortSteps);
   if (failedSteps.length > 0) {
-    return failedSteps[failedSteps.length - 1]
+    return failedSteps[failedSteps.length - 1];
   }
-  const runningSteps = [...steps.value].filter((item) => item.status === 'running').sort(sortSteps)
+  const runningSteps = [...steps.value]
+    .filter((item) => item.status === "running")
+    .sort(sortSteps);
   if (runningSteps.length > 0) {
-    return runningSteps[runningSteps.length - 1]
+    return runningSteps[runningSteps.length - 1];
   }
-  const successSteps = [...steps.value].filter((item) => item.status === 'success').sort(sortSteps)
+  const successSteps = [...steps.value]
+    .filter((item) => item.status === "success")
+    .sort(sortSteps);
   if (successSteps.length > 0) {
-    return successSteps[successSteps.length - 1]
+    return successSteps[successSteps.length - 1];
   }
-  return null
-})
+  return null;
+});
 
-const spotlightTone = computed<'error' | 'processing' | 'success' | 'warning'>(() => {
+const spotlightTone = computed<"error" | "processing" | "success" | "warning">(
+  () => {
+    if (!order.value) {
+      return "warning";
+    }
+    if (isQueuedInConcurrentBatch.value) {
+      return "warning";
+    }
+    switch (order.value.status) {
+      case "failed":
+        return "error";
+      case "running":
+        return "processing";
+      case "success":
+        return "success";
+      default:
+        return "warning";
+    }
+  },
+);
+
+const spotlightStatusKey = computed<
+  "failed" | "running" | "queued" | "success" | "cancelled" | "pending"
+>(() => {
   if (!order.value) {
-    return 'warning'
+    return "pending";
+  }
+  if (isQueuedInConcurrentBatch.value) {
+    return "queued";
   }
   switch (order.value.status) {
-    case 'failed':
-      return 'error'
-    case 'running':
-      return 'processing'
-    case 'success':
-      return 'success'
+    case "failed":
+      return "failed";
+    case "running":
+      return "running";
+    case "success":
+      return "success";
+    case "cancelled":
+      return "cancelled";
     default:
-      return 'warning'
+      return "pending";
   }
-})
-
-const spotlightStatusKey = computed<'failed' | 'running' | 'success' | 'cancelled' | 'pending'>(() => {
-  if (!order.value) {
-    return 'pending'
-  }
-  switch (order.value.status) {
-    case 'failed':
-      return 'failed'
-    case 'running':
-      return 'running'
-    case 'success':
-      return 'success'
-    case 'cancelled':
-      return 'cancelled'
-    default:
-      return 'pending'
-  }
-})
+});
 
 const spotlightMeta = computed(() => {
-  const step = spotlightStep.value
+  if (isQueuedInConcurrentBatch.value) {
+    const queuePosition = currentConcurrentBatchItem.value?.queue_position || 0;
+    if (queuePosition > 0) {
+      return `并发批次等待队列 · 当前位次 ${queuePosition}`;
+    }
+    return "并发批次等待队列 · 等待前序发布释放执行位";
+  }
+  const step = spotlightStep.value;
   if (step) {
-    return `${step.step_name} · ${statusText(step.status)}`
+    return `${step.step_name} · ${statusText(step.status)}`;
   }
   if (!order.value) {
-    return '等待获取发布详情'
+    return "等待获取发布详情";
   }
-  return `发布单状态 · ${statusText(order.value.status)}`
-})
+  return `发布单状态 · ${statusText(order.value.status)}`;
+});
 
 const spotlightTitle = computed(() => {
   if (!order.value) {
-    return '等待加载发布状态'
+    return "等待加载发布状态";
   }
-  if (order.value.status === 'failed') {
-    return '发布失败，需要人工介入'
+  if (isQueuedInConcurrentBatch.value) {
+    return "发布排队中，等待前序发布完成";
   }
-  if (order.value.status === 'running') {
-    return '发布执行中'
+  if (order.value.status === "failed") {
+    return "发布失败，需要人工介入";
   }
-  if (order.value.status === 'success') {
-    return '发布已完成'
+  if (order.value.status === "running") {
+    return "发布执行中";
   }
-  if (order.value.status === 'cancelled') {
-    return '发布已取消'
+  if (order.value.status === "success") {
+    return "发布已完成";
   }
-  return '发布待执行'
-})
+  if (order.value.status === "cancelled") {
+    return "发布已取消";
+  }
+  return "发布待执行";
+});
 
 const spotlightDescription = computed(() => {
-  const step = spotlightStep.value
-  if (step) {
-    const messageText = String(step.message || '').trim()
-    if (messageText) {
-      return `${step.step_name}：${messageText}`
+  if (isQueuedInConcurrentBatch.value) {
+    const queuePosition = currentConcurrentBatchItem.value?.queue_position || 0;
+    if (queuePosition > 0) {
+      return `当前发布单已通过预检，正在并发批次队列中等待执行，队列位次 ${queuePosition}。`;
     }
-    return `${step.step_name}：${statusText(step.status)}`
+    return (
+      precheck.value?.conflict_message ||
+      "当前发布单已通过预检，正在等待同应用同环境的前序发布执行完成。"
+    );
+  }
+  const step = spotlightStep.value;
+  if (step) {
+    const messageText = String(step.message || "").trim();
+    if (messageText) {
+      return `${step.step_name}：${messageText}`;
+    }
+    return `${step.step_name}：${statusText(step.status)}`;
   }
   if (!order.value) {
-    return '正在加载发布详情'
+    return "正在加载发布详情";
   }
-  return `当前状态：${statusText(order.value.status)}`
-})
+  return `当前状态：${statusText(order.value.status)}`;
+});
 
 const executionSections = computed(() =>
   visibleScopes.value.map((scope) => ({
@@ -308,941 +459,1304 @@ const executionSections = computed(() =>
     title: `${scopeLabel(scope)} 执行单元`,
     execution: executionMapByScope.value[scope] as ReleaseOrderExecution,
   })),
-)
+);
 
 const paramGroups = computed(() => {
-  const map: Record<ReleasePipelineScope, ReleaseOrderParam[]> = { ci: [], cd: [] }
+  const map: Record<ReleasePipelineScope, ReleaseOrderParam[]> = {
+    ci: [],
+    cd: [],
+  };
   params.value.forEach((item) => {
-    const scope = normalizeScope(item.pipeline_scope)
+    const scope = normalizeScope(item.pipeline_scope);
     if (!scope) {
-      return
+      return;
     }
-    map[scope].push(item)
-  })
-  return visibleScopes.value
-    .map((scope) => ({
-      scope,
-      title: `${scopeLabel(scope)} 参数快照`,
-      items: map[scope],
-    }))
-})
+    map[scope].push(item);
+  });
+  return visibleScopes.value.map((scope) => ({
+    scope,
+    title: `${scopeLabel(scope)} 参数快照`,
+    items: map[scope],
+  }));
+});
 
 const valueProgressGroups = computed(() => {
-  const map: Record<ReleasePipelineScope, ReleaseOrderValueProgress[]> = { ci: [], cd: [] }
+  const map: Record<ReleasePipelineScope, ReleaseOrderValueProgress[]> = {
+    ci: [],
+    cd: [],
+  };
   valueProgress.value.forEach((item) => {
-    const scope = normalizeScope(item.pipeline_scope)
+    const scope = normalizeScope(item.pipeline_scope);
     if (!scope) {
-      return
+      return;
     }
-    map[scope].push(item)
-  })
+    map[scope].push(item);
+  });
   return visibleScopes.value
     .map((scope) => ({
       scope,
       title: `${scopeLabel(scope)} 取值进度`,
       items: map[scope].sort((a, b) => a.sort_no - b.sort_no),
     }))
-    .filter((group) => group.items.length > 0)
-})
+    .filter((group) => group.items.length > 0);
+});
 
 const stepGroups = computed(() => {
-  const groups: Array<{ key: string; title: string; items: ReleaseOrderStep[] }> = []
-  const globalSteps = steps.value.filter((item) => String(item.step_scope || '').trim().toLowerCase() === 'global').sort(sortSteps)
+  const groups: Array<{
+    key: string;
+    title: string;
+    items: ReleaseOrderStep[];
+  }> = [];
+  const globalSteps = steps.value
+    .filter(
+      (item) =>
+        String(item.step_scope || "")
+          .trim()
+          .toLowerCase() === "global",
+    )
+    .sort(sortSteps);
   if (globalSteps.length > 0) {
-    groups.push({ key: 'global', title: '全局步骤', items: globalSteps })
+    groups.push({ key: "global", title: "全局步骤", items: globalSteps });
   }
   visibleScopes.value.forEach((scope) => {
     const items = steps.value
-      .filter((item) => String(item.step_scope || '').trim().toLowerCase() === scope)
-      .sort(sortSteps)
+      .filter(
+        (item) =>
+          String(item.step_scope || "")
+            .trim()
+            .toLowerCase() === scope,
+      )
+      .sort(sortSteps);
     if (items.length > 0) {
-      groups.push({ key: scope, title: `${scopeLabel(scope)} 步骤`, items })
+      groups.push({ key: scope, title: `${scopeLabel(scope)} 步骤`, items });
     }
-  })
-  return groups
-})
+  });
+  return groups;
+});
 
-const stageGroupsByScope = computed<Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]>>(() => {
-  const map: Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]> = { ci: [], cd: [] }
+const stageGroupsByScope = computed<
+  Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]>
+>(() => {
+  const map: Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]> = {
+    ci: [],
+    cd: [],
+  };
   pipelineStages.value.forEach((item) => {
-    const scope = normalizeScope(item.pipeline_scope)
+    const scope = normalizeScope(item.pipeline_scope);
     if (!scope) {
-      return
+      return;
     }
-    map[scope].push(item)
-  })
-  map.ci.sort((a, b) => a.sort_no - b.sort_no)
-  map.cd.sort((a, b) => a.sort_no - b.sort_no)
-  return map
-})
+    map[scope].push(item);
+  });
+  map.ci.sort((a, b) => a.sort_no - b.sort_no);
+  map.cd.sort((a, b) => a.sort_no - b.sort_no);
+  return map;
+});
 
 const stageSections = computed(() =>
   visibleScopes.value.map((scope) => {
-    const execution = executionMapByScope.value[scope]
+    const execution = executionMapByScope.value[scope];
     return {
       scope,
       title: `${scopeLabel(scope)} 管线进度`,
       execution,
       stages: stageGroupsByScope.value[scope],
-      isJenkins: execution?.provider === 'jenkins',
-      isArgoCD: execution?.provider === 'argocd',
-    }
+      isJenkins: execution?.provider === "jenkins",
+      isArgoCD: execution?.provider === "argocd",
+    };
   }),
-)
+);
 
 const logSections = computed(() =>
   visibleScopes.value.map((scope) => {
-    const execution = executionMapByScope.value[scope]
+    const execution = executionMapByScope.value[scope];
     return {
       scope,
       title: `${scopeLabel(scope)} 日志`,
       execution,
-      isJenkins: execution?.provider === 'jenkins',
+      isJenkins: execution?.provider === "jenkins",
       state: scopeLogStates[scope],
-    }
+    };
   }),
-)
+);
 
 const paramInitialColumns: TableColumnsType<ReleaseOrderParam> = [
-  { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
-  { title: '执行器参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
-  { title: '参数值', dataIndex: 'param_value', key: 'param_value', width: 300, ellipsis: true },
-  { title: '来源', dataIndex: 'value_source', key: 'value_source', width: 150 },
-  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 190 },
-]
+  {
+    title: "平台标准 Key",
+    dataIndex: "param_key",
+    key: "param_key",
+    width: 180,
+  },
+  {
+    title: "执行器参数名",
+    dataIndex: "executor_param_name",
+    key: "executor_param_name",
+    width: 220,
+  },
+  {
+    title: "参数值",
+    dataIndex: "param_value",
+    key: "param_value",
+    width: 300,
+    ellipsis: true,
+  },
+  { title: "来源", dataIndex: "value_source", key: "value_source", width: 150 },
+  { title: "创建时间", dataIndex: "created_at", key: "created_at", width: 190 },
+];
 const { columns: paramColumns } = useResizableColumns(paramInitialColumns, {
   minWidth: 100,
   maxWidth: 620,
   hitArea: 10,
-})
+});
 
-const pipelineStageInitialColumns: TableColumnsType<ReleaseOrderPipelineStage> = [
-  { title: '顺序', dataIndex: 'sort_no', key: 'sort_no', width: 90 },
-  { title: '阶段名称', dataIndex: 'stage_name', key: 'stage_name', width: 240 },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
-  { title: '耗时', dataIndex: 'duration_millis', key: 'duration_millis', width: 140 },
-  { title: '开始时间', dataIndex: 'started_at', key: 'started_at', width: 190 },
-  { title: '结束时间', dataIndex: 'finished_at', key: 'finished_at', width: 190 },
-  { title: '操作', key: 'actions', width: 120, fixed: 'right' },
-]
-const { columns: pipelineStageColumns } = useResizableColumns(pipelineStageInitialColumns, {
-  minWidth: 100,
-  maxWidth: 420,
-  hitArea: 10,
-})
+const pipelineStageInitialColumns: TableColumnsType<ReleaseOrderPipelineStage> =
+  [
+    { title: "顺序", dataIndex: "sort_no", key: "sort_no", width: 90 },
+    {
+      title: "阶段名称",
+      dataIndex: "stage_name",
+      key: "stage_name",
+      width: 240,
+    },
+    { title: "状态", dataIndex: "status", key: "status", width: 120 },
+    {
+      title: "耗时",
+      dataIndex: "duration_millis",
+      key: "duration_millis",
+      width: 140,
+    },
+    {
+      title: "开始时间",
+      dataIndex: "started_at",
+      key: "started_at",
+      width: 190,
+    },
+    {
+      title: "结束时间",
+      dataIndex: "finished_at",
+      key: "finished_at",
+      width: 190,
+    },
+    { title: "操作", key: "actions", width: 120, fixed: "right" },
+  ];
+const { columns: pipelineStageColumns } = useResizableColumns(
+  pipelineStageInitialColumns,
+  {
+    minWidth: 100,
+    maxWidth: 420,
+    hitArea: 10,
+  },
+);
 
-const valueProgressInitialColumns: TableColumnsType<ReleaseOrderValueProgress> = [
-  { title: '平台标准 Key', dataIndex: 'param_key', key: 'param_key', width: 180 },
-  { title: '字段名称', dataIndex: 'param_name', key: 'param_name', width: 180 },
-  { title: '执行器参数名', dataIndex: 'executor_param_name', key: 'executor_param_name', width: 220 },
-  { title: '当前值', dataIndex: 'value', key: 'value', width: 260, ellipsis: true },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 120 },
-  { title: '来源', dataIndex: 'value_source', key: 'value_source', width: 180 },
-  { title: '说明', dataIndex: 'message', key: 'message', width: 320, ellipsis: true },
-  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
-]
-const { columns: valueProgressColumns } = useResizableColumns(valueProgressInitialColumns, {
-  minWidth: 100,
-  maxWidth: 520,
-  hitArea: 10,
-})
+const valueProgressInitialColumns: TableColumnsType<ReleaseOrderValueProgress> =
+  [
+    {
+      title: "平台标准 Key",
+      dataIndex: "param_key",
+      key: "param_key",
+      width: 180,
+    },
+    {
+      title: "字段名称",
+      dataIndex: "param_name",
+      key: "param_name",
+      width: 180,
+    },
+    {
+      title: "执行器参数名",
+      dataIndex: "executor_param_name",
+      key: "executor_param_name",
+      width: 220,
+    },
+    {
+      title: "当前值",
+      dataIndex: "value",
+      key: "value",
+      width: 260,
+      ellipsis: true,
+    },
+    { title: "状态", dataIndex: "status", key: "status", width: 120 },
+    {
+      title: "来源",
+      dataIndex: "value_source",
+      key: "value_source",
+      width: 180,
+    },
+    {
+      title: "说明",
+      dataIndex: "message",
+      key: "message",
+      width: 320,
+      ellipsis: true,
+    },
+    {
+      title: "更新时间",
+      dataIndex: "updated_at",
+      key: "updated_at",
+      width: 190,
+    },
+  ];
+const { columns: valueProgressColumns } = useResizableColumns(
+  valueProgressInitialColumns,
+  {
+    minWidth: 100,
+    maxWidth: 520,
+    hitArea: 10,
+  },
+);
 
 function normalizeScope(scope: string): ReleasePipelineScope | null {
-  const value = String(scope || '').trim().toLowerCase()
-  if (value === 'ci' || value === 'cd') {
-    return value as ReleasePipelineScope
+  const value = String(scope || "")
+    .trim()
+    .toLowerCase();
+  if (value === "ci" || value === "cd") {
+    return value as ReleasePipelineScope;
   }
-  return null
+  return null;
 }
 
 function scopeLabel(scope: ReleasePipelineScope) {
-  return scope === 'ci' ? 'CI' : 'CD'
+  return scope === "ci" ? "CI" : "CD";
 }
 
 function formatTime(value: string | null) {
   if (!value) {
-    return '-'
+    return "-";
   }
-  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+  return dayjs(value).format("YYYY-MM-DD HH:mm:ss");
 }
 
 function formatTimeCompact(value: string | null) {
   if (!value) {
-    return ''
+    return "";
   }
-  return dayjs(value).format('MM-DD HH:mm:ss')
+  return dayjs(value).format("MM-DD HH:mm:ss");
 }
 
-function statusText(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
+function statusText(
+  status:
+    | ReleaseOrderStatus
+    | ReleaseOrderStep["status"]
+    | ReleasePipelineStageStatus
+    | ReleaseOrderExecution["status"],
+) {
   switch (status) {
-    case 'pending':
-      return '待执行'
-    case 'running':
-      return '执行中'
-    case 'success':
-      return '成功'
-    case 'failed':
-      return '失败'
-    case 'cancelled':
-      return '已取消'
-    case 'skipped':
-      return '已跳过'
+    case "pending":
+      return "待执行";
+    case "running":
+      return "执行中";
+    case "success":
+      return "成功";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    case "skipped":
+      return "已跳过";
     default:
-      return status
+      return status;
   }
 }
 
-function statusToneClass(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
+function statusToneClass(
+  status:
+    | ReleaseOrderStatus
+    | ReleaseOrderStep["status"]
+    | ReleasePipelineStageStatus
+    | ReleaseOrderExecution["status"],
+) {
   switch (status) {
-    case 'success':
-      return 'status-pill-success'
-    case 'failed':
-      return 'status-pill-failed'
-    case 'running':
-      return 'status-pill-running'
-    case 'cancelled':
-      return 'status-pill-neutral'
-    case 'skipped':
-      return 'status-pill-neutral'
+    case "success":
+      return "status-pill-success";
+    case "failed":
+      return "status-pill-failed";
+    case "running":
+      return "status-pill-running";
+    case "cancelled":
+      return "status-pill-neutral";
+    case "skipped":
+      return "status-pill-neutral";
     default:
-      return 'status-pill-pending'
+      return "status-pill-pending";
   }
 }
 
 function valueProgressStatusText(status: ReleaseOrderValueProgressStatus) {
   switch (status) {
-    case 'resolved':
-      return '已取值'
-    case 'running':
-      return '取值中'
-    case 'failed':
-      return '取值失败'
-    case 'skipped':
-      return '未取值'
+    case "resolved":
+      return "已取值";
+    case "running":
+      return "取值中";
+    case "failed":
+      return "取值失败";
+    case "skipped":
+      return "未取值";
     default:
-      return '等待取值'
+      return "等待取值";
   }
 }
 
 function valueProgressToneClass(status: ReleaseOrderValueProgressStatus) {
   switch (status) {
-    case 'resolved':
-      return 'status-pill-success'
-    case 'running':
-      return 'status-pill-running'
-    case 'failed':
-      return 'status-pill-failed'
-    case 'skipped':
-      return 'status-pill-neutral'
+    case "resolved":
+      return "status-pill-success";
+    case "running":
+      return "status-pill-running";
+    case "failed":
+      return "status-pill-failed";
+    case "skipped":
+      return "status-pill-neutral";
     default:
-      return 'status-pill-pending'
+      return "status-pill-pending";
   }
 }
 
-function triggerTypeText(triggerType: ReleaseTriggerType | '' | null | undefined) {
-  switch (String(triggerType || '').trim().toLowerCase()) {
-    case 'manual':
-      return '手动'
-    case 'webhook':
-      return 'Webhook'
-    case 'schedule':
-      return '定时'
+function precheckStatusText(status: ReleaseOrderPrecheckItem["status"]) {
+  switch (status) {
+    case "pass":
+      return "通过";
+    case "warn":
+      return "等待";
+    case "blocked":
+      return "阻塞";
     default:
-      return triggerType || '-'
+      return status;
   }
 }
 
-function operationTypeText(operationType: ReleaseOperationType | '' | null | undefined) {
-  switch (String(operationType || '').trim().toLowerCase()) {
-    case 'rollback':
-      return '标准回滚'
-    case 'replay':
-      return '重放回滚'
+function precheckToneClass(status: ReleaseOrderPrecheckItem["status"]) {
+  switch (status) {
+    case "pass":
+      return "status-pill-success";
+    case "warn":
+      return "status-pill-running";
+    case "blocked":
+      return "status-pill-failed";
     default:
-      return '普通发布'
+      return "status-pill-pending";
+  }
+}
+
+function concurrentQueueStateText(
+  state: ReleaseOrderConcurrentBatchQueueState,
+) {
+  switch (state) {
+    case "queued":
+      return "排队中";
+    case "executing":
+      return "执行中";
+    case "success":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return "待调度";
+  }
+}
+
+function concurrentQueueToneClass(
+  state: ReleaseOrderConcurrentBatchQueueState,
+) {
+  switch (state) {
+    case "success":
+      return "status-pill-success";
+    case "failed":
+      return "status-pill-failed";
+    case "executing":
+      return "status-pill-running";
+    case "cancelled":
+      return "status-pill-neutral";
+    case "queued":
+      return "status-pill-warning";
+    default:
+      return "status-pill-pending";
+  }
+}
+
+const precheckSummaryMessage = computed(() => {
+  if (!precheck.value) {
+    return "";
+  }
+  if (precheck.value.waiting_for_lock) {
+    return (
+      precheck.value.conflict_message ||
+      "当前目标已被其他发布占用，系统会在锁释放后继续执行。"
+    );
+  }
+  if (precheckBlocked.value) {
+    return (
+      precheck.value.conflict_message ||
+      "当前发布单未通过执行前预检，请先处理阻塞项。"
+    );
+  }
+  if (precheck.value.lock_enabled) {
+    return `并发发布保护已启用，当前按 ${precheck.value.lock_scope || "application_env"} 范围进行调度控制。`;
+  }
+  return "";
+});
+
+const precheckSummaryTone = computed<"info" | "warning" | "error">(() => {
+  if (precheck.value?.waiting_for_lock) {
+    return "warning";
+  }
+  if (precheckBlocked.value) {
+    return "error";
+  }
+  return "info";
+});
+
+function triggerTypeText(
+  triggerType: ReleaseTriggerType | "" | null | undefined,
+) {
+  switch (
+    String(triggerType || "")
+      .trim()
+      .toLowerCase()
+  ) {
+    case "manual":
+      return "手动";
+    case "webhook":
+      return "Webhook";
+    case "schedule":
+      return "定时";
+    default:
+      return triggerType || "-";
+  }
+}
+
+function operationTypeText(
+  operationType: ReleaseOperationType | "" | null | undefined,
+) {
+  switch (
+    String(operationType || "")
+      .trim()
+      .toLowerCase()
+  ) {
+    case "rollback":
+      return "标准回滚";
+    case "replay":
+      return "重放回滚";
+    default:
+      return "普通发布";
   }
 }
 
 function isCiOnlyRecovery(record?: ReleaseOrder | null) {
-  return String(record?.cd_provider || '').trim() === ''
+  return String(record?.cd_provider || "").trim() === "";
 }
 
 function replayActionText(record?: ReleaseOrder | null) {
-  return '回滚到此版本'
+  return "回滚到此版本";
 }
 
 function replayConfirmTitle(record?: ReleaseOrder | null) {
-  return isCiOnlyRecovery(record) ? '确认基于这张成功单创建 CI 重放回滚吗？' : '确认基于这张成功单创建重放回滚吗？'
+  return isCiOnlyRecovery(record)
+    ? "确认基于这张成功单创建 CI 重放回滚吗？"
+    : "确认基于这张成功单创建重放回滚吗？";
 }
 
 function replaySuccessText(record: ReleaseOrder, orderNo: string) {
-  return isCiOnlyRecovery(record) ? `已创建 CI 重放回滚单：${orderNo}` : `已创建重放回滚单：${orderNo}`
+  return isCiOnlyRecovery(record)
+    ? `已创建 CI 重放回滚单：${orderNo}`
+    : `已创建重放回滚单：${orderNo}`;
 }
 
 function replayFailureText(record?: ReleaseOrder | null) {
-  return isCiOnlyRecovery(record) ? 'CI 重放回滚创建失败' : '重放回滚创建失败'
+  return isCiOnlyRecovery(record) ? "CI 重放回滚创建失败" : "重放回滚创建失败";
 }
 
-function isRunningStatus(status: ReleaseOrderStatus | ReleaseOrderStep['status'] | ReleasePipelineStageStatus | ReleaseOrderExecution['status']) {
-  return status === 'running'
+function isRunningStatus(
+  status:
+    | ReleaseOrderStatus
+    | ReleaseOrderStep["status"]
+    | ReleasePipelineStageStatus
+    | ReleaseOrderExecution["status"],
+) {
+  return status === "running";
 }
 
 function formatDuration(durationMillis: number) {
-  const value = Number(durationMillis || 0)
+  const value = Number(durationMillis || 0);
   if (!Number.isFinite(value) || value <= 0) {
-    return '-'
+    return "-";
   }
   if (value < 1000) {
-    return `${Math.floor(value)} ms`
+    return `${Math.floor(value)} ms`;
   }
-  const totalSeconds = Math.floor(value / 1000)
+  const totalSeconds = Math.floor(value / 1000);
   if (totalSeconds < 60) {
-    return `${totalSeconds} s`
+    return `${totalSeconds} s`;
   }
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  return `${minutes}m ${seconds}s`
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
 }
 
 function sortSteps(a: ReleaseOrderStep, b: ReleaseOrderStep) {
   if (a.sort_no !== b.sort_no) {
-    return a.sort_no - b.sort_no
+    return a.sort_no - b.sort_no;
   }
-  return a.step_code.localeCompare(b.step_code)
+  return a.step_code.localeCompare(b.step_code);
 }
 
-function stepComponentStatus(status: ReleaseOrderStep['status']) {
+function stepComponentStatus(status: ReleaseOrderStep["status"]) {
   switch (status) {
-    case 'success':
-      return 'finish'
-    case 'running':
-      return 'process'
-    case 'failed':
-      return 'error'
+    case "success":
+      return "finish";
+    case "running":
+      return "process";
+    case "failed":
+      return "error";
     default:
-      return 'wait'
+      return "wait";
   }
 }
 
 function describeStep(step: ReleaseOrderStep) {
-  const parts: string[] = []
-  if (String(step.message || '').trim()) {
-    parts.push(step.message)
-  } else if (step.status === 'pending') {
-    parts.push('等待执行')
+  const parts: string[] = [];
+  if (String(step.message || "").trim()) {
+    parts.push(step.message);
+  } else if (step.status === "pending") {
+    parts.push("等待执行");
   }
-  const timeParts = [formatTimeCompact(step.started_at), formatTimeCompact(step.finished_at)].filter(Boolean)
+  const timeParts = [
+    formatTimeCompact(step.started_at),
+    formatTimeCompact(step.finished_at),
+  ].filter(Boolean);
   if (timeParts.length > 0) {
-    parts.push(timeParts.join(' -> '))
+    parts.push(timeParts.join(" -> "));
   }
-  return parts.join(' ｜ ')
+  return parts.join(" ｜ ");
 }
 
 function latestScopeStepMessage(
   scope: ReleasePipelineScope,
-  preferredStatus?: ReleaseOrderStep['status'],
+  preferredStatus?: ReleaseOrderStep["status"],
 ) {
   const scopedSteps = steps.value
-    .filter((item) => String(item.step_scope || '').trim().toLowerCase() === scope)
-    .sort(sortSteps)
+    .filter(
+      (item) =>
+        String(item.step_scope || "")
+          .trim()
+          .toLowerCase() === scope,
+    )
+    .sort(sortSteps);
 
   const candidates = preferredStatus
     ? scopedSteps.filter((item) => item.status === preferredStatus)
-    : scopedSteps
+    : scopedSteps;
 
   for (let index = candidates.length - 1; index >= 0; index -= 1) {
-    const messageText = String(candidates[index].message || '').trim()
+    const messageText = String(candidates[index].message || "").trim();
     if (messageText) {
-      return messageText
+      return messageText;
     }
   }
-  return ''
+  return "";
 }
 
 function pipelineStageEmptyDescription(section: {
-  scope: ReleasePipelineScope
-  execution: ReleaseOrderExecution | null
-  isArgoCD: boolean
-  isJenkins: boolean
+  scope: ReleasePipelineScope;
+  execution: ReleaseOrderExecution | null;
+  isArgoCD: boolean;
+  isJenkins: boolean;
 }) {
   if (!section.execution) {
-    return '暂无阶段数据'
+    return "暂无阶段数据";
   }
 
   if (section.isArgoCD) {
-    const failedMessage = latestScopeStepMessage(section.scope, 'failed')
+    const failedMessage = latestScopeStepMessage(section.scope, "failed");
     switch (section.execution.status) {
-      case 'failed':
-        return failedMessage || 'CD 在启动阶段失败，尚未生成 GitOps / ArgoCD 聚合进度'
-      case 'pending':
-        return 'CD 尚未启动，待前置步骤完成后会自动生成 GitOps / ArgoCD 进度'
-      case 'running':
-        return 'GitOps 写回 / ArgoCD Sync 进度正在回收中，请稍后自动刷新'
-      case 'success':
-        return 'CD 已完成，但当前没有额外的聚合阶段数据'
-      case 'cancelled':
-        return failedMessage || 'CD 已取消，未生成聚合阶段数据'
-      case 'skipped':
-        return 'CD 已跳过，未生成聚合阶段数据'
+      case "failed":
+        return (
+          failedMessage ||
+          "CD 在启动阶段失败，尚未生成 GitOps / ArgoCD 聚合进度"
+        );
+      case "pending":
+        return "CD 尚未启动，待前置步骤完成后会自动生成 GitOps / ArgoCD 进度";
+      case "running":
+        return "GitOps 写回 / ArgoCD Sync 进度正在回收中，请稍后自动刷新";
+      case "success":
+        return "CD 已完成，但当前没有额外的聚合阶段数据";
+      case "cancelled":
+        return failedMessage || "CD 已取消，未生成聚合阶段数据";
+      case "skipped":
+        return "CD 已跳过，未生成聚合阶段数据";
       default:
-        return '暂无阶段数据'
+        return "暂无阶段数据";
     }
   }
 
   if (section.isJenkins) {
-    return latestScopeStepMessage(section.scope, 'failed') || '暂无阶段数据'
+    return latestScopeStepMessage(section.scope, "failed") || "暂无阶段数据";
   }
 
-  return latestScopeStepMessage(section.scope, 'failed') || '暂无阶段数据'
+  return latestScopeStepMessage(section.scope, "failed") || "暂无阶段数据";
 }
 
 function parseStreamEvent(data: string): ReleaseOrderLogStreamEvent | null {
-  const text = String(data || '').trim()
+  const text = String(data || "").trim();
   if (!text) {
-    return null
+    return null;
   }
   try {
-    return JSON.parse(text) as ReleaseOrderLogStreamEvent
+    return JSON.parse(text) as ReleaseOrderLogStreamEvent;
   } catch {
-    return { type: 'status', timestamp: new Date().toISOString(), message: text }
+    return {
+      type: "status",
+      timestamp: new Date().toISOString(),
+      message: text,
+    };
   }
 }
 
 function getLogState(scope: ReleasePipelineScope) {
-  return scopeLogStates[scope]
+  return scopeLogStates[scope];
 }
 
 function setLogPanelRef(scope: ReleasePipelineScope, element: Element | null) {
-  getLogState(scope).panelRef = element instanceof HTMLElement ? element : null
+  getLogState(scope).panelRef = element instanceof HTMLElement ? element : null;
 }
 
 function isLogNearBottom(scope: ReleasePipelineScope) {
-  const panel = getLogState(scope).panelRef
+  const panel = getLogState(scope).panelRef;
   if (!panel) {
-    return true
+    return true;
   }
-  const remain = panel.scrollHeight - panel.scrollTop - panel.clientHeight
-  return remain <= 48
+  const remain = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+  return remain <= 48;
 }
 
 function scrollLogToBottom(scope: ReleasePipelineScope, force = false) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (!state.panelRef) {
-    return
+    return;
   }
   if (!force && !state.autoFollow) {
-    return
+    return;
   }
-  state.panelRef.scrollTop = state.panelRef.scrollHeight
+  state.panelRef.scrollTop = state.panelRef.scrollHeight;
 }
 
 function syncLogFollowState(scope: ReleasePipelineScope) {
-  getLogState(scope).autoFollow = isLogNearBottom(scope)
+  getLogState(scope).autoFollow = isLogNearBottom(scope);
 }
 
 function handleLogFollowChange(scope: ReleasePipelineScope, checked: boolean) {
-  const state = getLogState(scope)
-  state.autoFollow = checked
+  const state = getLogState(scope);
+  state.autoFollow = checked;
   if (checked) {
     void nextTick(() => {
-      scrollLogToBottom(scope, true)
-    })
+      scrollLogToBottom(scope, true);
+    });
   }
 }
 
 function jumpLogToBottom(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
-  state.autoFollow = true
+  const state = getLogState(scope);
+  state.autoFollow = true;
   void nextTick(() => {
-    scrollLogToBottom(scope, true)
-  })
+    scrollLogToBottom(scope, true);
+  });
 }
 
 function appendLogContent(scope: ReleasePipelineScope, content: string) {
-  const state = getLogState(scope)
-  const chunk = String(content || '')
+  const state = getLogState(scope);
+  const chunk = String(content || "");
   if (!chunk) {
-    return
+    return;
   }
-  state.text = state.text ? state.text + chunk : chunk
+  state.text = state.text ? state.text + chunk : chunk;
   void nextTick(() => {
-    scrollLogToBottom(scope)
-  })
+    scrollLogToBottom(scope);
+  });
 }
 
 function appendStatusLine(scope: ReleasePipelineScope, messageText: string) {
-  const text = String(messageText || '').trim()
+  const text = String(messageText || "").trim();
   if (!text) {
-    return
+    return;
   }
-  appendLogContent(scope, `[${dayjs().format('HH:mm:ss')}] ${text}\n`)
+  appendLogContent(scope, `[${dayjs().format("HH:mm:ss")}] ${text}\n`);
 }
 
 function clearReconnectTimer(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (state.reconnectTimer !== null) {
-    window.clearTimeout(state.reconnectTimer)
-    state.reconnectTimer = null
+    window.clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
   }
 }
 
 function closeLogStream(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
-  clearReconnectTimer(scope)
+  const state = getLogState(scope);
+  clearReconnectTimer(scope);
   if (state.stream) {
-    state.closeIntentional = true
-    state.stream.close()
-    state.stream = null
+    state.closeIntentional = true;
+    state.stream.close();
+    state.stream = null;
   }
-  state.connected = false
-  state.connecting = false
+  state.connected = false;
+  state.connecting = false;
 }
 
 function resetLogState(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
-  closeLogStream(scope)
-  state.text = ''
-  state.offset = 0
-  state.connected = false
-  state.connecting = false
-  state.ended = false
-  state.error = ''
-  state.statusText = '未连接'
-  state.closeIntentional = false
-  state.autoFollow = true
+  const state = getLogState(scope);
+  closeLogStream(scope);
+  state.text = "";
+  state.offset = 0;
+  state.connected = false;
+  state.connecting = false;
+  state.ended = false;
+  state.error = "";
+  state.statusText = "未连接";
+  state.closeIntentional = false;
+  state.autoFollow = true;
 }
 
 function scheduleReconnect(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (state.closeIntentional || state.ended || !shouldKeepLogStreaming.value) {
-    return
+    return;
   }
-  clearReconnectTimer(scope)
+  clearReconnectTimer(scope);
   state.reconnectTimer = window.setTimeout(() => {
-    void startLogStream(scope, false)
-  }, 2000)
+    void startLogStream(scope, false);
+  }, 2000);
 }
 
 async function startLogStream(scope: ReleasePipelineScope, reset: boolean) {
-  const execution = executionMapByScope.value[scope]
-  if (!orderID.value || !execution || execution.provider !== 'jenkins') {
-    return
+  const execution = executionMapByScope.value[scope];
+  if (!orderID.value || !execution || execution.provider !== "jenkins") {
+    return;
   }
 
-  const state = getLogState(scope)
-  closeLogStream(scope)
-  state.closeIntentional = false
+  const state = getLogState(scope);
+  closeLogStream(scope);
+  state.closeIntentional = false;
   if (reset) {
-    state.text = ''
-    state.offset = 0
-    state.error = ''
-    state.ended = false
-    state.statusText = '准备连接'
-    state.autoFollow = true
+    state.text = "";
+    state.offset = 0;
+    state.error = "";
+    state.ended = false;
+    state.statusText = "准备连接";
+    state.autoFollow = true;
   }
 
-  const streamURL = buildReleaseOrderLogStreamURL(orderID.value, state.offset, authStore.accessToken, scope)
-  const source = new EventSource(streamURL)
-  state.stream = source
-  state.connecting = true
-  state.statusText = '连接中...'
+  const streamURL = buildReleaseOrderLogStreamURL(
+    orderID.value,
+    state.offset,
+    authStore.accessToken,
+    scope,
+  );
+  const source = new EventSource(streamURL);
+  state.stream = source;
+  state.connecting = true;
+  state.statusText = "连接中...";
 
   source.onopen = () => {
-    state.connecting = false
-    state.connected = true
-    state.error = ''
+    state.connecting = false;
+    state.connected = true;
+    state.error = "";
     if (!state.ended) {
-      state.statusText = '流式同步中'
+      state.statusText = "流式同步中";
     }
-  }
+  };
 
-  const handleEventData = (eventType: string, payload: MessageEvent<string>) => {
-    const parsed = parseStreamEvent(payload.data)
+  const handleEventData = (
+    eventType: string,
+    payload: MessageEvent<string>,
+  ) => {
+    const parsed = parseStreamEvent(payload.data);
     if (!parsed) {
-      return
+      return;
     }
-    const eventOffset = Number(parsed.offset ?? Number.NaN)
+    const eventOffset = Number(parsed.offset ?? Number.NaN);
     if (Number.isFinite(eventOffset) && eventOffset >= 0) {
-      state.offset = Math.max(state.offset, Math.floor(eventOffset))
+      state.offset = Math.max(state.offset, Math.floor(eventOffset));
     }
 
     switch (eventType) {
-      case 'log':
-        appendLogContent(scope, String(parsed.content || ''))
+      case "log":
+        appendLogContent(scope, String(parsed.content || ""));
         if (parsed.message) {
-          appendStatusLine(scope, parsed.message)
+          appendStatusLine(scope, parsed.message);
         }
-        return
-      case 'done':
+        return;
+      case "done":
         if (parsed.message) {
-          appendStatusLine(scope, parsed.message)
+          appendStatusLine(scope, parsed.message);
         }
-        state.ended = true
-        state.statusText = '已结束'
-        state.closeIntentional = true
-        source.close()
-        state.stream = null
-        state.connected = false
-        state.connecting = false
-        return
-      case 'error':
+        state.ended = true;
+        state.statusText = "已结束";
+        state.closeIntentional = true;
+        source.close();
+        state.stream = null;
+        state.connected = false;
+        state.connecting = false;
+        return;
+      case "error":
         if (parsed.message) {
-          appendStatusLine(scope, parsed.message)
-          state.error = parsed.message
+          appendStatusLine(scope, parsed.message);
+          state.error = parsed.message;
         } else {
-          state.error = '日志流发生异常'
+          state.error = "日志流发生异常";
         }
-        return
+        return;
       default:
         if (parsed.message) {
-          appendStatusLine(scope, parsed.message)
-          state.statusText = parsed.message
+          appendStatusLine(scope, parsed.message);
+          state.statusText = parsed.message;
         }
     }
-  }
+  };
 
-  source.addEventListener('log', (event) => {
-    handleEventData('log', event as MessageEvent<string>)
-  })
-  source.addEventListener('status', (event) => {
-    handleEventData('status', event as MessageEvent<string>)
-  })
-  source.addEventListener('done', (event) => {
-    handleEventData('done', event as MessageEvent<string>)
-  })
-  source.addEventListener('error', (event) => {
-    handleEventData('error', event as MessageEvent<string>)
-  })
+  source.addEventListener("log", (event) => {
+    handleEventData("log", event as MessageEvent<string>);
+  });
+  source.addEventListener("status", (event) => {
+    handleEventData("status", event as MessageEvent<string>);
+  });
+  source.addEventListener("done", (event) => {
+    handleEventData("done", event as MessageEvent<string>);
+  });
+  source.addEventListener("error", (event) => {
+    handleEventData("error", event as MessageEvent<string>);
+  });
 
   source.onerror = () => {
-    state.connecting = false
-    state.connected = false
+    state.connecting = false;
+    state.connected = false;
     if (state.closeIntentional || state.ended) {
-      return
+      return;
     }
-    state.error = ''
-    source.close()
-    state.stream = null
-    scheduleReconnect(scope)
-  }
+    state.error = "";
+    source.close();
+    state.stream = null;
+    scheduleReconnect(scope);
+  };
 }
 
 function reconnectLogStream(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
-  state.error = ''
-  state.statusText = '准备重连'
-  const shouldReset = state.ended || !shouldKeepLogStreaming.value
+  const state = getLogState(scope);
+  state.error = "";
+  state.statusText = "准备重连";
+  const shouldReset = state.ended || !shouldKeepLogStreaming.value;
   if (shouldReset) {
-    state.ended = false
+    state.ended = false;
   }
-  void startLogStream(scope, shouldReset)
+  void startLogStream(scope, shouldReset);
 }
 
 function clearLogOutput(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
-  state.text = ''
-  state.offset = 0
-  state.error = ''
-  state.ended = false
-  state.autoFollow = true
+  const state = getLogState(scope);
+  state.text = "";
+  state.offset = 0;
+  state.error = "";
+  state.ended = false;
+  state.autoFollow = true;
 }
 
 function logStreamTagColor(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (state.ended) {
-    return 'default'
+    return "default";
   }
   if (state.error) {
-    return 'warning'
+    return "warning";
   }
-  return 'processing'
+  return "processing";
 }
 
 function logStreamHintText(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (state.error) {
-    return '日志异常'
+    return "日志异常";
   }
-  if (latestScopeStepMessage(scope, 'failed')) {
-    return '执行失败'
+  if (latestScopeStepMessage(scope, "failed")) {
+    return "执行失败";
   }
   if (state.ended) {
-    return '已结束'
+    return "已结束";
   }
-  return ''
+  return "";
 }
 
 function logSectionWarningMessage(scope: ReleasePipelineScope) {
-  const state = getLogState(scope)
+  const state = getLogState(scope);
   if (state.error) {
-    return state.error
+    return state.error;
   }
-  return latestScopeStepMessage(scope, 'failed')
+  return latestScopeStepMessage(scope, "failed");
 }
 
 function logSectionEmptyDescription(scope: ReleasePipelineScope) {
-  return logSectionWarningMessage(scope) || '暂无日志输出'
+  return logSectionWarningMessage(scope) || "暂无日志输出";
 }
 
 function syncVisibleLogStreams() {
-  ;(['ci', 'cd'] as ReleasePipelineScope[]).forEach((scope) => {
-    const execution = executionMapByScope.value[scope]
-    const state = getLogState(scope)
-    if (!execution || execution.provider !== 'jenkins') {
-      resetLogState(scope)
-      return
+  (["ci", "cd"] as ReleasePipelineScope[]).forEach((scope) => {
+    const execution = executionMapByScope.value[scope];
+    const state = getLogState(scope);
+    if (!execution || execution.provider !== "jenkins") {
+      resetLogState(scope);
+      return;
     }
 
-    if (!state.stream && !state.connecting && state.text === '') {
-      void startLogStream(scope, true)
-      return
+    if (!state.stream && !state.connecting && state.text === "") {
+      void startLogStream(scope, true);
+      return;
     }
 
-    if (shouldKeepLogStreaming.value && !state.stream && !state.connecting && !state.ended) {
-      void startLogStream(scope, false)
+    if (
+      shouldKeepLogStreaming.value &&
+      !state.stream &&
+      !state.connecting &&
+      !state.ended
+    ) {
+      void startLogStream(scope, false);
     }
-  })
+  });
 }
 
 async function loadDetail(options?: { silent?: boolean }) {
-  const silent = Boolean(options?.silent)
+  const silent = Boolean(options?.silent);
   if (!orderID.value) {
     if (!silent) {
-      message.error('缺少发布单 ID')
-      void router.push('/releases')
+      message.error("缺少发布单 ID");
+      void router.push("/releases");
     }
-    return
+    return;
   }
   if (querying.value) {
-    return
+    return;
   }
 
-  querying.value = true
+  querying.value = true;
   if (!silent) {
-    loading.value = true
+    loading.value = true;
   }
   try {
-    const previousStatus = order.value?.status || ''
-    const [orderResp, executionsResp, paramsResp, valueProgressResp, stepsResp] = await Promise.all([
+    const previousStatus = order.value?.status || "";
+    const [
+      orderResp,
+      executionsResp,
+      paramsResp,
+      valueProgressResp,
+      stepsResp,
+    ] = await Promise.all([
       getReleaseOrderByID(orderID.value),
       listReleaseOrderExecutions(orderID.value),
-      canViewParamSnapshot.value ? listReleaseOrderParams(orderID.value) : Promise.resolve({ data: [] }),
-      canViewParamSnapshot.value ? listReleaseOrderValueProgress(orderID.value) : Promise.resolve({ data: [] }),
+      canViewParamSnapshot.value
+        ? listReleaseOrderParams(orderID.value)
+        : Promise.resolve({ data: [] }),
+      canViewParamSnapshot.value
+        ? listReleaseOrderValueProgress(orderID.value)
+        : Promise.resolve({ data: [] }),
       listReleaseOrderSteps(orderID.value),
-    ])
-    order.value = orderResp.data
-    executions.value = [...executionsResp.data].sort((a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope))
-    params.value = paramsResp.data
-    valueProgress.value = valueProgressResp.data
-    steps.value = stepsResp.data
+    ]);
+    order.value = orderResp.data;
+    executions.value = [...executionsResp.data].sort(
+      (a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope),
+    );
+    params.value = paramsResp.data;
+    valueProgress.value = valueProgressResp.data;
+    steps.value = stepsResp.data;
+    if (orderResp.data.is_concurrent) {
+      await loadConcurrentBatchProgress({ silent });
+    } else {
+      concurrentBatchProgress.value = null;
+    }
 
-    const now = Date.now()
+    if (shouldLoadPrecheck.value) {
+      await loadPrecheck({ silent: true });
+    } else {
+      precheck.value = null;
+    }
+
+    const now = Date.now();
     const shouldRefreshPipelineStages =
       !stageLogDrawerVisible.value &&
       (!silent ||
         pipelineStages.value.length === 0 ||
         previousStatus !== orderResp.data.status ||
-        now - lastPipelineStageRefreshAt.value >= PIPELINE_STAGE_REFRESH_INTERVAL_MS)
+        now - lastPipelineStageRefreshAt.value >=
+          PIPELINE_STAGE_REFRESH_INTERVAL_MS);
     if (shouldRefreshPipelineStages) {
-      await loadPipelineStageView({ silent })
+      await loadPipelineStageView({ silent });
     }
 
-    syncVisibleLogStreams()
+    syncVisibleLogStreams();
   } catch (error) {
     if (!silent) {
-      message.error(extractHTTPErrorMessage(error, '发布单详情加载失败'))
-      void router.push('/releases')
+      message.error(extractHTTPErrorMessage(error, "发布单详情加载失败"));
+      void router.push("/releases");
     }
   } finally {
-    querying.value = false
+    querying.value = false;
     if (!silent) {
-      loading.value = false
+      loading.value = false;
+    }
+  }
+}
+
+async function loadConcurrentBatchProgress(options?: { silent?: boolean }) {
+  if (!orderID.value || !showConcurrentBatchCard.value) {
+    concurrentBatchProgress.value = null;
+    return;
+  }
+  const silent = Boolean(options?.silent);
+  if (!silent) {
+    concurrentBatchLoading.value = true;
+  }
+  try {
+    const response = await getReleaseOrderConcurrentBatchProgress(
+      orderID.value,
+    );
+    concurrentBatchProgress.value = response.data;
+  } catch (error) {
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, "并发批次进度加载失败"));
+    }
+  } finally {
+    if (!silent) {
+      concurrentBatchLoading.value = false;
     }
   }
 }
 
 function scopeSort(scope: string) {
-  const normalized = String(scope || '').trim().toLowerCase()
-  if (normalized === 'ci') {
-    return 1
+  const normalized = String(scope || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "ci") {
+    return 1;
   }
-  if (normalized === 'cd') {
-    return 2
+  if (normalized === "cd") {
+    return 2;
   }
-  return 99
+  return 99;
 }
 
 async function loadPipelineStageView(options?: { silent?: boolean }) {
   if (!orderID.value) {
-    return
+    return;
   }
-  const silent = Boolean(options?.silent)
+  const silent = Boolean(options?.silent);
   if (!silent) {
-    pipelineStageLoading.value = true
+    pipelineStageLoading.value = true;
   }
   try {
-    const response = await listReleaseOrderPipelineStages(orderID.value)
-    pipelineStageModuleVisible.value = Boolean(response.show_module)
-    pipelineStageExecutorType.value = String(response.executor_type || '').trim()
-    pipelineStageMessage.value = String(response.message || '').trim()
-    pipelineStages.value = response.data || []
-    lastPipelineStageRefreshAt.value = Date.now()
+    const response = await listReleaseOrderPipelineStages(orderID.value);
+    pipelineStageModuleVisible.value = Boolean(response.show_module);
+    pipelineStageExecutorType.value = String(
+      response.executor_type || "",
+    ).trim();
+    pipelineStageMessage.value = String(response.message || "").trim();
+    pipelineStages.value = response.data || [];
+    lastPipelineStageRefreshAt.value = Date.now();
   } catch (error) {
     if (silent) {
-      pipelineStageMessage.value = extractHTTPErrorMessage(error, '管线阶段暂时同步失败，请稍后手动刷新')
+      pipelineStageMessage.value = extractHTTPErrorMessage(
+        error,
+        "管线阶段暂时同步失败，请稍后手动刷新",
+      );
     } else {
-      pipelineStageModuleVisible.value = false
-      pipelineStageExecutorType.value = ''
-      pipelineStageMessage.value = ''
-      pipelineStages.value = []
-      message.error(extractHTTPErrorMessage(error, '管线阶段加载失败'))
+      pipelineStageModuleVisible.value = false;
+      pipelineStageExecutorType.value = "";
+      pipelineStageMessage.value = "";
+      pipelineStages.value = [];
+      message.error(extractHTTPErrorMessage(error, "管线阶段加载失败"));
     }
   } finally {
     if (!silent) {
-      pipelineStageLoading.value = false
+      pipelineStageLoading.value = false;
+    }
+  }
+}
+
+async function loadPrecheck(options?: { silent?: boolean }) {
+  if (!orderID.value || !shouldLoadPrecheck.value) {
+    precheck.value = null;
+    return;
+  }
+  const silent = Boolean(options?.silent);
+  if (!silent) {
+    precheckLoading.value = true;
+  }
+  try {
+    const response = await getReleaseOrderPrecheck(orderID.value);
+    precheck.value = response.data;
+  } catch (error) {
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, "执行前预检加载失败"));
+    }
+  } finally {
+    if (!silent) {
+      precheckLoading.value = false;
     }
   }
 }
 
 async function openStageLogDrawer(stage: ReleaseOrderPipelineStage) {
-  selectedPipelineStage.value = stage
-  stageLogDrawerVisible.value = true
-  await loadStageLog()
+  selectedPipelineStage.value = stage;
+  stageLogDrawerVisible.value = true;
+  await loadStageLog();
 }
 
 function closeStageLogDrawer() {
-  stageLogDrawerVisible.value = false
-  selectedPipelineStage.value = null
-  stageLogContent.value = ''
-  stageLogHasMore.value = false
-  stageLogFetchedAt.value = ''
+  stageLogDrawerVisible.value = false;
+  selectedPipelineStage.value = null;
+  stageLogContent.value = "";
+  stageLogHasMore.value = false;
+  stageLogFetchedAt.value = "";
 }
 
 async function loadStageLog() {
   if (!orderID.value || !selectedPipelineStage.value) {
-    return
+    return;
   }
-  stageLogLoading.value = true
+  stageLogLoading.value = true;
   try {
-    const response = await getReleaseOrderPipelineStageLog(orderID.value, selectedPipelineStage.value.id)
-    selectedPipelineStage.value = response.data.stage
-    stageLogContent.value = response.data.content || ''
-    stageLogHasMore.value = Boolean(response.data.has_more)
-    stageLogFetchedAt.value = formatTime(response.data.fetched_at)
+    const response = await getReleaseOrderPipelineStageLog(
+      orderID.value,
+      selectedPipelineStage.value.id,
+    );
+    selectedPipelineStage.value = response.data.stage;
+    stageLogContent.value = response.data.content || "";
+    stageLogHasMore.value = Boolean(response.data.has_more);
+    stageLogFetchedAt.value = formatTime(response.data.fetched_at);
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '阶段日志加载失败'))
+    message.error(extractHTTPErrorMessage(error, "阶段日志加载失败"));
   } finally {
-    stageLogLoading.value = false
+    stageLogLoading.value = false;
   }
 }
 
 async function handleCancel() {
   if (!order.value) {
-    return
+    return;
   }
-  cancelling.value = true
+  cancelling.value = true;
   try {
-    const response = await cancelReleaseOrder(order.value.id)
-    order.value = response.data
-    message.success('发布单取消成功')
-    await loadDetail({ silent: true })
+    const response = await cancelReleaseOrder(order.value.id);
+    order.value = response.data;
+    message.success("发布单取消成功");
+    await loadDetail({ silent: true });
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '发布单取消失败'))
+    message.error(extractHTTPErrorMessage(error, "发布单取消失败"));
   } finally {
-    cancelling.value = false
+    cancelling.value = false;
   }
 }
 
 async function handleExecute() {
   if (!order.value || executeLocked.value) {
-    return
+    return;
   }
   if (!canExecute.value) {
-    message.warning('当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布')
-    return
+    message.warning(
+      precheckSummaryMessage.value ||
+        "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
+    );
+    return;
   }
-  executeLocked.value = true
-  executing.value = true
+  executeLocked.value = true;
+  executing.value = true;
   try {
-    const response = await executeReleaseOrder(order.value.id)
-    order.value = response.data
-    message.success('发布已提交，正在调度执行')
-    await loadDetail({ silent: true })
+    await loadPrecheck({ silent: true });
+    if (precheckBlocked.value) {
+      message.warning(
+        precheckSummaryMessage.value ||
+          "当前发布单未通过执行前预检，请先处理阻塞项",
+      );
+      return;
+    }
+    const response = await executeReleaseOrder(order.value.id);
+    order.value = response.data;
+    message.success("发布已提交，正在调度执行");
+    await loadDetail({ silent: true });
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '发布执行失败'))
+    message.error(extractHTTPErrorMessage(error, "发布执行失败"));
   } finally {
-    executing.value = false
+    executing.value = false;
+    executeLocked.value = false;
   }
 }
 
 async function handleRollback() {
   if (!order.value || !canRollback.value) {
-    return
+    return;
   }
-  recovering.value = true
+  recovering.value = true;
   try {
-    const response = await rollbackReleaseOrderByID(order.value.id)
-    message.success(`已创建标准回滚单：${response.data.order_no}`)
-    void router.push(`/releases/${response.data.id}`)
+    const response = await rollbackReleaseOrderByID(order.value.id);
+    message.success(`已创建标准回滚单：${response.data.order_no}`);
+    void router.push(`/releases/${response.data.id}`);
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '标准回滚创建失败'))
+    message.error(extractHTTPErrorMessage(error, "标准回滚创建失败"));
   } finally {
-    recovering.value = false
+    recovering.value = false;
   }
 }
 
 async function handleReplay() {
   if (!order.value || !canReplay.value) {
-    return
+    return;
   }
-  recovering.value = true
+  recovering.value = true;
   try {
-    const response = await replayReleaseOrderByID(order.value.id)
-    message.success(replaySuccessText(order.value, response.data.order_no))
-    void router.push(`/releases/${response.data.id}`)
+    const response = await replayReleaseOrderByID(order.value.id);
+    message.success(replaySuccessText(order.value, response.data.order_no));
+    void router.push(`/releases/${response.data.id}`);
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, replayFailureText(order.value)))
+    message.error(
+      extractHTTPErrorMessage(error, replayFailureText(order.value)),
+    );
   } finally {
-    recovering.value = false
+    recovering.value = false;
   }
 }
 
 function goBack() {
-  void router.push('/releases')
+  void router.push("/releases");
 }
 
 function stopAutoRefresh() {
   if (autoRefreshTimer.value !== null) {
-    window.clearInterval(autoRefreshTimer.value)
-    autoRefreshTimer.value = null
+    window.clearInterval(autoRefreshTimer.value);
+    autoRefreshTimer.value = null;
   }
 }
 
 function startAutoRefresh() {
-  stopAutoRefresh()
+  stopAutoRefresh();
   autoRefreshTimer.value = window.setInterval(() => {
     if (document.hidden || cancelling.value || !shouldAutoRefresh.value) {
-      return
+      return;
     }
-    void loadDetail({ silent: true })
-  }, AUTO_REFRESH_INTERVAL_MS)
+    void loadDetail({ silent: true });
+  }, AUTO_REFRESH_INTERVAL_MS);
 }
 
 function closeAllLogStreams() {
-  ;(['ci', 'cd'] as ReleasePipelineScope[]).forEach((scope) => {
-    closeLogStream(scope)
-  })
+  (["ci", "cd"] as ReleasePipelineScope[]).forEach((scope) => {
+    closeLogStream(scope);
+  });
 }
 
 onMounted(async () => {
-  await loadDetail()
-  startAutoRefresh()
-})
+  await loadDetail();
+  startAutoRefresh();
+});
 
 onBeforeUnmount(() => {
-  stopAutoRefresh()
-  closeAllLogStreams()
-})
+  stopAutoRefresh();
+  closeAllLogStreams();
+});
 </script>
 
 <template>
@@ -1257,7 +1771,9 @@ onBeforeUnmount(() => {
         </a-button>
         <div class="page-header-copy">
           <h2 class="page-title">发布单详情</h2>
-          <p class="page-subtitle">按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度。</p>
+          <p class="page-subtitle">
+            按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度。
+          </p>
         </div>
       </div>
       <a-space>
@@ -1277,7 +1793,12 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined />
           </template>
-          <a-button type="primary" :loading="executing" :disabled="executeLocked">发布</a-button>
+          <a-button
+            type="primary"
+            :loading="executing"
+            :disabled="executeLocked"
+            >发布</a-button
+          >
         </a-popconfirm>
         <a-button v-else type="primary" disabled>发布</a-button>
         <a-popconfirm
@@ -1290,7 +1811,9 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined class="danger-icon" />
           </template>
-          <a-button class="rollback-trigger-button" :loading="recovering">回滚到此版本</a-button>
+          <a-button class="rollback-trigger-button" :loading="recovering"
+            >回滚到此版本</a-button
+          >
         </a-popconfirm>
         <a-popconfirm
           v-else-if="canReplay"
@@ -1302,7 +1825,9 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined />
           </template>
-          <a-button class="rollback-trigger-button" :loading="recovering">{{ replayActionText(order) }}</a-button>
+          <a-button class="rollback-trigger-button" :loading="recovering">{{
+            replayActionText(order)
+          }}</a-button>
         </a-popconfirm>
         <a-popconfirm
           v-if="canCancel"
@@ -1319,18 +1844,28 @@ onBeforeUnmount(() => {
       </a-space>
     </div>
 
-    <a-card class="detail-card release-hero-card" :loading="loading" :bordered="true">
+    <a-card
+      class="detail-card release-hero-card"
+      :loading="loading"
+      :bordered="true"
+    >
       <div class="release-hero">
         <div class="release-hero-main">
           <div class="release-hero-title-row">
             <div>
               <div class="release-hero-label">发布单号</div>
               <div class="release-hero-order">
-                <span>{{ order?.order_no || '-' }}</span>
-                <a-tag v-if="order?.operation_type === 'rollback'" class="status-chip status-chip-danger">
+                <span>{{ order?.order_no || "-" }}</span>
+                <a-tag
+                  v-if="order?.operation_type === 'rollback'"
+                  class="status-chip status-chip-danger"
+                >
                   {{ operationTypeText(order?.operation_type) }}
                 </a-tag>
-                <a-tag v-else-if="order?.operation_type === 'replay'" class="status-chip status-chip-warning">
+                <a-tag
+                  v-else-if="order?.operation_type === 'replay'"
+                  class="status-chip status-chip-warning"
+                >
                   {{ operationTypeText(order?.operation_type) }}
                 </a-tag>
               </div>
@@ -1345,21 +1880,46 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="release-spotlight" :class="`release-spotlight-${spotlightStatusKey}`">
+        <div
+          class="release-spotlight"
+          :class="`release-spotlight-${spotlightStatusKey}`"
+        >
           <div class="release-spotlight-content">
             <div class="release-spotlight-header">
               <div class="release-spotlight-label">整体进度</div>
             </div>
             <div class="release-spotlight-title">{{ spotlightTitle }}</div>
-            <div class="release-spotlight-description">{{ spotlightDescription }}</div>
+            <div class="release-spotlight-description">
+              {{ spotlightDescription }}
+            </div>
             <div class="release-spotlight-meta">{{ spotlightMeta }}</div>
           </div>
           <div class="release-spotlight-icon-wrap">
-            <div class="release-spotlight-icon-orb" :class="`release-spotlight-icon-orb-${spotlightStatusKey}`">
-              <SyncOutlined v-if="spotlightStatusKey === 'running'" spin class="release-spotlight-icon" />
-              <CheckCircleFilled v-else-if="spotlightStatusKey === 'success'" class="release-spotlight-icon" />
-              <CloseCircleFilled v-else-if="spotlightStatusKey === 'failed'" class="release-spotlight-icon" />
-              <StopFilled v-else-if="spotlightStatusKey === 'cancelled'" class="release-spotlight-icon" />
+            <div
+              class="release-spotlight-icon-orb"
+              :class="`release-spotlight-icon-orb-${spotlightStatusKey}`"
+            >
+              <SyncOutlined
+                v-if="spotlightStatusKey === 'running'"
+                spin
+                class="release-spotlight-icon"
+              />
+              <ClockCircleFilled
+                v-else-if="spotlightStatusKey === 'queued'"
+                class="release-spotlight-icon"
+              />
+              <CheckCircleFilled
+                v-else-if="spotlightStatusKey === 'success'"
+                class="release-spotlight-icon"
+              />
+              <CloseCircleFilled
+                v-else-if="spotlightStatusKey === 'failed'"
+                class="release-spotlight-icon"
+              />
+              <StopFilled
+                v-else-if="spotlightStatusKey === 'cancelled'"
+                class="release-spotlight-icon"
+              />
               <ClockCircleFilled v-else class="release-spotlight-icon" />
             </div>
           </div>
@@ -1369,14 +1929,27 @@ onBeforeUnmount(() => {
 
     <div class="detail-dashboard">
       <div class="dashboard-main">
-        <a-card class="detail-card" title="执行时间线" :loading="loading" :bordered="true">
+        <a-card
+          class="detail-card"
+          title="执行时间线"
+          :loading="loading"
+          :bordered="true"
+        >
           <a-empty v-if="stepGroups.length === 0" description="暂无步骤数据" />
           <div v-else class="step-groups">
-              <div v-for="group in stepGroups" :key="group.key" class="scope-section">
-                <div class="scope-section-header scope-section-header-inline">
-                  <a-tag class="status-chip status-chip-section">{{ group.title }}</a-tag>
-                  <span class="scope-section-subtitle">{{ group.items.length }} 个步骤</span>
-                </div>
+            <div
+              v-for="group in stepGroups"
+              :key="group.key"
+              class="scope-section"
+            >
+              <div class="scope-section-header scope-section-header-inline">
+                <a-tag class="status-chip status-chip-section">{{
+                  group.title
+                }}</a-tag>
+                <span class="scope-section-subtitle"
+                  >{{ group.items.length }} 个步骤</span
+                >
+              </div>
               <a-steps direction="vertical" size="small" class="step-progress">
                 <a-step
                   v-for="step in group.items"
@@ -1393,7 +1966,12 @@ onBeforeUnmount(() => {
           </div>
         </a-card>
 
-        <a-card class="detail-card" title="阶段与日志" :loading="pipelineStageLoading" :bordered="true">
+        <a-card
+          class="detail-card"
+          title="阶段与日志"
+          :loading="pipelineStageLoading"
+          :bordered="true"
+        >
           <a-tabs>
             <a-tab-pane key="stages" tab="管线进度">
               <template #tab>
@@ -1401,18 +1979,38 @@ onBeforeUnmount(() => {
               </template>
               <div class="stage-toolbar">
                 <a-space>
-                  <a-tag v-if="pipelineStageExecutorType" class="status-chip status-chip-running">{{ pipelineStageExecutorType }}</a-tag>
-                  <a-button size="small" @click="loadPipelineStageView">刷新阶段</a-button>
+                  <a-tag
+                    v-if="pipelineStageExecutorType"
+                    class="status-chip status-chip-running"
+                    >{{ pipelineStageExecutorType }}</a-tag
+                  >
+                  <a-button size="small" @click="loadPipelineStageView"
+                    >刷新阶段</a-button
+                  >
                 </a-space>
               </div>
 
-              <a-alert v-if="pipelineStageMessage" class="pipeline-stage-alert" type="info" show-icon :message="pipelineStageMessage" />
+              <a-alert
+                v-if="pipelineStageMessage"
+                class="pipeline-stage-alert"
+                type="info"
+                show-icon
+                :message="pipelineStageMessage"
+              />
 
               <div v-if="stageSections.length > 0" class="stage-sections">
-                <div v-for="section in stageSections" :key="section.scope" class="scope-section">
+                <div
+                  v-for="section in stageSections"
+                  :key="section.scope"
+                  class="scope-section"
+                >
                   <div class="scope-section-header scope-section-header-inline">
-                    <a-tag class="status-chip status-chip-section">{{ section.title }}</a-tag>
-                    <span class="scope-section-subtitle">{{ section.execution?.binding_name || '-' }}</span>
+                    <a-tag class="status-chip status-chip-section">{{
+                      section.title
+                    }}</a-tag>
+                    <span class="scope-section-subtitle">{{
+                      section.execution?.binding_name || "-"
+                    }}</span>
                   </div>
 
                   <a-alert
@@ -1429,7 +2027,10 @@ onBeforeUnmount(() => {
                     show-icon
                     :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，部署进度视图待接入。`"
                   />
-                  <a-empty v-if="section.stages.length === 0" :description="pipelineStageEmptyDescription(section)" />
+                  <a-empty
+                    v-if="section.stages.length === 0"
+                    :description="pipelineStageEmptyDescription(section)"
+                  />
                   <a-table
                     v-else
                     row-key="id"
@@ -1440,8 +2041,16 @@ onBeforeUnmount(() => {
                   >
                     <template #bodyCell="{ column, record }">
                       <template v-if="column.key === 'status'">
-                        <a-tag :class="['status-tag', statusToneClass(record.status)]">
-                          <LoadingOutlined v-if="isRunningStatus(record.status)" spin />
+                        <a-tag
+                          :class="[
+                            'status-tag',
+                            statusToneClass(record.status),
+                          ]"
+                        >
+                          <LoadingOutlined
+                            v-if="isRunningStatus(record.status)"
+                            spin
+                          />
                           <span>{{ statusText(record.status) }}</span>
                         </a-tag>
                       </template>
@@ -1480,10 +2089,20 @@ onBeforeUnmount(() => {
                 <span>实时日志</span>
               </template>
               <div class="log-sections">
-                <a-card v-for="section in logSections" :key="section.scope" class="nested-card" :title="section.title" :bordered="false">
+                <a-card
+                  v-for="section in logSections"
+                  :key="section.scope"
+                  class="nested-card"
+                  :title="section.title"
+                  :bordered="false"
+                >
                   <template #extra>
                     <a-space v-if="section.isJenkins">
-                      <a-tag v-if="logStreamHintText(section.scope)" :color="logStreamTagColor(section.scope)">{{ logStreamHintText(section.scope) }}</a-tag>
+                      <a-tag
+                        v-if="logStreamHintText(section.scope)"
+                        :color="logStreamTagColor(section.scope)"
+                        >{{ logStreamHintText(section.scope) }}</a-tag
+                      >
                       <a-switch
                         size="small"
                         :checked="section.state.autoFollow"
@@ -1491,9 +2110,22 @@ onBeforeUnmount(() => {
                         un-checked-children="暂停"
                         @change="handleLogFollowChange(section.scope, $event)"
                       />
-                      <a-button size="small" @click="jumpLogToBottom(section.scope)">底部</a-button>
-                      <a-button size="small" @click="reconnectLogStream(section.scope)" :loading="section.state.connecting">重连</a-button>
-                      <a-button size="small" @click="clearLogOutput(section.scope)">清空</a-button>
+                      <a-button
+                        size="small"
+                        @click="jumpLogToBottom(section.scope)"
+                        >底部</a-button
+                      >
+                      <a-button
+                        size="small"
+                        @click="reconnectLogStream(section.scope)"
+                        :loading="section.state.connecting"
+                        >重连</a-button
+                      >
+                      <a-button
+                        size="small"
+                        @click="clearLogOutput(section.scope)"
+                        >清空</a-button
+                      >
                     </a-space>
                   </template>
 
@@ -1502,9 +2134,11 @@ onBeforeUnmount(() => {
                     class="log-alert"
                     type="info"
                     show-icon
-                    :message="section.execution?.provider === 'argocd'
-                      ? `${scopeLabel(section.scope)} 当前使用 ArgoCD，当前版本先展示执行进度；事件流/日志视图将在后续版本补齐。`
-                      : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`"
+                    :message="
+                      section.execution?.provider === 'argocd'
+                        ? `${scopeLabel(section.scope)} 当前使用 ArgoCD，当前版本先展示执行进度；事件流/日志视图将在后续版本补齐。`
+                        : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`
+                    "
                   />
                   <template v-else>
                     <a-alert
@@ -1514,7 +2148,18 @@ onBeforeUnmount(() => {
                       show-icon
                       :message="logSectionWarningMessage(section.scope)"
                     />
-                    <pre :ref="(el) => setLogPanelRef(section.scope, el as Element | null)" class="log-panel" @scroll="syncLogFollowState(section.scope)">{{ section.state.text || logSectionEmptyDescription(section.scope) }}</pre>
+                    <pre
+                      :ref="
+                        (el) =>
+                          setLogPanelRef(section.scope, el as Element | null)
+                      "
+                      class="log-panel"
+                      @scroll="syncLogFollowState(section.scope)"
+                      >{{
+                        section.state.text ||
+                        logSectionEmptyDescription(section.scope)
+                      }}</pre
+                    >
                   </template>
                 </a-card>
               </div>
@@ -1524,20 +2169,35 @@ onBeforeUnmount(() => {
 
         <a-collapse class="detail-collapse" ghost>
           <a-collapse-panel key="base-info" header="基础信息与参数快照">
-            <a-card class="nested-card" title="基础信息" :loading="loading" :bordered="false">
-                <a-descriptions :column="{ xs: 1, md: 2 }" bordered>
-                <a-descriptions-item v-for="item in detailItems" :key="item.key || item.label" :label="item.label">
-                    <template v-if="item.key === 'order_no'">
-                      <a-space :size="6">
-                        <span>{{ item.value }}</span>
-                        <a-tag v-if="order?.operation_type === 'rollback'" class="status-chip status-chip-danger">
-                          {{ operationTypeText(order?.operation_type) }}
-                        </a-tag>
-                        <a-tag v-else-if="order?.operation_type === 'replay'" class="status-chip status-chip-warning">
-                          {{ operationTypeText(order?.operation_type) }}
-                        </a-tag>
-                      </a-space>
-                    </template>
+            <a-card
+              class="nested-card"
+              title="基础信息"
+              :loading="loading"
+              :bordered="false"
+            >
+              <a-descriptions :column="{ xs: 1, md: 2 }" bordered>
+                <a-descriptions-item
+                  v-for="item in detailItems"
+                  :key="item.key || item.label"
+                  :label="item.label"
+                >
+                  <template v-if="item.key === 'order_no'">
+                    <a-space :size="6">
+                      <span>{{ item.value }}</span>
+                      <a-tag
+                        v-if="order?.operation_type === 'rollback'"
+                        class="status-chip status-chip-danger"
+                      >
+                        {{ operationTypeText(order?.operation_type) }}
+                      </a-tag>
+                      <a-tag
+                        v-else-if="order?.operation_type === 'replay'"
+                        class="status-chip status-chip-warning"
+                      >
+                        {{ operationTypeText(order?.operation_type) }}
+                      </a-tag>
+                    </a-space>
+                  </template>
                   <template v-else>
                     {{ item.value }}
                   </template>
@@ -1554,7 +2214,10 @@ onBeforeUnmount(() => {
                 :loading="loading"
                 :bordered="false"
               >
-                <a-empty v-if="group.items.length === 0" description="暂无参数快照" />
+                <a-empty
+                  v-if="group.items.length === 0"
+                  description="暂无参数快照"
+                />
                 <a-table
                   v-else
                   row-key="id"
@@ -1568,7 +2231,7 @@ onBeforeUnmount(() => {
                       {{ formatTime(record.created_at) }}
                     </template>
                     <template v-else-if="column.key === 'param_value'">
-                      {{ record.param_value || '-' }}
+                      {{ record.param_value || "-" }}
                     </template>
                   </template>
                 </a-table>
@@ -1579,21 +2242,148 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="dashboard-side">
-        <a-card class="detail-card" title="执行单元" :loading="loading" :bordered="true">
+        <a-card
+          v-if="showConcurrentBatchCard"
+          class="detail-card"
+          title="并发批次进度"
+          :loading="concurrentBatchLoading"
+          :bordered="true"
+        >
+          <div class="batch-progress-meta">
+            <div class="batch-progress-badge">
+              <span class="batch-progress-label">批次号</span>
+              <span class="batch-progress-value">{{
+                concurrentBatchProgress?.batch_no ||
+                order?.concurrent_batch_no ||
+                "-"
+              }}</span>
+            </div>
+            <div class="batch-progress-stats">
+              <div
+                v-for="item in concurrentBatchSummary"
+                :key="item.label"
+                class="batch-progress-stat"
+              >
+                <span class="batch-progress-stat-label">{{ item.label }}</span>
+                <span class="batch-progress-stat-value">{{ item.value }}</span>
+              </div>
+            </div>
+          </div>
+          <a-empty
+            v-if="!concurrentBatchProgress?.items?.length"
+            description="暂无并发批次进度"
+          />
+          <div v-else class="batch-progress-list">
+            <div
+              v-for="item in concurrentBatchProgress.items"
+              :key="item.order_id"
+              class="batch-progress-item"
+            >
+              <div class="batch-progress-item-main">
+                <div class="batch-progress-item-order">
+                  <span>#{{ item.concurrent_batch_seq || "-" }}</span>
+                  <span>{{ item.order_no }}</span>
+                </div>
+                <div class="batch-progress-item-meta">
+                  <span>{{ item.application_name || "-" }}</span>
+                  <span>{{ item.env_code || "-" }}</span>
+                  <span>{{ operationTypeText(item.operation_type) }}</span>
+                </div>
+              </div>
+              <div class="batch-progress-item-side">
+                <a-tag
+                  :class="[
+                    'status-tag',
+                    concurrentQueueToneClass(item.queue_state),
+                  ]"
+                >
+                  <LoadingOutlined
+                    v-if="
+                      item.queue_state === 'executing' ||
+                      item.queue_state === 'queued'
+                    "
+                    :spin="item.queue_state === 'executing'"
+                  />
+                  <span>{{ concurrentQueueStateText(item.queue_state) }}</span>
+                </a-tag>
+                <div
+                  v-if="item.queue_position > 0"
+                  class="batch-progress-item-position"
+                >
+                  队列位次 {{ item.queue_position }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </a-card>
+
+        <a-card
+          v-if="showPrecheckCard"
+          class="detail-card"
+          title="执行前预检"
+          :loading="precheckLoading"
+          :bordered="true"
+        >
+          <a-alert
+            v-if="precheckSummaryMessage"
+            class="pipeline-stage-alert"
+            :type="precheckSummaryTone"
+            show-icon
+            :message="precheckSummaryMessage"
+          />
+          <div v-if="precheck?.items?.length" class="precheck-list">
+            <div
+              v-for="item in precheck.items"
+              :key="item.key"
+              class="precheck-item"
+            >
+              <div class="precheck-item-copy">
+                <div class="precheck-item-name">{{ item.name }}</div>
+                <div class="precheck-item-message">{{ item.message }}</div>
+              </div>
+              <a-tag :class="['status-tag', precheckToneClass(item.status)]">
+                <LoadingOutlined v-if="item.status === 'warn'" spin />
+                <span>{{ precheckStatusText(item.status) }}</span>
+              </a-tag>
+            </div>
+          </div>
+          <a-empty v-else description="暂无预检结果" />
+        </a-card>
+
+        <a-card
+          class="detail-card"
+          title="执行单元"
+          :loading="loading"
+          :bordered="true"
+        >
           <div class="execution-stack">
-            <div v-for="item in executionSections" :key="item.scope" class="execution-summary-card">
+            <div
+              v-for="item in executionSections"
+              :key="item.scope"
+              class="execution-summary-card"
+            >
               <div class="execution-summary-head">
                 <div>
                   <div class="execution-summary-title">{{ item.title }}</div>
-                  <div class="execution-summary-subtitle">{{ item.execution.binding_name || '-' }}</div>
+                  <div class="execution-summary-subtitle">
+                    {{ item.execution.binding_name || "-" }}
+                  </div>
                 </div>
-                <a-tag :class="['status-tag', statusToneClass(item.execution.status)]">
-                  <LoadingOutlined v-if="isRunningStatus(item.execution.status)" spin />
+                <a-tag
+                  :class="[
+                    'status-tag',
+                    statusToneClass(item.execution.status),
+                  ]"
+                >
+                  <LoadingOutlined
+                    v-if="isRunningStatus(item.execution.status)"
+                    spin
+                  />
                   <span>{{ statusText(item.execution.status) }}</span>
                 </a-tag>
               </div>
               <div class="execution-summary-meta">
-                <span>执行器：{{ item.execution.provider || '-' }}</span>
+                <span>执行器：{{ item.execution.provider || "-" }}</span>
                 <span>开始：{{ formatTime(item.execution.started_at) }}</span>
                 <span>结束：{{ formatTime(item.execution.finished_at) }}</span>
               </div>
@@ -1601,9 +2391,18 @@ onBeforeUnmount(() => {
           </div>
         </a-card>
 
-        <a-card class="detail-card" title="发布上下文" :loading="loading" :bordered="true">
+        <a-card
+          class="detail-card"
+          title="发布上下文"
+          :loading="loading"
+          :bordered="true"
+        >
           <div class="context-list">
-            <div v-for="item in contextFacts" :key="item.label" class="context-item">
+            <div
+              v-for="item in contextFacts"
+              :key="item.label"
+              class="context-item"
+            >
               <span class="context-label">{{ item.label }}</span>
               <span class="context-value">{{ item.value }}</span>
             </div>
@@ -1628,30 +2427,44 @@ onBeforeUnmount(() => {
             <a-table
               row-key="rowKey"
               :columns="valueProgressColumns"
-              :data-source="group.items.map((item) => ({ ...item, rowKey: `${item.pipeline_scope}-${item.param_key}-${item.executor_param_name}` }))"
+              :data-source="
+                group.items.map((item) => ({
+                  ...item,
+                  rowKey: `${item.pipeline_scope}-${item.param_key}-${item.executor_param_name}`,
+                }))
+              "
               :pagination="false"
               size="small"
               :scroll="{ x: 1200 }"
             >
               <template #bodyCell="{ column, record }">
                 <template v-if="column.key === 'status'">
-                  <a-tag :class="['status-tag', valueProgressToneClass(record.status)]">
+                  <a-tag
+                    :class="[
+                      'status-tag',
+                      valueProgressToneClass(record.status),
+                    ]"
+                  >
                     <LoadingOutlined v-if="record.status === 'running'" spin />
                     <span>{{ valueProgressStatusText(record.status) }}</span>
                   </a-tag>
                 </template>
                 <template v-else-if="column.key === 'value'">
-                  {{ record.value || '-' }}
+                  {{ record.value || "-" }}
                 </template>
                 <template v-else-if="column.key === 'value_source'">
-                  {{ record.value_source || '-' }}
+                  {{ record.value_source || "-" }}
                 </template>
                 <template v-else-if="column.key === 'updated_at'">
                   {{ formatTime(record.updated_at) }}
                 </template>
                 <template v-else-if="column.key === 'param_name'">
-                  <span>{{ record.param_name || '-' }}</span>
-                  <a-tag v-if="record.required" class="required-tag status-chip status-chip-danger">必需</a-tag>
+                  <span>{{ record.param_name || "-" }}</span>
+                  <a-tag
+                    v-if="record.required"
+                    class="required-tag status-chip status-chip-danger"
+                    >必需</a-tag
+                  >
                 </template>
               </template>
             </a-table>
@@ -1663,15 +2476,30 @@ onBeforeUnmount(() => {
     <a-drawer
       :open="stageLogDrawerVisible"
       :width="760"
-      :title="selectedPipelineStage ? `${selectedPipelineStage.pipeline_scope?.toUpperCase() || ''} 阶段日志 · ${selectedPipelineStage.stage_name}` : '阶段日志'"
+      :title="
+        selectedPipelineStage
+          ? `${selectedPipelineStage.pipeline_scope?.toUpperCase() || ''} 阶段日志 · ${selectedPipelineStage.stage_name}`
+          : '阶段日志'
+      "
       @close="closeStageLogDrawer"
     >
       <template #extra>
         <a-space>
-          <a-tag v-if="selectedPipelineStage" :class="['status-tag', statusToneClass(selectedPipelineStage.status)]">
+          <a-tag
+            v-if="selectedPipelineStage"
+            :class="[
+              'status-tag',
+              statusToneClass(selectedPipelineStage.status),
+            ]"
+          >
             {{ statusText(selectedPipelineStage.status) }}
           </a-tag>
-          <a-button size="small" :loading="stageLogLoading" @click="loadStageLog">刷新日志</a-button>
+          <a-button
+            size="small"
+            :loading="stageLogLoading"
+            @click="loadStageLog"
+            >刷新日志</a-button
+          >
         </a-space>
       </template>
 
@@ -1682,7 +2510,9 @@ onBeforeUnmount(() => {
         show-icon
         :message="`最近同步时间：${stageLogFetchedAt}${stageLogHasMore ? '，当前阶段仍在持续输出日志' : ''}`"
       />
-      <pre class="log-panel stage-log-panel">{{ stageLogContent || '暂无阶段日志输出' }}</pre>
+      <pre class="log-panel stage-log-panel">{{
+        stageLogContent || "暂无阶段日志输出"
+      }}</pre>
     </a-drawer>
   </div>
 </template>
@@ -1708,8 +2538,16 @@ onBeforeUnmount(() => {
 .release-hero-card {
   overflow: hidden;
   background:
-    radial-gradient(circle at top left, var(--color-primary-glow), transparent 34%),
-    linear-gradient(180deg, var(--color-bg-card) 0%, var(--color-bg-subtle) 100%);
+    radial-gradient(
+      circle at top left,
+      var(--color-primary-glow),
+      transparent 34%
+    ),
+    linear-gradient(
+      180deg,
+      var(--color-bg-card) 0%,
+      var(--color-bg-subtle) 100%
+    );
 }
 
 .release-hero {
@@ -1790,8 +2628,16 @@ onBeforeUnmount(() => {
   align-self: stretch;
   border: 1px solid rgba(96, 165, 250, 0.22);
   background:
-    radial-gradient(circle at top right, rgba(96, 165, 250, 0.14), transparent 42%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.94) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(96, 165, 250, 0.14),
+      transparent 42%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.98) 0%,
+      rgba(248, 250, 252, 0.94) 100%
+    );
   box-shadow: 0 18px 38px rgba(15, 23, 42, 0.08);
   padding: 24px 26px;
   display: grid;
@@ -1805,30 +2651,63 @@ onBeforeUnmount(() => {
 .release-spotlight-success {
   border-color: rgba(74, 222, 128, 0.38);
   background:
-    radial-gradient(circle at top right, rgba(74, 222, 128, 0.16), transparent 40%),
-    linear-gradient(180deg, rgba(240, 253, 244, 0.98) 0%, rgba(248, 250, 252, 0.94) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(74, 222, 128, 0.16),
+      transparent 40%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(240, 253, 244, 0.98) 0%,
+      rgba(248, 250, 252, 0.94) 100%
+    );
 }
 
 .release-spotlight-running {
   border-color: rgba(96, 165, 250, 0.38);
   background:
-    radial-gradient(circle at top right, rgba(96, 165, 250, 0.16), transparent 40%),
-    linear-gradient(180deg, rgba(239, 246, 255, 0.98) 0%, rgba(248, 250, 252, 0.94) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(96, 165, 250, 0.16),
+      transparent 40%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(239, 246, 255, 0.98) 0%,
+      rgba(248, 250, 252, 0.94) 100%
+    );
 }
 
 .release-spotlight-failed {
   border-color: rgba(251, 113, 133, 0.34);
   background:
-    radial-gradient(circle at top right, rgba(251, 113, 133, 0.14), transparent 40%),
-    linear-gradient(180deg, rgba(255, 241, 242, 0.98) 0%, rgba(255, 250, 250, 0.94) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(251, 113, 133, 0.14),
+      transparent 40%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 241, 242, 0.98) 0%,
+      rgba(255, 250, 250, 0.94) 100%
+    );
 }
 
+.release-spotlight-queued,
 .release-spotlight-cancelled,
 .release-spotlight-pending {
   border-color: rgba(251, 191, 36, 0.34);
   background:
-    radial-gradient(circle at top right, rgba(251, 191, 36, 0.14), transparent 40%),
-    linear-gradient(180deg, rgba(255, 247, 237, 0.98) 0%, rgba(255, 251, 235, 0.94) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(251, 191, 36, 0.14),
+      transparent 40%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 247, 237, 0.98) 0%,
+      rgba(255, 251, 235, 0.94) 100%
+    );
 }
 
 .release-spotlight-icon-wrap {
@@ -1854,26 +2733,43 @@ onBeforeUnmount(() => {
 
 .release-spotlight-icon-orb-success {
   color: #15803d;
-  background: linear-gradient(180deg, rgba(240, 253, 244, 0.9) 0%, rgba(255, 255, 255, 0.74) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(240, 253, 244, 0.9) 0%,
+    rgba(255, 255, 255, 0.74) 100%
+  );
   border-color: rgba(134, 239, 172, 0.4);
 }
 
 .release-spotlight-icon-orb-running {
   color: #1d4ed8;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.9) 0%, rgba(255, 255, 255, 0.74) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(239, 246, 255, 0.9) 0%,
+    rgba(255, 255, 255, 0.74) 100%
+  );
   border-color: rgba(147, 197, 253, 0.4);
 }
 
 .release-spotlight-icon-orb-failed {
   color: #b91c1c;
-  background: linear-gradient(180deg, rgba(255, 241, 242, 0.9) 0%, rgba(255, 255, 255, 0.74) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 241, 242, 0.9) 0%,
+    rgba(255, 255, 255, 0.74) 100%
+  );
   border-color: rgba(253, 164, 175, 0.42);
 }
 
+.release-spotlight-icon-orb-queued,
 .release-spotlight-icon-orb-cancelled,
 .release-spotlight-icon-orb-pending {
   color: #b45309;
-  background: linear-gradient(180deg, rgba(255, 247, 237, 0.92) 0%, rgba(255, 255, 255, 0.74) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 247, 237, 0.92) 0%,
+    rgba(255, 255, 255, 0.74) 100%
+  );
   border-color: rgba(253, 186, 116, 0.42);
 }
 
@@ -1952,8 +2848,16 @@ onBeforeUnmount(() => {
   padding: 16px;
   border-radius: 16px;
   background:
-    radial-gradient(circle at top right, rgba(59, 130, 246, 0.1), transparent 38%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.96) 100%);
+    radial-gradient(
+      circle at top right,
+      rgba(59, 130, 246, 0.1),
+      transparent 38%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.96) 0%,
+      rgba(248, 250, 252, 0.96) 100%
+    );
   border: 1px solid rgba(148, 163, 184, 0.24);
   box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
 }
@@ -2060,6 +2964,13 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
 
+.status-pill-warning {
+  color: #c2410c;
+  background: linear-gradient(180deg, #fff7ed 0%, #fed7aa 100%);
+  border-color: #fdba74;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
 .status-pill-neutral {
   color: #475569;
   background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
@@ -2078,24 +2989,72 @@ onBeforeUnmount(() => {
 
 .status-chip-section {
   color: #0f172a;
-  background: linear-gradient(180deg, rgba(226, 232, 240, 0.92) 0%, rgba(203, 213, 225, 0.85) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(226, 232, 240, 0.92) 0%,
+    rgba(203, 213, 225, 0.85) 100%
+  );
   border-color: rgba(148, 163, 184, 0.46);
 }
 
 .status-chip-running {
   color: #1d4ed8;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.96) 0%, rgba(219, 234, 254, 0.9) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(239, 246, 255, 0.96) 0%,
+    rgba(219, 234, 254, 0.9) 100%
+  );
   border-color: rgba(96, 165, 250, 0.56);
 }
 
 .status-chip-danger {
   color: #b91c1c;
-  background: linear-gradient(180deg, rgba(255, 241, 242, 0.98) 0%, rgba(255, 228, 230, 0.92) 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 241, 242, 0.98) 0%,
+    rgba(255, 228, 230, 0.92) 100%
+  );
   border-color: rgba(251, 113, 133, 0.48);
 }
 
 .required-tag {
   margin-left: 8px;
+}
+
+.precheck-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.precheck-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--color-panel-divider);
+}
+
+.precheck-item:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.precheck-item-copy {
+  min-width: 0;
+}
+
+.precheck-item-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.precheck-item-message {
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
 }
 
 .context-list {
@@ -2227,7 +3186,9 @@ onBeforeUnmount(() => {
   box-shadow: 0 12px 24px rgba(37, 99, 235, 0.26);
 }
 
-:deep(.step-progress .ant-steps-item-process .ant-steps-item-icon > .ant-steps-icon) {
+:deep(
+  .step-progress .ant-steps-item-process .ant-steps-item-icon > .ant-steps-icon
+) {
   color: #eff6ff;
 }
 
@@ -2237,7 +3198,9 @@ onBeforeUnmount(() => {
   box-shadow: 0 12px 24px rgba(22, 163, 74, 0.24);
 }
 
-:deep(.step-progress .ant-steps-item-finish .ant-steps-item-icon > .ant-steps-icon) {
+:deep(
+  .step-progress .ant-steps-item-finish .ant-steps-item-icon > .ant-steps-icon
+) {
   color: #f0fdf4;
 }
 
@@ -2247,7 +3210,9 @@ onBeforeUnmount(() => {
   box-shadow: 0 12px 24px rgba(220, 38, 38, 0.2);
 }
 
-:deep(.step-progress .ant-steps-item-error .ant-steps-item-icon > .ant-steps-icon) {
+:deep(
+  .step-progress .ant-steps-item-error .ant-steps-item-icon > .ant-steps-icon
+) {
   color: #fff1f2;
 }
 
@@ -2257,7 +3222,9 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
-:deep(.step-progress .ant-steps-item-wait .ant-steps-item-icon > .ant-steps-icon) {
+:deep(
+  .step-progress .ant-steps-item-wait .ant-steps-item-icon > .ant-steps-icon
+) {
   color: #b45309;
 }
 
@@ -2291,7 +3258,7 @@ onBeforeUnmount(() => {
   color: #f5f5f5;
   font-size: 12px;
   line-height: 1.6;
-  font-family: Menlo, Monaco, Consolas, 'Courier New', monospace;
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2310,6 +3277,94 @@ onBeforeUnmount(() => {
   color: #020617;
   border-color: rgba(15, 23, 42, 0.36);
   background: rgba(15, 23, 42, 0.04);
+}
+
+.batch-progress-meta {
+  display: grid;
+  gap: 14px;
+}
+
+.batch-progress-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-panel-border);
+}
+
+.batch-progress-label,
+.batch-progress-stat-label,
+.batch-progress-item-position {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.batch-progress-value,
+.batch-progress-stat-value {
+  color: var(--color-text-main);
+  font-weight: 700;
+}
+
+.batch-progress-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.batch-progress-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--color-bg-subtle);
+  border: 1px solid var(--color-panel-border);
+}
+
+.batch-progress-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.batch-progress-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--color-panel-border);
+  background: var(--color-bg-card);
+}
+
+.batch-progress-item-main,
+.batch-progress-item-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.batch-progress-item-order {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--color-text-main);
+  font-weight: 700;
+}
+
+.batch-progress-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.batch-progress-item-side {
+  align-items: flex-end;
 }
 
 @media (max-width: 768px) {
@@ -2353,6 +3408,18 @@ onBeforeUnmount(() => {
   .context-item {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .batch-progress-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .batch-progress-item {
+    flex-direction: column;
+  }
+
+  .batch-progress-item-side {
+    align-items: flex-start;
   }
 }
 </style>

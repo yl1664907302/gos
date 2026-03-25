@@ -16,6 +16,7 @@ type ArgoCDApplicationClient interface {
 	ListApplications(ctx context.Context) ([]ArgoCDApplicationSnapshot, error)
 	GetApplication(ctx context.Context, name string) (ArgoCDApplicationSnapshot, error)
 	SyncApplication(ctx context.Context, name string) error
+	SyncApplicationWithRevision(ctx context.Context, name string, revision string) error
 	BuildApplicationURL(name string) string
 }
 

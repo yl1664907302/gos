@@ -131,6 +131,9 @@ func (uc *TrackReleaseExecution) listRunningOrders(ctx context.Context) ([]domai
 }
 
 func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.ReleaseOrder) (bool, bool, error) {
+	if err := uc.manager.touchExecutionLocks(ctx, order); err != nil {
+		return false, false, err
+	}
 	executions, err := uc.manager.ListExecutions(ctx, order.ID)
 	if err != nil {
 		return false, false, err
@@ -613,6 +616,9 @@ func (uc *TrackReleaseExecution) finalizeOrder(
 	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, orderStatus, order.StartedAt, &now, now); err != nil {
 		return false, false, err
 	}
+	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+		return false, false, err
+	}
 	return updated, false, nil
 }
 
@@ -649,6 +655,9 @@ func (uc *TrackReleaseExecution) failRemainingExecutions(
 		return false, err
 	}
 	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
+		return false, err
+	}
+	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
 		return false, err
 	}
 	return updated || true, nil

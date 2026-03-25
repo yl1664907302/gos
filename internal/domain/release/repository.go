@@ -16,6 +16,12 @@ type Repository interface {
 	) error
 	CreateDeploySnapshot(ctx context.Context, snapshot DeploySnapshot) error
 	GetDeploySnapshotByOrderID(ctx context.Context, releaseOrderID string) (DeploySnapshot, error)
+	UpdateConcurrentBatch(ctx context.Context, orderIDs []string, batchNo string, isConcurrent bool) error
+	ListByConcurrentBatchNo(ctx context.Context, batchNo string) ([]ReleaseOrder, error)
+	FindActiveExecutionLock(ctx context.Context, lockKey string, excludeReleaseOrderID string, now time.Time) (ReleaseExecutionLock, error)
+	AcquireExecutionLock(ctx context.Context, lock ReleaseExecutionLock, now time.Time) (ReleaseExecutionLock, bool, error)
+	TouchExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, expiredAt time.Time) error
+	ReleaseExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, status ExecutionLockStatus, releasedAt time.Time) error
 	GetByID(ctx context.Context, id string) (ReleaseOrder, error)
 	List(ctx context.Context, filter ListFilter) ([]ReleaseOrder, int64, error)
 	ListTrackableOrders(ctx context.Context, page int, pageSize int) ([]ReleaseOrder, int64, error)

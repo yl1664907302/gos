@@ -93,7 +93,16 @@ type GitOpsConfig struct {
 }
 
 type ReleaseConfig struct {
-	EnvOptions []string `json:"env_options"`
+	EnvOptions  []string                 `json:"env_options"`
+	Concurrency ReleaseConcurrencyConfig `json:"concurrency"`
+}
+
+type ReleaseConcurrencyConfig struct {
+	Enabled            bool   `json:"enabled"`
+	LockScope          string `json:"lock_scope"`
+	ConflictStrategy   string `json:"conflict_strategy"`
+	LockTimeoutSec     int    `json:"lock_timeout_sec"`
+	AllowAdminOverride bool   `json:"allow_admin_override"`
 }
 
 type AuthConfig struct {
@@ -189,6 +198,13 @@ func defaultConfig() Config {
 		},
 		Release: ReleaseConfig{
 			EnvOptions: []string{"dev", "test", "prod"},
+			Concurrency: ReleaseConcurrencyConfig{
+				Enabled:            false,
+				LockScope:          "application_env",
+				ConflictStrategy:   "reject",
+				LockTimeoutSec:     1800,
+				AllowAdminOverride: true,
+			},
 		},
 		Auth: AuthConfig{
 			SessionTTLHours:  24,
@@ -372,6 +388,24 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Server.ShutdownTimeoutSec = 10
 	}
 
+	cfg.Release.Concurrency.LockScope = strings.TrimSpace(cfg.Release.Concurrency.LockScope)
+	if cfg.Release.Concurrency.LockScope == "" {
+		cfg.Release.Concurrency.LockScope = "application_env"
+	}
+	cfg.Release.Concurrency.ConflictStrategy = strings.TrimSpace(cfg.Release.Concurrency.ConflictStrategy)
+	if cfg.Release.Concurrency.ConflictStrategy == "" {
+		cfg.Release.Concurrency.ConflictStrategy = "reject"
+	}
+	if cfg.Release.Concurrency.LockTimeoutSec <= 0 {
+		cfg.Release.Concurrency.LockTimeoutSec = 1800
+	}
+	if cfg.Release.Concurrency.LockTimeoutSec < 30 {
+		cfg.Release.Concurrency.LockTimeoutSec = 30
+	}
+	if cfg.Release.Concurrency.LockTimeoutSec > 86400 {
+		cfg.Release.Concurrency.LockTimeoutSec = 86400
+	}
+
 	cfg.Database.Driver = strings.ToLower(strings.TrimSpace(cfg.Database.Driver))
 	if cfg.Database.Driver == "" {
 		cfg.Database.Driver = "mysql"
@@ -531,6 +565,17 @@ func validateConfig(cfg Config) error {
 		if cfg.GitOps.AuthorName == "" || cfg.GitOps.AuthorEmail == "" {
 			return errors.New("gitops.author_name and gitops.author_email are required when gitops.enabled=true")
 		}
+	}
+
+	switch cfg.Release.Concurrency.LockScope {
+	case "application", "application_env", "gitops_repo_branch":
+	default:
+		return fmt.Errorf("unsupported release.concurrency.lock_scope %q", cfg.Release.Concurrency.LockScope)
+	}
+	switch cfg.Release.Concurrency.ConflictStrategy {
+	case "reject", "queue":
+	default:
+		return fmt.Errorf("unsupported release.concurrency.conflict_strategy %q", cfg.Release.Concurrency.ConflictStrategy)
 	}
 
 	return nil

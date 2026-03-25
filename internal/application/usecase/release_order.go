@@ -20,18 +20,19 @@ import (
 )
 
 type ReleaseOrderManager struct {
-	repo          domain.Repository
-	appRepo       appdomain.Repository
-	pipelineRepo  pipelinedomain.Repository
-	paramRepo     pipelineparamdomain.Repository
-	platformRepo  platformparamdomain.Repository
-	jenkins       JenkinsReleaseExecutor
-	argocdRepo    argocddomain.Repository
-	gitopsRepo    gitopsdomain.Repository
-	argocdFactory ArgoCDClientFactory
-	gitopsFactory GitOpsServiceFactory
-	gitops        GitOpsReleaseService
-	now           func() time.Time
+	repo            domain.Repository
+	appRepo         appdomain.Repository
+	pipelineRepo    pipelinedomain.Repository
+	paramRepo       pipelineparamdomain.Repository
+	platformRepo    platformparamdomain.Repository
+	releaseSettings ReleaseSettingsStore
+	jenkins         JenkinsReleaseExecutor
+	argocdRepo      argocddomain.Repository
+	gitopsRepo      gitopsdomain.Repository
+	argocdFactory   ArgoCDClientFactory
+	gitopsFactory   GitOpsServiceFactory
+	gitops          GitOpsReleaseService
+	now             func() time.Time
 }
 
 type CreateReleaseOrderInput struct {
@@ -94,6 +95,7 @@ type ArgoCDReleaseExecutor interface {
 	ListApplications(ctx context.Context) ([]ArgoCDApplicationSnapshot, error)
 	GetApplication(ctx context.Context, name string) (ArgoCDApplicationSnapshot, error)
 	SyncApplication(ctx context.Context, name string) error
+	SyncApplicationWithRevision(ctx context.Context, name string, revision string) error
 }
 
 // GitOpsReleaseService 只暴露 ArgoCD CD 模式下真正需要的最小能力：
@@ -131,6 +133,7 @@ func NewReleaseOrderManager(
 	pipelineRepo pipelinedomain.Repository,
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
+	releaseSettings ReleaseSettingsStore,
 	jenkins JenkinsReleaseExecutor,
 	argocdRepo argocddomain.Repository,
 	argocdFactory ArgoCDClientFactory,
@@ -139,17 +142,18 @@ func NewReleaseOrderManager(
 	gitops GitOpsReleaseService,
 ) *ReleaseOrderManager {
 	return &ReleaseOrderManager{
-		repo:          repo,
-		appRepo:       appRepo,
-		pipelineRepo:  pipelineRepo,
-		paramRepo:     paramRepo,
-		platformRepo:  platformRepo,
-		jenkins:       jenkins,
-		argocdRepo:    argocdRepo,
-		gitopsRepo:    gitopsRepo,
-		argocdFactory: argocdFactory,
-		gitopsFactory: gitopsFactory,
-		gitops:        gitops,
+		repo:            repo,
+		appRepo:         appRepo,
+		pipelineRepo:    pipelineRepo,
+		paramRepo:       paramRepo,
+		platformRepo:    platformRepo,
+		releaseSettings: releaseSettings,
+		jenkins:         jenkins,
+		argocdRepo:      argocdRepo,
+		gitopsRepo:      gitopsRepo,
+		argocdFactory:   argocdFactory,
+		gitopsFactory:   gitopsFactory,
+		gitops:          gitops,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -220,8 +224,8 @@ func (uc *ReleaseOrderManager) Create(
 		return domain.ReleaseOrder{}, err
 	}
 	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
-	summary := resolveReleaseOrderSummaryFields(input.Params)
-	envCode := firstNonEmpty(input.EnvCode, summary.EnvCode)
+	inputSummary := resolveReleaseOrderSummaryFields(input.Params)
+	envCode := firstNonEmpty(input.EnvCode, inputSummary.EnvCode)
 	if envCode == "" {
 		err := fmt.Errorf("%w: env_code is required", ErrInvalidInput)
 		logx.Error("release_order", "create_failed", err,
@@ -230,6 +234,25 @@ func (uc *ReleaseOrderManager) Create(
 		)
 		return domain.ReleaseOrder{}, err
 	}
+	resolvedParams, err := uc.materializeCreateTemplateParams(
+		ctx,
+		app,
+		templateParams,
+		input.Params,
+		envCode,
+		firstNonEmpty(strings.TrimSpace(input.GitRef), inputSummary.GitRef),
+		firstNonEmpty(strings.TrimSpace(input.SonService), inputSummary.ProjectName),
+		firstNonEmpty(strings.TrimSpace(input.ImageTag), inputSummary.ImageTag),
+	)
+	if err != nil {
+		logx.Error("release_order", "create_failed", err,
+			logx.F("application_id", applicationID),
+			logx.F("template_id", templateID),
+			logx.F("template_name", template.Name),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	summary := resolveReleaseOrderSummaryFields(resolvedParams)
 	primaryExecution, ok := pickPrimaryExecution(executions)
 	if !ok {
 		err := fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
@@ -266,7 +289,7 @@ func (uc *ReleaseOrderManager) Create(
 	}
 
 	executions = uc.buildCreateExecutions(order.ID, now, templateBindings)
-	params, err := uc.buildCreateParams(order.ID, now, input.Params, executions)
+	params, err := uc.buildCreateParams(order.ID, now, resolvedParams, executions)
 	if err != nil {
 		logx.Error("release_order", "create_failed", err,
 			logx.F("order_id", order.ID),
@@ -522,19 +545,24 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 				PipelineScope:     item.PipelineScope,
 				ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
 				ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
-				Required:          item.Required,
+				Required: item.Required ||
+					item.ValueSource == "" ||
+					item.ValueSource == domain.TemplateParamValueSourceReleaseInput,
+				ValueSource: item.ValueSource,
 			}
 			allowed[key] = rule
 			paramKey := buildReleaseTemplateScopeParamKey(item.PipelineScope, item.ParamKey)
 			if paramKey != "" {
-				if _, exists := allowedByParamKey[paramKey]; exists {
-					delete(allowedByParamKey, paramKey)
-					duplicateParamKeys[paramKey] = struct{}{}
-				} else if _, duplicated := duplicateParamKeys[paramKey]; !duplicated {
-					allowedByParamKey[paramKey] = rule
+				if item.ValueSource == domain.TemplateParamValueSourceReleaseInput || item.ValueSource == "" {
+					if _, exists := allowedByParamKey[paramKey]; exists {
+						delete(allowedByParamKey, paramKey)
+						duplicateParamKeys[paramKey] = struct{}{}
+					} else if _, duplicated := duplicateParamKeys[paramKey]; !duplicated {
+						allowedByParamKey[paramKey] = rule
+					}
 				}
 			}
-			if item.Required {
+			if item.ValueSource == domain.TemplateParamValueSourceReleaseInput || item.ValueSource == "" {
 				required[key] = rule
 			}
 		}
@@ -557,6 +585,9 @@ func (uc *ReleaseOrderManager) validateCreateTemplateParams(
 		rule, key, ok := resolveReleaseTemplateRule(allowed, allowedByParamKey, scope, paramKey, executorParamName)
 		if !ok {
 			return fmt.Errorf("%w: param %s is not included in selected release template", ErrInvalidInput, executorParamNameOrKey(executorParamName, paramKey))
+		}
+		if rule.ValueSource != "" && rule.ValueSource != domain.TemplateParamValueSourceReleaseInput {
+			return fmt.Errorf("%w: param %s is fixed or derived by selected release template", ErrInvalidInput, executorParamNameOrKey(executorParamName, paramKey))
 		}
 		if strings.TrimSpace(item.ParamValue) == "" {
 			if rule.Required {
@@ -581,6 +612,7 @@ type releasedTemplateParamRule struct {
 	ParamKey          string
 	ExecutorParamName string
 	Required          bool
+	ValueSource       domain.TemplateParamValueSource
 }
 
 func buildReleaseTemplateScopeParamKey(scope domain.PipelineScope, paramKey string) string {
@@ -629,6 +661,138 @@ func templateUsesArgoCD(bindings []domain.ReleaseTemplateBinding) bool {
 		}
 	}
 	return false
+}
+
+func (uc *ReleaseOrderManager) materializeCreateTemplateParams(
+	ctx context.Context,
+	app appdomain.Application,
+	templateParams []domain.ReleaseTemplateParam,
+	input []CreateReleaseOrderParamInput,
+	envCode string,
+	gitRef string,
+	projectName string,
+	imageTag string,
+) ([]CreateReleaseOrderParamInput, error) {
+	submittedByTemplateKey := make(map[string]CreateReleaseOrderParamInput, len(input))
+	submittedByScopeParamKey := make(map[string]CreateReleaseOrderParamInput, len(input))
+	for _, item := range input {
+		templateKey := buildReleaseTemplateParamKey(item.PipelineScope, item.ParamKey, item.ExecutorParamName)
+		submittedByTemplateKey[templateKey] = item
+		submittedByScopeParamKey[buildReleaseTemplateScopeParamKey(item.PipelineScope, item.ParamKey)] = item
+	}
+
+	appKey := strings.TrimSpace(app.Key)
+	resolvedParams := make([]CreateReleaseOrderParamInput, 0, len(templateParams))
+	resolvedValues := map[domain.PipelineScope]map[string]string{
+		domain.PipelineScopeCI: {},
+		domain.PipelineScopeCD: {},
+	}
+
+	resolveSubmitted := func(item domain.ReleaseTemplateParam) (CreateReleaseOrderParamInput, bool) {
+		templateKey := buildReleaseTemplateParamKey(item.PipelineScope, item.ParamKey, item.ExecutorParamName)
+		if submitted, ok := submittedByTemplateKey[templateKey]; ok {
+			return submitted, true
+		}
+		submitted, ok := submittedByScopeParamKey[buildReleaseTemplateScopeParamKey(item.PipelineScope, item.ParamKey)]
+		return submitted, ok
+	}
+
+	appendResolved := func(item domain.ReleaseTemplateParam, value string, source domain.ValueSource) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if source == "" {
+			source = domain.ValueSourceReleaseInput
+		}
+		resolvedParams = append(resolvedParams, CreateReleaseOrderParamInput{
+			PipelineScope:     item.PipelineScope,
+			ParamKey:          strings.TrimSpace(item.ParamKey),
+			ExecutorParamName: strings.TrimSpace(item.ExecutorParamName),
+			ParamValue:        value,
+			ValueSource:       source,
+		})
+		paramKey := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if paramKey != "" {
+			resolvedValues[item.PipelineScope][paramKey] = value
+		}
+	}
+
+	for _, scope := range []domain.PipelineScope{domain.PipelineScopeCI, domain.PipelineScopeCD} {
+		for _, item := range templateParams {
+			if item.PipelineScope != scope {
+				continue
+			}
+			switch item.ValueSource {
+			case "", domain.TemplateParamValueSourceReleaseInput:
+				submitted, ok := resolveSubmitted(item)
+				if !ok {
+					continue
+				}
+				appendResolved(item, submitted.ParamValue, domain.ValueSourceReleaseInput)
+			case domain.TemplateParamValueSourceFixed:
+				appendResolved(item, item.FixedValue, domain.ValueSourceFixed)
+			case domain.TemplateParamValueSourceCIParam:
+				appendResolved(
+					item,
+					firstNonEmpty(
+						resolvedValues[domain.PipelineScopeCI][strings.ToLower(strings.TrimSpace(item.SourceParamKey))],
+						resolveCreateStandardFieldValue(strings.TrimSpace(item.SourceParamKey), envCode, projectName, gitRef, imageTag, appKey, resolvedValues),
+					),
+					domain.ValueSourceCIParam,
+				)
+			case domain.TemplateParamValueSourceBuiltin:
+				appendResolved(
+					item,
+					resolveCreateStandardFieldValue(strings.TrimSpace(item.SourceParamKey), envCode, projectName, gitRef, imageTag, appKey, resolvedValues),
+					domain.ValueSourceBuiltin,
+				)
+			default:
+				return nil, fmt.Errorf("%w: unsupported template param value_source %s", ErrInvalidInput, item.ValueSource)
+			}
+		}
+	}
+
+	return resolvedParams, nil
+}
+
+func resolveCreateStandardFieldValue(
+	key string,
+	envCode string,
+	projectName string,
+	gitRef string,
+	imageTag string,
+	appKey string,
+	resolved map[domain.PipelineScope]map[string]string,
+) string {
+	normalizedKey := strings.ToLower(strings.TrimSpace(key))
+	if normalizedKey == "" {
+		return ""
+	}
+	pickResolved := func(keys ...string) string {
+		for _, scope := range []domain.PipelineScope{domain.PipelineScopeCD, domain.PipelineScopeCI} {
+			for _, candidate := range keys {
+				if value := strings.TrimSpace(resolved[scope][strings.ToLower(strings.TrimSpace(candidate))]); value != "" {
+					return value
+				}
+			}
+		}
+		return ""
+	}
+	switch normalizedKey {
+	case "env", "env_code":
+		return firstNonEmpty(pickResolved("env", "env_code"), envCode)
+	case "project_name":
+		return firstNonEmpty(pickResolved("project_name"), projectName)
+	case "branch", "git_ref":
+		return firstNonEmpty(pickResolved("branch", "git_ref"), gitRef)
+	case "image_version", "image_tag":
+		return firstNonEmpty(pickResolved("image_version", "image_tag"), imageTag)
+	case "app_key":
+		return firstNonEmpty(pickResolved("app_key"), appKey)
+	default:
+		return pickResolved(normalizedKey)
+	}
 }
 
 func (uc *ReleaseOrderManager) resolveTemplateForCreate(
@@ -822,7 +986,7 @@ func (uc *ReleaseOrderManager) ensureRollbackDeploySnapshot(
 		argocdInstance,
 		appName,
 		repoURL,
-		strings.TrimSpace(app.GetTargetRevision()),
+		uc.resolveGitOpsTargetBranch(ctx, sourceOrder, sourceParams, argocdInstance, app),
 		sourcePath,
 		environment,
 		imageVersion,
@@ -1365,6 +1529,12 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 		)
 		return domain.ReleaseOrder{}, err
 	}
+	if err := uc.releaseExecutionLocks(ctx, id, domain.ExecutionLockStatusReleased); err != nil {
+		logx.Error("release_order", "cancel_release_lock_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+	}
 	logx.Info("release_order", "cancel_success",
 		logx.F("order_id", order.ID),
 		logx.F("order_no", order.OrderNo),
@@ -1459,8 +1629,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	startedAt := uc.now()
-	order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, &startedAt, nil, startedAt)
+	orderParams, err := uc.repo.ListParams(ctx, order.ID)
 	if err != nil {
 		logx.Error("release_order", "execute_failed", err,
 			logx.F("order_id", order.ID),
@@ -1469,7 +1638,38 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	orderParams, err := uc.repo.ListParams(ctx, order.ID)
+	precheck, err := uc.buildOrderPrecheck(ctx, order, executions, orderParams)
+	if err != nil {
+		logx.Error("release_order", "execute_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	if !precheck.Executable {
+		reason := strings.TrimSpace(precheck.ConflictMessage)
+		if reason == "" {
+			for _, item := range precheck.Items {
+				if item.Status == ReleaseOrderPrecheckItemStatusBlocked {
+					reason = strings.TrimSpace(item.Message)
+					break
+				}
+			}
+		}
+		if reason == "" {
+			reason = "当前发布单未通过执行前预检"
+		}
+		err := fmt.Errorf("%w: %s", ErrConcurrentReleaseBlocked, reason)
+		logx.Warn("release_order", "execute_failed",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("reason", reason),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+
+	startedAt := uc.now()
+	order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, &startedAt, nil, startedAt)
 	if err != nil {
 		logx.Error("release_order", "execute_failed", err,
 			logx.F("order_id", order.ID),
@@ -1649,6 +1849,32 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			logx.F("pipeline_scope", execution.PipelineScope),
 			logx.F("provider", execution.Provider),
 		)
+		guard, acquired, guardErr := uc.ensureExecutionLock(ctx, order, execution, orderParams)
+		if guardErr != nil {
+			uc.markExecutionStartFailed(ctx, order, execution, guardErr.Error())
+			logx.Error("release_order", "execution_lock_failed", guardErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+				logx.F("lock_key", guard.LockKey),
+			)
+			return guardErr
+		}
+		if !acquired {
+			if strings.TrimSpace(guard.Message) != "" {
+				_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, guard.Message)
+			}
+			logx.Info("release_order", "execution_waiting_for_lock",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+				logx.F("lock_key", guard.LockKey),
+				logx.F("conflict_strategy", guard.Settings.ConflictStrategy),
+			)
+			return nil
+		}
 		switch strings.ToLower(strings.TrimSpace(execution.Provider)) {
 		case string(pipelinedomain.ProviderJenkins):
 			// Jenkins 执行继续走现有触发链路。
@@ -1739,16 +1965,15 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			return fmt.Errorf("%w: jenkins job full name is empty", ErrInvalidInput)
 		}
 
-		buildParams := make(map[string]string)
-		for _, item := range orderParams {
-			if item.PipelineScope != execution.PipelineScope {
-				continue
-			}
-			name := strings.TrimSpace(item.ExecutorParamName)
-			if name == "" {
-				continue
-			}
-			buildParams[name] = strings.TrimSpace(item.ParamValue)
+		buildParams, err := uc.buildJenkinsExecutionParams(ctx, order, execution, orderParams, executions)
+		if err != nil {
+			logx.Error("release_order", "execution_start_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+			)
+			return err
 		}
 
 		triggerCode := scopeStepCode(execution.PipelineScope, "trigger_pipeline")
@@ -1823,6 +2048,144 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 	return nil
 }
 
+func (uc *ReleaseOrderManager) buildJenkinsExecutionParams(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	execution domain.ReleaseOrderExecution,
+	orderParams []domain.ReleaseOrderParam,
+	executions []domain.ReleaseOrderExecution,
+) (map[string]string, error) {
+	buildParams := make(map[string]string)
+	for _, item := range orderParams {
+		if item.PipelineScope != execution.PipelineScope {
+			continue
+		}
+		name := strings.TrimSpace(item.ExecutorParamName)
+		if name == "" {
+			continue
+		}
+		value := strings.TrimSpace(item.ParamValue)
+		if value == "" {
+			continue
+		}
+		buildParams[name] = value
+	}
+
+	if strings.TrimSpace(order.TemplateID) == "" {
+		return buildParams, nil
+	}
+	_, _, templateParams, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(order.TemplateID))
+	if err != nil {
+		return nil, err
+	}
+	if len(templateParams) == 0 {
+		return buildParams, nil
+	}
+
+	appKey := ""
+	if uc.appRepo != nil && strings.TrimSpace(order.ApplicationID) != "" {
+		if appRecord, appErr := uc.appRepo.GetByID(ctx, strings.TrimSpace(order.ApplicationID)); appErr == nil {
+			appKey = strings.TrimSpace(appRecord.Key)
+		}
+	}
+
+	for _, item := range templateParams {
+		if item.PipelineScope != execution.PipelineScope {
+			continue
+		}
+		executorParamName := strings.TrimSpace(item.ExecutorParamName)
+		if executorParamName == "" {
+			continue
+		}
+		if strings.TrimSpace(buildParams[executorParamName]) != "" {
+			continue
+		}
+		value := strings.TrimSpace(uc.resolveTemplateExecutionParamValue(order, execution.PipelineScope, item, orderParams, executions, appKey))
+		if value == "" {
+			if item.Required {
+				return nil, fmt.Errorf("%w: 未解析到 %s，无法继续执行 %s 管线", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(item.ParamName), strings.TrimSpace(item.ParamKey), executorParamName), strings.ToUpper(string(execution.PipelineScope)))
+			}
+			continue
+		}
+		buildParams[executorParamName] = value
+	}
+	return buildParams, nil
+}
+
+func (uc *ReleaseOrderManager) resolveTemplateExecutionParamValue(
+	order domain.ReleaseOrder,
+	scope domain.PipelineScope,
+	item domain.ReleaseTemplateParam,
+	orderParams []domain.ReleaseOrderParam,
+	executions []domain.ReleaseOrderExecution,
+	appKey string,
+) string {
+	paramKey := strings.TrimSpace(item.ParamKey)
+	if value := findReleaseParamValue(orderParams, scope, paramKey); value != "" {
+		return value
+	}
+	switch item.ValueSource {
+	case "", domain.TemplateParamValueSourceReleaseInput:
+		return ""
+	case domain.TemplateParamValueSourceFixed:
+		return strings.TrimSpace(item.FixedValue)
+	case domain.TemplateParamValueSourceCIParam:
+		return firstNonEmpty(
+			findReleaseParamValue(orderParams, domain.PipelineScopeCI, item.SourceParamKey),
+			uc.resolveStandardFieldValue(order, orderParams, executions, appKey, item.SourceParamKey),
+		)
+	case domain.TemplateParamValueSourceBuiltin:
+		return uc.resolveStandardFieldValue(order, orderParams, executions, appKey, item.SourceParamKey)
+	default:
+		return ""
+	}
+}
+
+func (uc *ReleaseOrderManager) resolveStandardFieldValue(
+	order domain.ReleaseOrder,
+	orderParams []domain.ReleaseOrderParam,
+	executions []domain.ReleaseOrderExecution,
+	appKey string,
+	key string,
+) string {
+	normalizedKey := strings.ToLower(strings.TrimSpace(key))
+	if normalizedKey == "" {
+		return ""
+	}
+	switch normalizedKey {
+	case "env", "env_code":
+		return firstNonEmpty(
+			findReleaseParamValue(orderParams, domain.PipelineScopeCD, "env", "env_code"),
+			findReleaseParamValue(orderParams, domain.PipelineScopeCI, "env", "env_code"),
+			strings.TrimSpace(order.EnvCode),
+		)
+	case "project_name":
+		return firstNonEmpty(
+			findReleaseParamValue(orderParams, domain.PipelineScopeCD, "project_name"),
+			findReleaseParamValue(orderParams, domain.PipelineScopeCI, "project_name"),
+			strings.TrimSpace(order.SonService),
+		)
+	case "branch", "git_ref":
+		return firstNonEmpty(
+			findReleaseParamValue(orderParams, domain.PipelineScopeCD, "branch", "git_ref"),
+			findReleaseParamValue(orderParams, domain.PipelineScopeCI, "branch", "git_ref"),
+			strings.TrimSpace(order.GitRef),
+		)
+	case "image_version", "image_tag":
+		return uc.resolveArgoCDImageVersion(order, orderParams, executions)
+	case "app_key":
+		return strings.TrimSpace(appKey)
+	case "app_name":
+		return strings.TrimSpace(order.ApplicationName)
+	default:
+		return firstNonEmpty(
+			findReleaseParamValue(orderParams, domain.PipelineScopeCD, normalizedKey),
+			findReleaseParamValue(orderParams, domain.PipelineScopeCI, normalizedKey),
+			findReleaseParamValue(orderParams, "", normalizedKey),
+		)
+	}
+}
+
 func (uc *ReleaseOrderManager) markExecutionStartFailed(
 	ctx context.Context,
 	order domain.ReleaseOrder,
@@ -1868,6 +2231,13 @@ func (uc *ReleaseOrderManager) markExecutionStartFailed(
 	}
 	if _, err := uc.repo.UpdateStatus(persistCtx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
 		logx.Error("release_order", "execution_mark_failed_persist_order_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("execution_id", execution.ID),
+			logx.F("pipeline_scope", execution.PipelineScope),
+		)
+	}
+	if err := uc.releaseExecutionLocks(persistCtx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+		logx.Error("release_order", "execution_mark_failed_release_lock_failed", err,
 			logx.F("order_id", order.ID),
 			logx.F("execution_id", execution.ID),
 			logx.F("pipeline_scope", execution.PipelineScope),

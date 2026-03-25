@@ -301,14 +301,46 @@ async function loadRecentReleases(options: { silent?: boolean } = {}) {
     loadingRecentReleases.value = true
   }
   try {
-    const response = await listReleaseOrders({
-      page: 1,
-      page_size: 300,
+    const applicationIDs = dataSource.value.map((item) => String(item.id || '').trim()).filter(Boolean)
+    if (applicationIDs.length === 0) {
+      recentReleaseOrders.value = []
+      return
+    }
+
+    const results = await Promise.allSettled(
+      applicationIDs.map((applicationID) =>
+        listReleaseOrders(
+          {
+            application_id: applicationID,
+            page: 1,
+            page_size: 12,
+          },
+          {
+            timeout: 30_000,
+          },
+        ),
+      ),
+    )
+
+    const merged: ReleaseOrder[] = []
+    let successCount = 0
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') {
+        return
+      }
+      successCount += 1
+      merged.push(...result.value.data)
     })
-    recentReleaseOrders.value = response.data
+
+    if (successCount === 0) {
+      throw new Error('recent release requests all failed')
+    }
+
+    recentReleaseOrders.value = merged.sort((left, right) =>
+      dayjs(right.created_at).valueOf() - dayjs(left.created_at).valueOf(),
+    )
   } catch (error) {
-    recentReleaseOrders.value = []
-    if (!options.silent && !isHTTPStatus(error, 403)) {
+    if (!options.silent && !isHTTPStatus(error, 403) && recentReleaseOrders.value.length === 0) {
       message.error(extractHTTPErrorMessage(error, '最近发布动态加载失败'))
     }
   } finally {
@@ -320,17 +352,26 @@ async function loadRecentReleases(options: { silent?: boolean } = {}) {
 
 function handleSearch() {
   listStore.setPage(1, listStore.pageSize)
-  void Promise.all([loadApplications(), loadRecentReleases()])
+  void (async () => {
+    await loadApplications()
+    await loadRecentReleases()
+  })()
 }
 
 function handleReset() {
   listStore.resetFilters()
-  void Promise.all([loadApplications(), loadRecentReleases()])
+  void (async () => {
+    await loadApplications()
+    await loadRecentReleases()
+  })()
 }
 
 function handlePageChange(page: number, pageSize: number) {
   listStore.setPage(page, pageSize)
-  void loadApplications()
+  void (async () => {
+    await loadApplications({ preserveCollapse: true })
+    await loadRecentReleases()
+  })()
 }
 
 function openIntroDrawer() {
@@ -386,19 +427,13 @@ function toReleaseOrderDetail(id: string) {
 }
 
 async function refreshWorkbench() {
-  await Promise.all([
-    loadApplications({ preserveCollapse: true }),
-    loadTemplateAvailability(),
-    loadRecentReleases(),
-  ])
+  await loadApplications({ preserveCollapse: true })
+  await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
 }
 
 async function refreshWorkbenchSilently() {
-  await Promise.all([
-    loadApplications({ silent: true, preserveCollapse: true }),
-    loadTemplateAvailability({ silent: true }),
-    loadRecentReleases({ silent: true }),
-  ])
+  await loadApplications({ silent: true, preserveCollapse: true })
+  await Promise.all([loadTemplateAvailability({ silent: true }), loadRecentReleases({ silent: true })])
 }
 
 function toggleCardCollapsed(applicationID: string) {
@@ -436,7 +471,8 @@ async function handleDelete(id: string) {
     if (dataSource.value.length === 1 && listStore.page > 1) {
       listStore.setPage(listStore.page - 1, listStore.pageSize)
     }
-    await Promise.all([loadApplications({ preserveCollapse: true }), loadRecentReleases()])
+    await loadApplications({ preserveCollapse: true })
+    await loadRecentReleases()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用删除失败'))
   } finally {
@@ -550,7 +586,10 @@ function compactReleaseRef(order: ReleaseOrder) {
 }
 
 onMounted(() => {
-  void Promise.all([loadApplications(), loadTemplateAvailability(), loadRecentReleases()])
+  void (async () => {
+    await loadApplications()
+    await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
+  })()
   startAutoRefresh()
 })
 

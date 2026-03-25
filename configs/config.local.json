@@ -58,6 +58,13 @@
     "username": "shuang"
   },
   "release": {
+    "concurrency": {
+      "allow_admin_override": true,
+      "conflict_strategy": "reject",
+      "enabled": true,
+      "lock_scope": "application_env",
+      "lock_timeout_sec": 1800
+    },
     "env_options": [
       "dev",
       "prod"

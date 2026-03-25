@@ -38,7 +38,8 @@ type ReleaseSettingsResponse struct {
 }
 
 type UpdateReleaseSettingsRequest struct {
-	EnvOptions []string `json:"env_options"`
+	EnvOptions  []string                                `json:"env_options"`
+	Concurrency usecase.ReleaseConcurrencySettingsInput `json:"concurrency"`
 }
 
 func (h *SystemSettingsHandler) GetReleaseSettings(c *gin.Context) {
@@ -123,7 +124,8 @@ func (h *SystemSettingsHandler) UpdateReleaseSettings(c *gin.Context) {
 		return
 	}
 	output, err := h.update.Execute(c.Request.Context(), usecase.UpdateReleaseSettingsInput{
-		EnvOptions: req.EnvOptions,
+		EnvOptions:  req.EnvOptions,
+		Concurrency: req.Concurrency,
 	})
 	if err != nil {
 		switch {

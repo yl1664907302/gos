@@ -19,6 +19,17 @@ import (
 	"gos/internal/support/logx"
 )
 
+var templateBuiltinSourceKeys = map[string]struct{}{
+	"app_key":       {},
+	"app_name":      {},
+	"env":           {},
+	"env_code":      {},
+	"branch":        {},
+	"git_ref":       {},
+	"image_version": {},
+	"image_tag":     {},
+}
+
 type ReleaseTemplateManager struct {
 	repo         releasedomain.Repository
 	appRepo      appdomain.Repository
@@ -52,30 +63,41 @@ type gitOpsValuesTargetSelection struct {
 }
 
 type CreateReleaseTemplateInput struct {
-	Name          string
-	ApplicationID string
-	CIBindingID   string
-	CDBindingID   string
-	CDProvider    pipelinedomain.Provider
-	GitOpsType    releasedomain.GitOpsType
-	Status        releasedomain.TemplateStatus
-	Remark        string
-	CIParamDefIDs []string
-	CDParamDefIDs []string
-	GitOpsRules   []ReleaseTemplateGitOpsRuleInput
+	Name           string
+	ApplicationID  string
+	CIBindingID    string
+	CDBindingID    string
+	CDProvider     pipelinedomain.Provider
+	GitOpsType     releasedomain.GitOpsType
+	Status         releasedomain.TemplateStatus
+	Remark         string
+	CIParamDefIDs  []string
+	CDParamDefIDs  []string
+	CIParamConfigs []ReleaseTemplateParamConfigInput
+	CDParamConfigs []ReleaseTemplateParamConfigInput
+	GitOpsRules    []ReleaseTemplateGitOpsRuleInput
 }
 
 type UpdateReleaseTemplateInput struct {
-	Name          string
-	CIBindingID   string
-	CDBindingID   string
-	CDProvider    pipelinedomain.Provider
-	GitOpsType    releasedomain.GitOpsType
-	Status        releasedomain.TemplateStatus
-	Remark        string
-	CIParamDefIDs []string
-	CDParamDefIDs []string
-	GitOpsRules   []ReleaseTemplateGitOpsRuleInput
+	Name           string
+	CIBindingID    string
+	CDBindingID    string
+	CDProvider     pipelinedomain.Provider
+	GitOpsType     releasedomain.GitOpsType
+	Status         releasedomain.TemplateStatus
+	Remark         string
+	CIParamDefIDs  []string
+	CDParamDefIDs  []string
+	CIParamConfigs []ReleaseTemplateParamConfigInput
+	CDParamConfigs []ReleaseTemplateParamConfigInput
+	GitOpsRules    []ReleaseTemplateGitOpsRuleInput
+}
+
+type ReleaseTemplateParamConfigInput struct {
+	ExecutorParamDefID string
+	ValueSource        releasedomain.TemplateParamValueSource
+	SourceParamKey     string
+	FixedValue         string
 }
 
 type ListReleaseTemplateInput struct {
@@ -155,6 +177,8 @@ func (uc *ReleaseTemplateManager) Create(
 		input.GitOpsType,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
+		input.CIParamConfigs,
+		input.CDParamConfigs,
 		input.GitOpsRules,
 	)
 	if err != nil {
@@ -309,6 +333,8 @@ func (uc *ReleaseTemplateManager) Update(
 		input.GitOpsType,
 		input.CIParamDefIDs,
 		input.CDParamDefIDs,
+		input.CIParamConfigs,
+		input.CDParamConfigs,
 		input.GitOpsRules,
 	)
 	if err != nil {
@@ -393,6 +419,8 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	gitopsType releasedomain.GitOpsType,
 	ciParamDefIDs []string,
 	cdParamDefIDs []string,
+	ciParamConfigs []ReleaseTemplateParamConfigInput,
+	cdParamConfigs []ReleaseTemplateParamConfigInput,
 	gitopsRuleInputs []ReleaseTemplateGitOpsRuleInput,
 ) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, string, error) {
 	bindings := make([]releasedomain.ReleaseTemplateBinding, 0, 2)
@@ -410,6 +438,8 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		ciBindingID,
 		"",
 		ciParamDefIDs,
+		ciParamConfigs,
+		nil,
 		1,
 	)
 	if err != nil {
@@ -427,6 +457,8 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		cdBindingID,
 		cdProvider,
 		cdParamDefIDs,
+		cdParamConfigs,
+		ciParams,
 		2,
 	)
 	if err != nil {
@@ -464,12 +496,15 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 	bindingID string,
 	desiredProvider pipelinedomain.Provider,
 	paramDefIDs []string,
+	paramConfigs []ReleaseTemplateParamConfigInput,
+	availableCIParams []releasedomain.ReleaseTemplateParam,
 	sortNo int,
 ) (*releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, string, error) {
 	bindingID = strings.TrimSpace(bindingID)
+	normalizedConfigs := normalizeTemplateParamConfigInputs(paramDefIDs, paramConfigs)
 	if bindingID == "" {
 		if scope == releasedomain.PipelineScopeCD && desiredProvider == pipelinedomain.ProviderArgoCD {
-			if len(normalizeStringIDs(paramDefIDs)) > 0 {
+			if len(normalizedConfigs) > 0 {
 				return nil, nil, "", fmt.Errorf("%w: argocd cd 暂不支持额外执行器参数", ErrInvalidInput)
 			}
 			if uc.appRepo == nil {
@@ -492,7 +527,7 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 				SortNo:        sortNo,
 			}, nil, app.Name, nil
 		}
-		if len(normalizeStringIDs(paramDefIDs)) > 0 {
+		if len(normalizedConfigs) > 0 {
 			return nil, nil, "", fmt.Errorf("%w: %s binding is required", ErrInvalidInput, strings.ToUpper(string(scope)))
 		}
 		return nil, nil, "", nil
@@ -535,17 +570,29 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 		SortNo:        sortNo,
 	}
 
-	normalizedIDs := normalizeStringIDs(paramDefIDs)
-	if len(normalizedIDs) == 0 {
+	if len(normalizedConfigs) == 0 {
 		return templateBinding, nil, binding.ApplicationName, nil
 	}
 	if binding.Provider != pipelinedomain.ProviderJenkins {
 		return nil, nil, "", fmt.Errorf("%w: only jenkins binding supports template params", ErrInvalidInput)
 	}
 
-	params := make([]releasedomain.ReleaseTemplateParam, 0, len(normalizedIDs))
-	for idx, id := range normalizedIDs {
-		paramDef, err := uc.paramRepo.GetByID(ctx, id)
+	builtinParams, err := uc.listBuiltinPlatformParamsForTemplate(ctx)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	params := make([]releasedomain.ReleaseTemplateParam, 0, len(normalizedConfigs))
+	ciSourceParams := make(map[string]releasedomain.ReleaseTemplateParam)
+	for _, item := range availableCIParams {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		ciSourceParams[key] = item
+	}
+	for idx, config := range normalizedConfigs {
+		paramDef, err := uc.paramRepo.GetByID(ctx, config.ExecutorParamDefID)
 		if err != nil {
 			return nil, nil, "", err
 		}
@@ -566,7 +613,58 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 		if dict.Status != platformparamdomain.StatusEnabled {
 			return nil, nil, "", fmt.Errorf("%w: platform param dict is disabled", ErrInvalidInput)
 		}
-		params = append(params, releasedomain.ReleaseTemplateParam{
+		valueSource := config.ValueSource
+		if valueSource == "" {
+			valueSource = releasedomain.TemplateParamValueSourceReleaseInput
+		}
+		if !valueSource.Valid() {
+			return nil, nil, "", fmt.Errorf("%w: template param value_source is invalid", ErrInvalidInput)
+		}
+		switch scope {
+		case releasedomain.PipelineScopeCI:
+			if valueSource != releasedomain.TemplateParamValueSourceReleaseInput && valueSource != releasedomain.TemplateParamValueSourceFixed {
+				return nil, nil, "", fmt.Errorf("%w: CI 参数仅支持发布时填写或固定值", ErrInvalidInput)
+			}
+		case releasedomain.PipelineScopeCD:
+			if valueSource != releasedomain.TemplateParamValueSourceReleaseInput &&
+				valueSource != releasedomain.TemplateParamValueSourceFixed &&
+				valueSource != releasedomain.TemplateParamValueSourceCIParam &&
+				valueSource != releasedomain.TemplateParamValueSourceBuiltin {
+				return nil, nil, "", fmt.Errorf("%w: CD 管线参数来源无效", ErrInvalidInput)
+			}
+		}
+
+		sourceParamKey := strings.ToLower(strings.TrimSpace(config.SourceParamKey))
+		sourceParamName := ""
+		fixedValue := strings.TrimSpace(config.FixedValue)
+		switch valueSource {
+		case releasedomain.TemplateParamValueSourceFixed:
+			if fixedValue == "" {
+				return nil, nil, "", fmt.Errorf("%w: 固定值不能为空：%s", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(dict.Name), paramKey))
+			}
+		case releasedomain.TemplateParamValueSourceCIParam:
+			if sourceParamKey == "" {
+				return nil, nil, "", fmt.Errorf("%w: 请选择来源 CI 标准字段：%s", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(dict.Name), paramKey))
+			}
+			sourceParam, ok := ciSourceParams[sourceParamKey]
+			if !ok {
+				return nil, nil, "", fmt.Errorf("%w: CD 参数只能引用已选择的 CI 标准字段：%s", ErrInvalidInput, sourceParamKey)
+			}
+			sourceParamName = firstNonEmpty(sourceParam.ParamName, sourceParamKey)
+		case releasedomain.TemplateParamValueSourceBuiltin:
+			if sourceParamKey == "" {
+				return nil, nil, "", fmt.Errorf("%w: 请选择来源内置字段：%s", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(dict.Name), paramKey))
+			}
+			builtinDict, ok := builtinParams[sourceParamKey]
+			if !ok {
+				return nil, nil, "", fmt.Errorf("%w: 仅允许引用已启用的内置字段：%s", ErrInvalidInput, sourceParamKey)
+			}
+			sourceParamName = firstNonEmpty(strings.TrimSpace(builtinDict.Name), sourceParamKey)
+		default:
+			sourceParamKey = ""
+		}
+
+		templateParam := releasedomain.ReleaseTemplateParam{
 			ID:                 generateID("rtp"),
 			TemplateBindingID:  templateBinding.ID,
 			PipelineScope:      scope,
@@ -575,11 +673,56 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 			ParamKey:           paramKey,
 			ParamName:          strings.TrimSpace(dict.Name),
 			ExecutorParamName:  strings.TrimSpace(paramDef.ExecutorParamName),
+			ValueSource:        valueSource,
+			SourceParamKey:     sourceParamKey,
+			SourceParamName:    sourceParamName,
+			FixedValue:         fixedValue,
 			Required:           paramDef.Required,
 			SortNo:             idx + 1,
-		})
+		}
+		params = append(params, templateParam)
+		if scope == releasedomain.PipelineScopeCI {
+			ciSourceParams[paramKey] = templateParam
+		}
 	}
 	return templateBinding, params, binding.ApplicationName, nil
+}
+
+func normalizeTemplateParamConfigInputs(
+	paramDefIDs []string,
+	configs []ReleaseTemplateParamConfigInput,
+) []ReleaseTemplateParamConfigInput {
+	if len(configs) > 0 {
+		result := make([]ReleaseTemplateParamConfigInput, 0, len(configs))
+		seen := make(map[string]struct{}, len(configs))
+		for _, item := range configs {
+			id := strings.TrimSpace(item.ExecutorParamDefID)
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			result = append(result, ReleaseTemplateParamConfigInput{
+				ExecutorParamDefID: id,
+				ValueSource:        releasedomain.TemplateParamValueSource(strings.ToLower(strings.TrimSpace(string(item.ValueSource)))),
+				SourceParamKey:     strings.TrimSpace(item.SourceParamKey),
+				FixedValue:         item.FixedValue,
+			})
+		}
+		return result
+	}
+
+	ids := normalizeStringIDs(paramDefIDs)
+	result := make([]ReleaseTemplateParamConfigInput, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, ReleaseTemplateParamConfigInput{
+			ExecutorParamDefID: id,
+			ValueSource:        releasedomain.TemplateParamValueSourceReleaseInput,
+		})
+	}
+	return result
 }
 
 func normalizeStringIDs(values []string) []string {
@@ -835,10 +978,8 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 func (uc *ReleaseTemplateManager) listBuiltinPlatformParamsForTemplate(
 	ctx context.Context,
 ) (map[string]platformparamdomain.PlatformParamDict, error) {
-	builtin := true
 	status := platformparamdomain.StatusEnabled
 	items, _, err := uc.platformRepo.List(ctx, platformparamdomain.ListFilter{
-		Builtin:  &builtin,
 		Status:   &status,
 		Page:     1,
 		PageSize: 500,
@@ -851,6 +992,11 @@ func (uc *ReleaseTemplateManager) listBuiltinPlatformParamsForTemplate(
 		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
 		if key == "" {
 			continue
+		}
+		if !item.Builtin {
+			if _, ok := templateBuiltinSourceKeys[key]; !ok {
+				continue
+			}
 		}
 		result[key] = item
 	}
