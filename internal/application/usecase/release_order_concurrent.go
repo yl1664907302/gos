@@ -260,12 +260,18 @@ func resolveConcurrentBatchQueueState(
 	hasRunningExecution bool,
 ) ReleaseOrderConcurrentBatchQueueState {
 	switch status {
-	case domain.OrderStatusSuccess:
+	case domain.OrderStatusSuccess, domain.OrderStatusDeploySuccess:
 		return ReleaseOrderConcurrentBatchQueueStateSuccess
-	case domain.OrderStatusFailed:
+	case domain.OrderStatusFailed, domain.OrderStatusDeployFailed:
 		return ReleaseOrderConcurrentBatchQueueStateFailed
 	case domain.OrderStatusCancelled:
 		return ReleaseOrderConcurrentBatchQueueStateCancelled
+	case domain.OrderStatusQueued:
+		return ReleaseOrderConcurrentBatchQueueStateQueued
+	case domain.OrderStatusDeploying:
+		return ReleaseOrderConcurrentBatchQueueStateExecuting
+	case domain.OrderStatusPending, domain.OrderStatusApproved:
+		return ReleaseOrderConcurrentBatchQueueStatePending
 	}
 	if hasRunningExecution {
 		return ReleaseOrderConcurrentBatchQueueStateExecuting

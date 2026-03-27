@@ -44,6 +44,7 @@ import { useAuthStore } from "../../stores/auth";
 import type {
   ReleaseOperationType,
   ReleaseOrder,
+  ReleaseOrderBusinessStatus,
   ReleaseOrderExecution,
   ReleaseOrderConcurrentBatchProgress,
   ReleaseOrderConcurrentBatchQueueState,
@@ -140,31 +141,72 @@ const scopeLogStates = reactive<Record<ReleasePipelineScope, ScopeLogState>>({
 });
 
 const orderID = computed(() => String(route.params.id || "").trim());
+const currentBusinessStatus = computed<ReleaseOrderBusinessStatus>(() => {
+  if (!order.value) {
+    return "pending_execution";
+  }
+  if (order.value.business_status) {
+    return order.value.business_status;
+  }
+  switch (order.value.status) {
+    case "draft":
+      return "draft";
+    case "pending_approval":
+      return "pending_approval";
+    case "approving":
+      return "approving";
+    case "approved":
+      return "approved";
+    case "rejected":
+      return "rejected";
+    case "queued":
+      return "queued";
+    case "deploying":
+      return "deploying";
+    case "deploy_success":
+    case "success":
+      return "deploy_success";
+    case "deploy_failed":
+    case "failed":
+      return "deploy_failed";
+    case "running":
+      return "deploying";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "pending_execution";
+  }
+});
 const canViewParamSnapshot = computed(() =>
   authStore.hasPermission("release.param_snapshot.view"),
 );
 const canCancel = computed(
-  () => order.value?.status === "pending" || order.value?.status === "running",
+  () =>
+    currentBusinessStatus.value === "pending_execution" ||
+    currentBusinessStatus.value === "approved" ||
+    currentBusinessStatus.value === "queued" ||
+    currentBusinessStatus.value === "deploying",
 );
 const precheckBlocked = computed(
   () => Boolean(precheck.value) && !precheck.value?.executable,
 );
 const canExecute = computed(
   () =>
-    order.value?.status === "pending" &&
+    (currentBusinessStatus.value === "pending_execution" ||
+      currentBusinessStatus.value === "approved") &&
     !executeLocked.value &&
     !precheckBlocked.value,
 );
 const canRollback = computed(
   () =>
-    order.value?.status === "success" &&
+    currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
       .toLowerCase() === "argocd",
 );
 const canReplay = computed(
   () =>
-    order.value?.status === "success" &&
+    currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
       .toLowerCase() !== "argocd",
@@ -173,29 +215,38 @@ const shouldAutoRefresh = computed(() => {
   if (!order.value) {
     return true;
   }
-  return order.value.status === "pending" || order.value.status === "running";
+  return [
+    "pending_execution",
+    "queued",
+    "deploying",
+    "approved",
+  ].includes(currentBusinessStatus.value);
 });
 const shouldKeepLogStreaming = computed(() => {
   if (!order.value) {
     return true;
   }
-  return order.value.status === "pending" || order.value.status === "running";
+  return ["queued", "deploying"].includes(currentBusinessStatus.value);
 });
 const shouldLoadPrecheck = computed(() => {
   if (!order.value) {
     return false;
   }
-  return order.value.status === "pending" || order.value.status === "running";
+  return ["pending_execution", "queued", "deploying"].includes(
+    currentBusinessStatus.value,
+  );
 });
 const showPrecheckCard = computed(() => {
   if (precheckLoading.value) {
     return true;
   }
-  if (order.value?.status === "pending") {
+  if (currentBusinessStatus.value === "pending_execution") {
     return true;
   }
   return Boolean(
-    order.value?.status === "running" && precheck.value?.waiting_for_lock,
+    (currentBusinessStatus.value === "queued" ||
+      currentBusinessStatus.value === "deploying") &&
+      precheck.value?.waiting_for_lock,
   );
 });
 
@@ -349,15 +400,15 @@ const spotlightTone = computed<"error" | "processing" | "success" | "warning">(
     if (!order.value) {
       return "warning";
     }
-    if (isQueuedInConcurrentBatch.value) {
+    if (currentBusinessStatus.value === "queued" || isQueuedInConcurrentBatch.value) {
       return "warning";
     }
-    switch (order.value.status) {
-      case "failed":
+    switch (currentBusinessStatus.value) {
+      case "deploy_failed":
         return "error";
-      case "running":
+      case "deploying":
         return "processing";
-      case "success":
+      case "deploy_success":
         return "success";
       default:
         return "warning";
@@ -371,15 +422,15 @@ const spotlightStatusKey = computed<
   if (!order.value) {
     return "pending";
   }
-  if (isQueuedInConcurrentBatch.value) {
+  if (currentBusinessStatus.value === "queued" || isQueuedInConcurrentBatch.value) {
     return "queued";
   }
-  switch (order.value.status) {
-    case "failed":
+  switch (currentBusinessStatus.value) {
+    case "deploy_failed":
       return "failed";
-    case "running":
+    case "deploying":
       return "running";
-    case "success":
+    case "deploy_success":
       return "success";
     case "cancelled":
       return "cancelled";
@@ -403,26 +454,26 @@ const spotlightMeta = computed(() => {
   if (!order.value) {
     return "等待获取发布详情";
   }
-  return `发布单状态 · ${statusText(order.value.status)}`;
+  return `发布单状态 · ${statusText(currentBusinessStatus.value)}`;
 });
 
 const spotlightTitle = computed(() => {
   if (!order.value) {
     return "等待加载发布状态";
   }
-  if (isQueuedInConcurrentBatch.value) {
+  if (currentBusinessStatus.value === "queued" || isQueuedInConcurrentBatch.value) {
     return "发布排队中，等待前序发布完成";
   }
-  if (order.value.status === "failed") {
+  if (currentBusinessStatus.value === "deploy_failed") {
     return "发布失败，需要人工介入";
   }
-  if (order.value.status === "running") {
+  if (currentBusinessStatus.value === "deploying") {
     return "发布执行中";
   }
-  if (order.value.status === "success") {
+  if (currentBusinessStatus.value === "deploy_success") {
     return "发布已完成";
   }
-  if (order.value.status === "cancelled") {
+  if (currentBusinessStatus.value === "cancelled") {
     return "发布已取消";
   }
   return "发布待执行";
@@ -450,7 +501,7 @@ const spotlightDescription = computed(() => {
   if (!order.value) {
     return "正在加载发布详情";
   }
-  return `当前状态：${statusText(order.value.status)}`;
+  return `当前状态：${statusText(currentBusinessStatus.value)}`;
 });
 
 const executionSections = computed(() =>
@@ -735,12 +786,33 @@ function formatTimeCompact(value: string | null) {
 
 function statusText(
   status:
+    | ReleaseOrderBusinessStatus
     | ReleaseOrderStatus
     | ReleaseOrderStep["status"]
     | ReleasePipelineStageStatus
     | ReleaseOrderExecution["status"],
 ) {
   switch (status) {
+    case "draft":
+      return "草稿";
+    case "pending_execution":
+      return "待执行";
+    case "pending_approval":
+      return "待审批";
+    case "approving":
+      return "审批中";
+    case "approved":
+      return "已批准";
+    case "rejected":
+      return "审批拒绝";
+    case "queued":
+      return "排队中";
+    case "deploying":
+      return "发布中";
+    case "deploy_success":
+      return "发布成功";
+    case "deploy_failed":
+      return "发布失败";
     case "pending":
       return "待执行";
     case "running":
@@ -760,18 +832,28 @@ function statusText(
 
 function statusToneClass(
   status:
+    | ReleaseOrderBusinessStatus
     | ReleaseOrderStatus
     | ReleaseOrderStep["status"]
     | ReleasePipelineStageStatus
     | ReleaseOrderExecution["status"],
 ) {
   switch (status) {
+    case "deploy_success":
     case "success":
       return "status-pill-success";
+    case "deploy_failed":
+    case "rejected":
     case "failed":
       return "status-pill-failed";
+    case "deploying":
+    case "approving":
     case "running":
       return "status-pill-running";
+    case "queued":
+    case "approved":
+    case "pending_approval":
+      return "status-pill-warning";
     case "cancelled":
       return "status-pill-neutral";
     case "skipped":

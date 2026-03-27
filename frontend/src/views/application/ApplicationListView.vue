@@ -21,10 +21,44 @@ import { listReleaseOrders, listAllReleaseTemplates } from '../../api/release'
 import { useApplicationListStore } from '../../stores/application-list'
 import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
-import type { ReleaseOperationType, ReleaseOrder, ReleaseOrderStatus } from '../../types/release'
+import type { ReleaseOperationType, ReleaseOrder, ReleaseOrderBusinessStatus } from '../../types/release'
 import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
 type MetricTone = 'default' | 'success' | 'running' | 'danger'
+
+function releaseBusinessStatus(order: Pick<ReleaseOrder, 'status' | 'business_status'>): ReleaseOrderBusinessStatus {
+  if (order.business_status) {
+    return order.business_status
+  }
+  switch (order.status) {
+    case 'draft':
+      return 'draft'
+    case 'pending_approval':
+      return 'pending_approval'
+    case 'approving':
+      return 'approving'
+    case 'approved':
+      return 'approved'
+    case 'rejected':
+      return 'rejected'
+    case 'queued':
+      return 'queued'
+    case 'deploying':
+      return 'deploying'
+    case 'deploy_success':
+    case 'success':
+      return 'deploy_success'
+    case 'deploy_failed':
+    case 'failed':
+      return 'deploy_failed'
+    case 'running':
+      return 'deploying'
+    case 'cancelled':
+      return 'cancelled'
+    default:
+      return 'pending_execution'
+  }
+}
 
 interface WorkbenchEnvSnapshot {
   envCode: string
@@ -109,7 +143,7 @@ const workbenchCards = computed<WorkbenchCard[]>(() =>
       envSnapshots,
       templateNames,
       releaseReady: canReleaseApplication(appID),
-      runningCount: orders.filter((item) => item.status === 'running').length,
+      runningCount: orders.filter((item) => releaseBusinessStatus(item) === 'deploying').length,
     }
   }),
 )
@@ -117,8 +151,8 @@ const workbenchCards = computed<WorkbenchCard[]>(() =>
 const overviewMetrics = computed(() => {
   const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
   const today = dayjs()
-  const runningCount = new Set(visibleOrders.filter((item) => item.status === 'running').map((item) => item.id)).size
-  const failedToday = visibleOrders.filter((item) => item.status === 'failed' && dayjs(item.updated_at).isSame(today, 'day')).length
+  const runningCount = new Set(visibleOrders.filter((item) => releaseBusinessStatus(item) === 'deploying').map((item) => item.id)).size
+  const failedToday = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'deploy_failed' && dayjs(item.updated_at).isSame(today, 'day')).length
   return [
     { key: 'applications', label: '应用总数', value: String(total.value), tone: 'default' as MetricTone, icon: AppstoreOutlined },
     {
@@ -147,7 +181,7 @@ const overviewMetrics = computed(() => {
 
 const spotlightCard = computed(() => {
   const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
-  const failed = visibleOrders.find((item) => item.status === 'failed')
+  const failed = visibleOrders.find((item) => releaseBusinessStatus(item) === 'deploy_failed')
   if (failed) {
     return {
       tone: 'danger' as MetricTone,
@@ -155,10 +189,10 @@ const spotlightCard = computed(() => {
       title: '优先处理失败发布',
       text: `${failed.application_name} · ${failed.env_code || '未标注环境'}`,
       meta: `最近失败单：${failed.order_no}`,
-      status: failed.status,
+      status: releaseBusinessStatus(failed),
     }
   }
-  const running = visibleOrders.find((item) => item.status === 'running')
+  const running = visibleOrders.find((item) => releaseBusinessStatus(item) === 'deploying')
   if (running) {
     return {
       tone: 'running' as MetricTone,
@@ -166,7 +200,7 @@ const spotlightCard = computed(() => {
       title: '有发布正在执行',
       text: `${running.application_name} · ${running.env_code || '未标注环境'}`,
       meta: `执行中：${running.order_no}`,
-      status: running.status,
+      status: releaseBusinessStatus(running),
     }
   }
   const ready = workbenchCards.value.find((item) => item.releaseReady)
@@ -177,7 +211,7 @@ const spotlightCard = computed(() => {
       title: '发布入口已就绪',
       text: `${ready.application.name} 已具备模板，可直接发起发布`,
       meta: ready.templateNames.length > 0 ? `当前模板：${ready.templateNames[0]}` : '模板待接入',
-      status: 'success' as ReleaseOrderStatus,
+      status: 'deploy_success' as ReleaseOrderBusinessStatus,
     }
   }
   return {
@@ -186,7 +220,7 @@ const spotlightCard = computed(() => {
     title: '先完善应用配置',
     text: '先检查模板、绑定与负责人信息，再进入发布链路。',
     meta: '没有可直接发布的应用时，优先补齐发布模板。',
-    status: 'pending' as ReleaseOrderStatus,
+    status: 'pending_execution' as ReleaseOrderBusinessStatus,
   }
 })
 
@@ -488,14 +522,28 @@ function applicationStatusClass(status: Application['status']) {
   return status === 'active' ? 'app-state-chip-active' : 'app-state-chip-inactive'
 }
 
-function releaseStatusText(status: ReleaseOrderStatus) {
+function releaseStatusText(status: ReleaseOrderBusinessStatus) {
   switch (status) {
-    case 'success':
-      return '成功'
-    case 'running':
-      return '执行中'
-    case 'failed':
-      return '失败'
+    case 'deploy_success':
+      return '发布成功'
+    case 'deploying':
+      return '发布中'
+    case 'deploy_failed':
+      return '发布失败'
+    case 'queued':
+      return '排队中'
+    case 'pending_execution':
+      return '待执行'
+    case 'approved':
+      return '已批准'
+    case 'pending_approval':
+      return '待审批'
+    case 'approving':
+      return '审批中'
+    case 'rejected':
+      return '审批拒绝'
+    case 'draft':
+      return '草稿'
     case 'cancelled':
       return '已取消'
     default:
@@ -503,14 +551,19 @@ function releaseStatusText(status: ReleaseOrderStatus) {
   }
 }
 
-function releaseStatusClass(status: ReleaseOrderStatus) {
+function releaseStatusClass(status: ReleaseOrderBusinessStatus) {
   switch (status) {
-    case 'success':
+    case 'deploy_success':
       return 'env-status-success'
-    case 'running':
+    case 'deploying':
       return 'env-status-running'
-    case 'failed':
+    case 'deploy_failed':
       return 'env-status-failed'
+    case 'pending_execution':
+    case 'queued':
+    case 'pending_approval':
+    case 'approving':
+      return 'env-status-pending'
     case 'cancelled':
       return 'env-status-neutral'
     default:
@@ -785,9 +838,9 @@ onUnmounted(() => {
                 <span class="dashboard-chip" :class="operationTypeClass(card.latestOrder.operation_type)">
                   {{ operationTypeText(card.latestOrder.operation_type) }}
                 </span>
-                <span class="dashboard-chip release-status-chip" :class="releaseStatusClass(card.latestOrder.status)">
-                  <SyncOutlined v-if="card.latestOrder.status === 'running'" spin class="running-spin-icon" />
-                  {{ releaseStatusText(card.latestOrder.status) }}
+                <span class="dashboard-chip release-status-chip" :class="releaseStatusClass(releaseBusinessStatus(card.latestOrder))">
+                  <SyncOutlined v-if="releaseBusinessStatus(card.latestOrder) === 'deploying'" spin class="running-spin-icon" />
+                  {{ releaseStatusText(releaseBusinessStatus(card.latestOrder)) }}
                 </span>
               </div>
             </div>
@@ -828,15 +881,15 @@ onUnmounted(() => {
                 :key="`${card.application.id}-${snapshot.envCode}`"
                 type="button"
                 class="env-inline-chip"
-                :class="releaseStatusClass(snapshot.order.status)"
-                :title="`${snapshot.envCode} · ${snapshot.order.image_tag || snapshot.order.git_ref || '-'} · ${releaseStatusText(snapshot.order.status)} · ${formatCompactTime(snapshot.order.updated_at || snapshot.order.created_at)}`"
+                :class="releaseStatusClass(releaseBusinessStatus(snapshot.order))"
+                :title="`${snapshot.envCode} · ${snapshot.order.image_tag || snapshot.order.git_ref || '-'} · ${releaseStatusText(releaseBusinessStatus(snapshot.order))} · ${formatCompactTime(snapshot.order.updated_at || snapshot.order.created_at)}`"
                 @click="toReleaseOrderDetail(snapshot.order.id)"
               >
                 <span class="env-inline-env">{{ snapshot.envCode }}</span>
                 <span class="env-inline-ref">{{ compactReleaseRef(snapshot.order) }}</span>
                 <span class="env-inline-state">
-                  <SyncOutlined v-if="snapshot.order.status === 'running'" spin class="running-spin-icon" />
-                  {{ releaseStatusText(snapshot.order.status) }}
+                  <SyncOutlined v-if="releaseBusinessStatus(snapshot.order) === 'deploying'" spin class="running-spin-icon" />
+                  {{ releaseStatusText(releaseBusinessStatus(snapshot.order)) }}
                 </span>
               </button>
             </div>

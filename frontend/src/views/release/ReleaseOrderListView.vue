@@ -34,6 +34,7 @@ import type {
   BatchExecuteReleaseOrdersPayload,
   ReleaseOperationType,
   ReleaseOrder,
+  ReleaseOrderBusinessStatus,
   ReleaseOrderParam,
   ReleaseOrderPrecheck,
   ReleaseOrderStatus,
@@ -239,7 +240,7 @@ const refreshText = computed(() => {
 
 const spotlightText = computed(() => {
   if (activeQuery.status) {
-    return `当前聚焦“${statusText(activeQuery.status)}”状态发布单。`;
+    return `当前聚焦“${rawStatusText(activeQuery.status)}”状态发布单。`;
   }
   if (currentPageStatusStats.value.running > 0) {
     return `当前页有 ${currentPageStatusStats.value.running} 条发布单正在执行。`;
@@ -300,7 +301,7 @@ const activeFilterTags = computed(() => {
     tags.push({
       key: "status",
       label: "状态",
-      value: statusText(activeQuery.status),
+      value: rawStatusText(activeQuery.status),
     });
   }
   if (activeQuery.trigger_type) {
@@ -352,22 +353,7 @@ function formatTime(value: string | null) {
   return dayjs(value).format("YYYY-MM-DD HH:mm:ss");
 }
 
-function statusColor(status: ReleaseOrderStatus) {
-  switch (status) {
-    case "success":
-      return "green";
-    case "failed":
-      return "red";
-    case "running":
-      return "blue";
-    case "cancelled":
-      return "default";
-    default:
-      return "gold";
-  }
-}
-
-function statusText(status: ReleaseOrderStatus) {
+function rawStatusText(status: ReleaseOrderStatus) {
   switch (status) {
     case "pending":
       return "待执行";
@@ -384,8 +370,93 @@ function statusText(status: ReleaseOrderStatus) {
   }
 }
 
-function isRunningStatus(status: ReleaseOrderStatus) {
-  return status === "running";
+function fallbackBusinessStatus(status: ReleaseOrderStatus): ReleaseOrderBusinessStatus {
+  switch (status) {
+    case "draft":
+      return "draft";
+    case "pending_approval":
+      return "pending_approval";
+    case "approving":
+      return "approving";
+    case "approved":
+      return "approved";
+    case "rejected":
+      return "rejected";
+    case "queued":
+      return "queued";
+    case "deploying":
+      return "deploying";
+    case "deploy_success":
+    case "success":
+      return "deploy_success";
+    case "deploy_failed":
+    case "failed":
+      return "deploy_failed";
+    case "running":
+      return "deploying";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "pending_execution";
+  }
+}
+
+function orderBusinessStatus(record: Pick<ReleaseOrder, "business_status" | "status">): ReleaseOrderBusinessStatus {
+  return record.business_status || fallbackBusinessStatus(record.status);
+}
+
+function businessStatusColor(status: ReleaseOrderBusinessStatus) {
+  switch (status) {
+    case "deploy_success":
+      return "green";
+    case "deploy_failed":
+    case "rejected":
+      return "red";
+    case "deploying":
+      return "blue";
+    case "queued":
+    case "pending_execution":
+    case "pending_approval":
+    case "approving":
+      return "gold";
+    case "cancelled":
+      return "default";
+    default:
+      return "cyan";
+  }
+}
+
+function businessStatusText(status: ReleaseOrderBusinessStatus) {
+  switch (status) {
+    case "draft":
+      return "草稿";
+    case "pending_execution":
+      return "待执行";
+    case "pending_approval":
+      return "待审批";
+    case "approving":
+      return "审批中";
+    case "approved":
+      return "已批准";
+    case "rejected":
+      return "审批拒绝";
+    case "queued":
+      return "排队中";
+    case "deploying":
+      return "发布中";
+    case "deploy_success":
+      return "发布成功";
+    case "deploy_failed":
+      return "发布失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return status;
+  }
+}
+
+function isRunningBusinessStatus(status: ReleaseOrderBusinessStatus) {
+  return status === "deploying" || status === "approving";
 }
 
 function triggerTypeText(
@@ -425,20 +496,24 @@ function operationTypeText(
 }
 
 function canCancel(record: ReleaseOrder) {
+  const businessStatus = orderBusinessStatus(record);
   return (
     canCancelRelease.value &&
-    (record.status === "pending" || record.status === "running")
+    (businessStatus === "pending_execution" ||
+      businessStatus === "approved" ||
+      businessStatus === "queued" ||
+      businessStatus === "deploying")
   );
 }
 
 function canExecute(record: ReleaseOrder) {
-  return canExecuteRelease.value && record.status === "pending";
+  return canExecuteRelease.value && ["pending_execution", "approved"].includes(orderBusinessStatus(record));
 }
 
 function canRollback(record: ReleaseOrder) {
   return (
     canCreateRelease.value &&
-    record.status === "success" &&
+    orderBusinessStatus(record) === "deploy_success" &&
     String(record.cd_provider || "")
       .trim()
       .toLowerCase() === "argocd"
@@ -448,7 +523,7 @@ function canRollback(record: ReleaseOrder) {
 function canReplay(record: ReleaseOrder) {
   return (
     canCreateRelease.value &&
-    record.status === "success" &&
+    orderBusinessStatus(record) === "deploy_success" &&
     String(record.cd_provider || "")
       .trim()
       .toLowerCase() !== "argocd"
@@ -1219,9 +1294,9 @@ onBeforeUnmount(() => {
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
-            <a-tag :color="statusColor(record.status)" class="status-tag">
-              <LoadingOutlined v-if="isRunningStatus(record.status)" spin />
-              <span>{{ statusText(record.status) }}</span>
+            <a-tag :color="businessStatusColor(orderBusinessStatus(record))" class="status-tag">
+              <LoadingOutlined v-if="isRunningBusinessStatus(orderBusinessStatus(record))" spin />
+              <span>{{ businessStatusText(orderBusinessStatus(record)) }}</span>
             </a-tag>
           </template>
           <template v-else-if="column.key === 'started_at'">
@@ -1427,9 +1502,9 @@ onBeforeUnmount(() => {
                 <a-tag class="dashboard-chip dashboard-chip-neutral">
                   {{ triggerTypeText(item.order.trigger_type) }}
                 </a-tag>
-                <a-tag :color="statusColor(item.order.status)" class="status-tag">
-                  <LoadingOutlined v-if="isRunningStatus(item.order.status)" spin />
-                  <span>{{ statusText(item.order.status) }}</span>
+                <a-tag :color="businessStatusColor(orderBusinessStatus(item.order))" class="status-tag">
+                  <LoadingOutlined v-if="isRunningBusinessStatus(orderBusinessStatus(item.order))" spin />
+                  <span>{{ businessStatusText(orderBusinessStatus(item.order)) }}</span>
                 </a-tag>
               </a-space>
             </div>

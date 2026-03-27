@@ -69,19 +69,76 @@ func (t OperationType) Valid() bool {
 	}
 }
 
+type ReleaseBusinessStatus string
+
+const (
+	ReleaseBusinessStatusDraft            ReleaseBusinessStatus = "draft"
+	ReleaseBusinessStatusPendingExecution ReleaseBusinessStatus = "pending_execution"
+	ReleaseBusinessStatusPendingApproval  ReleaseBusinessStatus = "pending_approval"
+	ReleaseBusinessStatusApproving        ReleaseBusinessStatus = "approving"
+	ReleaseBusinessStatusApproved         ReleaseBusinessStatus = "approved"
+	ReleaseBusinessStatusRejected         ReleaseBusinessStatus = "rejected"
+	ReleaseBusinessStatusQueued           ReleaseBusinessStatus = "queued"
+	ReleaseBusinessStatusDeploying        ReleaseBusinessStatus = "deploying"
+	ReleaseBusinessStatusDeploySuccess    ReleaseBusinessStatus = "deploy_success"
+	ReleaseBusinessStatusDeployFailed     ReleaseBusinessStatus = "deploy_failed"
+	ReleaseBusinessStatusCancelled        ReleaseBusinessStatus = "cancelled"
+)
+
+func (s ReleaseBusinessStatus) Valid() bool {
+	switch s {
+	case ReleaseBusinessStatusDraft,
+		ReleaseBusinessStatusPendingExecution,
+		ReleaseBusinessStatusPendingApproval,
+		ReleaseBusinessStatusApproving,
+		ReleaseBusinessStatusApproved,
+		ReleaseBusinessStatusRejected,
+		ReleaseBusinessStatusQueued,
+		ReleaseBusinessStatusDeploying,
+		ReleaseBusinessStatusDeploySuccess,
+		ReleaseBusinessStatusDeployFailed,
+		ReleaseBusinessStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 type OrderStatus string
 
 const (
-	OrderStatusPending   OrderStatus = "pending"
-	OrderStatusRunning   OrderStatus = "running"
-	OrderStatusSuccess   OrderStatus = "success"
-	OrderStatusFailed    OrderStatus = "failed"
-	OrderStatusCancelled OrderStatus = "cancelled"
+	OrderStatusPending         OrderStatus = "pending"
+	OrderStatusRunning         OrderStatus = "running"
+	OrderStatusSuccess         OrderStatus = "success"
+	OrderStatusFailed          OrderStatus = "failed"
+	OrderStatusCancelled       OrderStatus = "cancelled"
+	OrderStatusDraft           OrderStatus = "draft"
+	OrderStatusPendingApproval OrderStatus = "pending_approval"
+	OrderStatusApproving       OrderStatus = "approving"
+	OrderStatusApproved        OrderStatus = "approved"
+	OrderStatusRejected        OrderStatus = "rejected"
+	OrderStatusQueued          OrderStatus = "queued"
+	OrderStatusDeploying       OrderStatus = "deploying"
+	OrderStatusDeploySuccess   OrderStatus = "deploy_success"
+	OrderStatusDeployFailed    OrderStatus = "deploy_failed"
 )
 
 func (s OrderStatus) Valid() bool {
 	switch s {
-	case OrderStatusPending, OrderStatusRunning, OrderStatusSuccess, OrderStatusFailed, OrderStatusCancelled:
+	case OrderStatusPending,
+		OrderStatusRunning,
+		OrderStatusSuccess,
+		OrderStatusFailed,
+		OrderStatusCancelled,
+		OrderStatusDraft,
+		OrderStatusPendingApproval,
+		OrderStatusApproving,
+		OrderStatusApproved,
+		OrderStatusRejected,
+		OrderStatusQueued,
+		OrderStatusDeploying,
+		OrderStatusDeploySuccess,
+		OrderStatusDeployFailed:
 		return true
 	default:
 		return false
@@ -90,7 +147,12 @@ func (s OrderStatus) Valid() bool {
 
 func (s OrderStatus) IsTerminal() bool {
 	switch s {
-	case OrderStatusSuccess, OrderStatusFailed, OrderStatusCancelled:
+	case OrderStatusSuccess,
+		OrderStatusFailed,
+		OrderStatusCancelled,
+		OrderStatusRejected,
+		OrderStatusDeploySuccess,
+		OrderStatusDeployFailed:
 		return true
 	default:
 		return false
@@ -192,6 +254,9 @@ type ReleaseOrder struct {
 	ImageTag           string
 	TriggerType        TriggerType
 	Status             OrderStatus
+	BusinessStatus     ReleaseBusinessStatus
+	QueuePosition      int
+	QueuedReason       string
 	Remark             string
 	CreatorUserID      string
 	TriggeredBy        string

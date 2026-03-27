@@ -1170,7 +1170,7 @@ func (r *ReleaseRepository) ListTrackableOrders(
 SELECT COUNT(DISTINCT ro.id)
 FROM release_order ro
 JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE ro.status = ?
+WHERE ro.status IN (?, ?, ?)
   AND roe.status IN (?, ?);`
 
 	var total int64
@@ -1178,6 +1178,8 @@ WHERE ro.status = ?
 		ctx,
 		countQuery,
 		string(domain.OrderStatusRunning),
+		string(domain.OrderStatusQueued),
+		string(domain.OrderStatusDeploying),
 		string(domain.ExecutionStatusPending),
 		string(domain.ExecutionStatusRunning),
 	).Scan(&total); err != nil {
@@ -1189,7 +1191,7 @@ SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.operation_type, ro.
 	ro.trigger_type, ro.status, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
 FROM release_order ro
 JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE ro.status = ?
+WHERE ro.status IN (?, ?, ?)
   AND roe.status IN (?, ?)
 ORDER BY ro.created_at DESC
 LIMIT ? OFFSET ?;`
@@ -1199,6 +1201,8 @@ LIMIT ? OFFSET ?;`
 		ctx,
 		listQuery,
 		string(domain.OrderStatusRunning),
+		string(domain.OrderStatusQueued),
+		string(domain.OrderStatusDeploying),
 		string(domain.ExecutionStatusPending),
 		string(domain.ExecutionStatusRunning),
 		pageSize,

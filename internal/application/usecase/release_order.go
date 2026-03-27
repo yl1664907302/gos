@@ -1441,7 +1441,11 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	}
 
 	switch order.Status {
-	case domain.OrderStatusPending, domain.OrderStatusRunning:
+	case domain.OrderStatusPending,
+		domain.OrderStatusRunning,
+		domain.OrderStatusQueued,
+		domain.OrderStatusDeploying,
+		domain.OrderStatusApproved:
 		// allowed
 	default:
 		err := fmt.Errorf("%w: release order cannot be cancelled in current status", ErrInvalidInput)
@@ -1467,7 +1471,7 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	}
 
 	cancelNotes := make([]string, 0)
-	if order.Status == domain.OrderStatusRunning {
+	if order.Status == domain.OrderStatusRunning || order.Status == domain.OrderStatusDeploying {
 		for _, execution := range executions {
 			note := uc.abortExecution(ctx, execution)
 			if note != "" {
@@ -1668,9 +1672,35 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	startedAt := uc.now()
-	order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, &startedAt, nil, startedAt)
+	pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
+	dispatchStatus := domain.OrderStatusDeploying
+	var dispatchStartedAt *time.Time
+	var dispatchGuard releaseDispatchGuard
+	if pendingExecution != nil {
+		var acquired bool
+		var guardErr error
+		dispatchGuard, acquired, guardErr = uc.ensureExecutionLock(ctx, order, *pendingExecution, orderParams)
+		if guardErr != nil {
+			logx.Warn("release_order", "execute_failed",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("reason", guardErr.Error()),
+			)
+			return domain.ReleaseOrder{}, guardErr
+		}
+		if acquired {
+			startedAt := uc.now()
+			dispatchStartedAt = &startedAt
+		} else {
+			dispatchStatus = domain.OrderStatusQueued
+		}
+	}
+	updatedAt := uc.now()
+	order, err = uc.repo.UpdateStatus(ctx, order.ID, dispatchStatus, dispatchStartedAt, nil, updatedAt)
 	if err != nil {
+		if dispatchStartedAt != nil {
+			_ = uc.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased)
+		}
 		logx.Error("release_order", "execute_failed", err,
 			logx.F("order_id", order.ID),
 			logx.F("order_no", order.OrderNo),
@@ -1679,13 +1709,18 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, "global:param_resolve", "开始解析发布参数")
-	_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, fmt.Sprintf("参数解析完成，总计 %d 项", len(orderParams)))
+	paramResolveMessage := fmt.Sprintf("参数解析完成，总计 %d 项", len(orderParams))
+	if dispatchStatus == domain.OrderStatusQueued && strings.TrimSpace(dispatchGuard.Message) != "" {
+		paramResolveMessage = strings.TrimSpace(dispatchGuard.Message)
+	}
+	_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, paramResolveMessage)
 
 	logx.Info("release_order", "execute_dispatched",
 		logx.F("order_id", order.ID),
 		logx.F("order_no", order.OrderNo),
 		logx.F("executions_count", len(executions)),
 		logx.F("params_count", len(orderParams)),
+		logx.F("dispatch_status", dispatchStatus),
 		logx.F("dispatch_mode", "async_tracker"),
 	)
 	return uc.repo.GetByID(ctx, order.ID)
@@ -1862,6 +1897,11 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			return guardErr
 		}
 		if !acquired {
+			if order.Status != domain.OrderStatusQueued {
+				if _, updateErr := uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusQueued, order.StartedAt, nil, uc.now()); updateErr != nil {
+					return updateErr
+				}
+			}
 			if strings.TrimSpace(guard.Message) != "" {
 				_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, guard.Message)
 			}
@@ -1874,6 +1914,18 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 				logx.F("conflict_strategy", guard.Settings.ConflictStrategy),
 			)
 			return nil
+		}
+		if order.Status != domain.OrderStatusDeploying {
+			startedAt := order.StartedAt
+			now := uc.now()
+			if startedAt == nil {
+				startedAt = &now
+			}
+			updatedOrder, updateErr := uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusDeploying, startedAt, nil, now)
+			if updateErr != nil {
+				return updateErr
+			}
+			order = updatedOrder
 		}
 		switch strings.ToLower(strings.TrimSpace(execution.Provider)) {
 		case string(pipelinedomain.ProviderJenkins):

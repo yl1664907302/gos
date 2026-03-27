@@ -148,6 +148,9 @@ type ReleaseOrderResponse struct {
 	ImageTag           string     `json:"image_tag"`
 	TriggerType        string     `json:"trigger_type"`
 	Status             string     `json:"status"`
+	BusinessStatus     string     `json:"business_status"`
+	QueuePosition      int        `json:"queue_position"`
+	QueuedReason       string     `json:"queued_reason"`
 	Remark             string     `json:"remark"`
 	CreatorUserID      string     `json:"creator_user_id"`
 	TriggeredBy        string     `json:"triggered_by"`
@@ -1036,6 +1039,9 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		ImageTag:           item.ImageTag,
 		TriggerType:        string(item.TriggerType),
 		Status:             string(item.Status),
+		BusinessStatus:     string(item.BusinessStatus),
+		QueuePosition:      item.QueuePosition,
+		QueuedReason:       item.QueuedReason,
 		Remark:             item.Remark,
 		CreatorUserID:      item.CreatorUserID,
 		TriggeredBy:        item.TriggeredBy,
@@ -1054,14 +1060,93 @@ func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context
 	if err != nil {
 		return item
 	}
+	hasRunningExecution := false
 	for _, execution := range executions {
+		if execution.Status == domain.ExecutionStatusRunning {
+			hasRunningExecution = true
+		}
 		if execution.PipelineScope != domain.PipelineScopeCD {
 			continue
 		}
 		item.CDProvider = strings.TrimSpace(execution.Provider)
-		break
+	}
+	item.BusinessStatus = deriveReleaseBusinessStatus(item.Status, hasRunningExecution)
+	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying || item.BusinessStatus == domain.ReleaseBusinessStatusQueued {
+		if progress, progressErr := h.manager.GetConcurrentBatchProgress(ctx, item.ID); progressErr == nil {
+			for _, current := range progress.Items {
+				if strings.TrimSpace(current.OrderID) != strings.TrimSpace(item.ID) {
+					continue
+				}
+				switch current.QueueState {
+				case usecase.ReleaseOrderConcurrentBatchQueueStateQueued:
+					item.BusinessStatus = domain.ReleaseBusinessStatusQueued
+					item.QueuePosition = current.QueuePosition
+					if item.QueuePosition > 0 {
+						item.QueuedReason = fmt.Sprintf("并发批次排队中，当前位次 %d", item.QueuePosition)
+					}
+				case usecase.ReleaseOrderConcurrentBatchQueueStateExecuting:
+					item.BusinessStatus = domain.ReleaseBusinessStatusDeploying
+				case usecase.ReleaseOrderConcurrentBatchQueueStateSuccess:
+					item.BusinessStatus = domain.ReleaseBusinessStatusDeploySuccess
+				case usecase.ReleaseOrderConcurrentBatchQueueStateFailed:
+					item.BusinessStatus = domain.ReleaseBusinessStatusDeployFailed
+				case usecase.ReleaseOrderConcurrentBatchQueueStateCancelled:
+					item.BusinessStatus = domain.ReleaseBusinessStatusCancelled
+				}
+				break
+			}
+		}
+	}
+	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying || item.BusinessStatus == domain.ReleaseBusinessStatusQueued {
+		if precheck, precheckErr := h.manager.PrecheckExecute(ctx, item.ID); precheckErr == nil && precheck.WaitingForLock {
+			item.BusinessStatus = domain.ReleaseBusinessStatusQueued
+			if item.QueuePosition <= 0 {
+				item.QueuePosition = 0
+			}
+			if strings.TrimSpace(precheck.ConflictMessage) != "" {
+				item.QueuedReason = strings.TrimSpace(precheck.ConflictMessage)
+			}
+		}
 	}
 	return item
+}
+
+func deriveReleaseBusinessStatus(status domain.OrderStatus, hasRunningExecution bool) domain.ReleaseBusinessStatus {
+	switch status {
+	case domain.OrderStatusDraft:
+		return domain.ReleaseBusinessStatusDraft
+	case domain.OrderStatusPendingApproval:
+		return domain.ReleaseBusinessStatusPendingApproval
+	case domain.OrderStatusApproving:
+		return domain.ReleaseBusinessStatusApproving
+	case domain.OrderStatusApproved:
+		return domain.ReleaseBusinessStatusApproved
+	case domain.OrderStatusRejected:
+		return domain.ReleaseBusinessStatusRejected
+	case domain.OrderStatusQueued:
+		return domain.ReleaseBusinessStatusQueued
+	case domain.OrderStatusDeploying:
+		return domain.ReleaseBusinessStatusDeploying
+	case domain.OrderStatusDeploySuccess:
+		return domain.ReleaseBusinessStatusDeploySuccess
+	case domain.OrderStatusDeployFailed:
+		return domain.ReleaseBusinessStatusDeployFailed
+	case domain.OrderStatusCancelled:
+		return domain.ReleaseBusinessStatusCancelled
+	case domain.OrderStatusSuccess:
+		return domain.ReleaseBusinessStatusDeploySuccess
+	case domain.OrderStatusFailed:
+		return domain.ReleaseBusinessStatusDeployFailed
+	case domain.OrderStatusRunning:
+		if hasRunningExecution {
+			return domain.ReleaseBusinessStatusDeploying
+		}
+		return domain.ReleaseBusinessStatusQueued
+	case domain.OrderStatusPending:
+		return domain.ReleaseBusinessStatusPendingExecution
+	default:
+		return domain.ReleaseBusinessStatusPendingExecution
+	}
 }
 
 func toReleaseOrderParamResponse(item domain.ReleaseOrderParam) ReleaseOrderParamResponse {

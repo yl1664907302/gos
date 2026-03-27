@@ -91,8 +91,15 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 	switch order.Status {
 	case domain.OrderStatusPending:
 		statusItem.Message = "发布单处于待执行状态"
+	case domain.OrderStatusQueued:
+		statusItem.Status = ReleaseOrderPrecheckItemStatusWarn
+		statusItem.Message = "发布单已进入等待队列"
 	case domain.OrderStatusRunning:
 		statusItem.Message = "发布单已进入调度中"
+	case domain.OrderStatusDeploying:
+		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+		statusItem.Message = "发布单已进入发布中，无法再次触发"
+		output.Executable = false
 	default:
 		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
 		statusItem.Message = "当前发布单不是待执行状态，无法再次触发"
@@ -135,6 +142,10 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 				Message: fmt.Sprintf("并发控制已启用，当前按 %s 加锁", guard.Settings.LockScope),
 			}
 			switch {
+			case guard.ConflictLock != nil && guard.WaitingForLock:
+				item.Status = ReleaseOrderPrecheckItemStatusWarn
+				item.Message = guard.Message
+				output.WaitingForLock = true
 			case guard.ConflictLock != nil && guard.Settings.ConflictStrategy == ReleaseConcurrencyConflictStrategyReject:
 				item.Status = ReleaseOrderPrecheckItemStatusBlocked
 				item.Message = guard.Message

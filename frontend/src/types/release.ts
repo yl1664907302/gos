@@ -4,6 +4,27 @@ export type ReleaseOrderStatus =
   | "running"
   | "success"
   | "failed"
+  | "cancelled"
+  | "draft"
+  | "pending_approval"
+  | "approving"
+  | "approved"
+  | "rejected"
+  | "queued"
+  | "deploying"
+  | "deploy_success"
+  | "deploy_failed";
+export type ReleaseOrderBusinessStatus =
+  | "draft"
+  | "pending_execution"
+  | "pending_approval"
+  | "approving"
+  | "approved"
+  | "rejected"
+  | "queued"
+  | "deploying"
+  | "deploy_success"
+  | "deploy_failed"
   | "cancelled";
 export type ReleaseOperationType = "deploy" | "rollback" | "replay";
 export type ReleaseStepStatus = "pending" | "running" | "success" | "failed";
@@ -61,6 +82,9 @@ export interface ReleaseOrder {
   image_tag: string;
   trigger_type: ReleaseTriggerType;
   status: ReleaseOrderStatus;
+  business_status: ReleaseOrderBusinessStatus;
+  queue_position: number;
+  queued_reason: string;
   remark: string;
   creator_user_id?: string;
   triggered_by: string;
