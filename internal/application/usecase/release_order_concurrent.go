@@ -70,6 +70,7 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 	}
 
 	orders := make([]domain.ReleaseOrder, 0, len(orderIDs))
+	blockedMessages := make([]string, 0)
 	for _, orderID := range orderIDs {
 		item, err := uc.repo.GetByID(ctx, orderID)
 		if err != nil {
@@ -78,7 +79,37 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 		if !isPendingOrderStatus(item.Status) {
 			return BatchExecuteReleaseOrdersOutput{}, fmt.Errorf("%w: 发布单 %s 不是待执行状态", ErrInvalidInput, item.OrderNo)
 		}
+		executions, err := uc.repo.ListExecutions(ctx, item.ID)
+		if err != nil {
+			return BatchExecuteReleaseOrdersOutput{}, err
+		}
+		params, err := uc.repo.ListParams(ctx, item.ID)
+		if err != nil {
+			return BatchExecuteReleaseOrdersOutput{}, err
+		}
+		precheck, err := uc.buildOrderPrecheck(ctx, item, executions, params)
+		if err != nil {
+			return BatchExecuteReleaseOrdersOutput{}, err
+		}
+		if !precheck.Executable {
+			reason := strings.TrimSpace(precheck.ConflictMessage)
+			if reason == "" {
+				for _, precheckItem := range precheck.Items {
+					if precheckItem.Status == ReleaseOrderPrecheckItemStatusBlocked {
+						reason = strings.TrimSpace(precheckItem.Message)
+						break
+					}
+				}
+			}
+			if reason == "" {
+				reason = "当前发布单未通过执行前预检"
+			}
+			blockedMessages = append(blockedMessages, fmt.Sprintf("%s：%s", item.OrderNo, reason))
+		}
 		orders = append(orders, item)
+	}
+	if len(blockedMessages) > 0 {
+		return BatchExecuteReleaseOrdersOutput{}, fmt.Errorf("%w: %s", ErrConcurrentReleaseBlocked, strings.Join(blockedMessages, "；"))
 	}
 
 	batchNo := generateConcurrentBatchNo(uc.now())

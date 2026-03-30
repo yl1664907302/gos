@@ -45,6 +45,7 @@ type releaseDispatchGuard struct {
 	LockScope      domain.ExecutionLockScope
 	LockKey        string
 	ConflictLock   *domain.ReleaseExecutionLock
+	ConflictOrder  *domain.ReleaseOrder
 	WaitingForLock bool
 	Message        string
 }
@@ -130,22 +131,37 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 		output.LockScope = string(guard.Settings.LockScope)
 		output.ConflictStrategy = string(guard.Settings.ConflictStrategy)
 		output.LockKey = guard.LockKey
-		if guard.ConflictLock != nil {
+		switch {
+		case guard.ConflictLock != nil:
 			output.ConflictOrderNo = strings.TrimSpace(guard.ConflictLock.ReleaseOrderNo)
 			output.ConflictMessage = strings.TrimSpace(guard.Message)
+		case guard.ConflictOrder != nil:
+			output.ConflictOrderNo = strings.TrimSpace(guard.ConflictOrder.OrderNo)
+			output.ConflictMessage = strings.TrimSpace(guard.Message)
 		}
-		if guard.Settings.Enabled {
+		if guard.Settings.Enabled || guard.ConflictLock != nil || guard.ConflictOrder != nil {
+			itemName := "并发发布"
+			if !guard.Settings.Enabled && guard.ConflictOrder != nil {
+				itemName = "执行互斥"
+			}
 			item := ReleaseOrderPrecheckItem{
 				Key:     "concurrency_lock",
-				Name:    "并发发布",
+				Name:    itemName,
 				Status:  ReleaseOrderPrecheckItemStatusPass,
-				Message: fmt.Sprintf("并发控制已启用，当前按 %s 加锁", guard.Settings.LockScope),
+				Message: "未检测到执行互斥冲突",
+			}
+			if guard.Settings.Enabled {
+				item.Message = fmt.Sprintf("并发控制已启用，当前按 %s 加锁", guard.Settings.LockScope)
 			}
 			switch {
-			case guard.ConflictLock != nil && guard.WaitingForLock:
+			case (guard.ConflictLock != nil || guard.ConflictOrder != nil) && guard.WaitingForLock:
 				item.Status = ReleaseOrderPrecheckItemStatusWarn
 				item.Message = guard.Message
 				output.WaitingForLock = true
+			case guard.ConflictOrder != nil:
+				item.Status = ReleaseOrderPrecheckItemStatusBlocked
+				item.Message = guard.Message
+				output.Executable = false
 			case guard.ConflictLock != nil && guard.Settings.ConflictStrategy == ReleaseConcurrencyConflictStrategyReject:
 				item.Status = ReleaseOrderPrecheckItemStatusBlocked
 				item.Message = guard.Message
@@ -173,6 +189,27 @@ func (uc *ReleaseOrderManager) evaluateDispatchGuard(
 		return releaseDispatchGuard{}, err
 	}
 	guard := releaseDispatchGuard{Settings: settings}
+
+	conflictOrder, err := uc.repo.FindActiveOrderByApplicationEnv(ctx, order.ApplicationID, order.EnvCode, order.ID)
+	if err != nil && !errors.Is(err, domain.ErrOrderNotFound) {
+		return releaseDispatchGuard{}, err
+	}
+	if err == nil {
+		guard.ConflictOrder = &conflictOrder
+		if order.IsConcurrent &&
+			strings.TrimSpace(order.ConcurrentBatchNo) != "" &&
+			conflictOrder.IsConcurrent &&
+			strings.TrimSpace(conflictOrder.ConcurrentBatchNo) == strings.TrimSpace(order.ConcurrentBatchNo) &&
+			strings.TrimSpace(conflictOrder.ApplicationID) == strings.TrimSpace(order.ApplicationID) &&
+			strings.TrimSpace(conflictOrder.EnvCode) == strings.TrimSpace(order.EnvCode) {
+			guard.WaitingForLock = true
+			guard.Message = fmt.Sprintf("当前批次的同应用同环境发布单 %s 正在执行，已进入顺序等待队列", firstNonEmpty(conflictOrder.OrderNo, conflictOrder.ID))
+			return guard, nil
+		}
+		guard.Message = fmt.Sprintf("同应用同环境已有发布单 %s 正在执行，请稍后再试", firstNonEmpty(conflictOrder.OrderNo, conflictOrder.ID))
+		return guard, nil
+	}
+
 	if !settings.Enabled {
 		return guard, nil
 	}
@@ -214,6 +251,12 @@ func (uc *ReleaseOrderManager) ensureExecutionLock(
 	guard, err := uc.evaluateDispatchGuard(ctx, order, execution, params)
 	if err != nil {
 		return releaseDispatchGuard{}, false, err
+	}
+	if guard.ConflictOrder != nil {
+		if guard.WaitingForLock {
+			return guard, false, nil
+		}
+		return guard, false, fmt.Errorf("%w: %s", ErrConcurrentReleaseBlocked, guard.Message)
 	}
 	if !guard.Settings.Enabled {
 		return guard, true, nil

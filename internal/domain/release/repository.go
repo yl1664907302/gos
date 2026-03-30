@@ -18,6 +18,7 @@ type Repository interface {
 	GetDeploySnapshotByOrderID(ctx context.Context, releaseOrderID string) (DeploySnapshot, error)
 	UpdateConcurrentBatch(ctx context.Context, orderIDs []string, batchNo string, isConcurrent bool) error
 	ListByConcurrentBatchNo(ctx context.Context, batchNo string) ([]ReleaseOrder, error)
+	FindActiveOrderByApplicationEnv(ctx context.Context, applicationID string, envCode string, excludeReleaseOrderID string) (ReleaseOrder, error)
 	FindActiveExecutionLock(ctx context.Context, lockKey string, excludeReleaseOrderID string, now time.Time) (ReleaseExecutionLock, error)
 	AcquireExecutionLock(ctx context.Context, lock ReleaseExecutionLock, now time.Time) (ReleaseExecutionLock, bool, error)
 	TouchExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, expiredAt time.Time) error

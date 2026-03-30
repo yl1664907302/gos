@@ -12,6 +12,9 @@ import ArgoCDManagementView from '../views/component/ArgoCDManagementView.vue'
 import GitOpsManagementView from '../views/component/GitOpsManagementView.vue'
 import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
 import ExecutorParamManagementView from '../views/component/ExecutorParamManagementView.vue'
+import AgentManagementView from '../views/component/AgentManagementView.vue'
+import AgentTaskManagementView from '../views/component/AgentTaskManagementView.vue'
+import AgentScriptManagementView from '../views/component/AgentScriptManagementView.vue'
 import ForbiddenView from '../views/exception/ForbiddenView.vue'
 import LoginView from '../views/login/LoginView.vue'
 import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
@@ -132,6 +135,24 @@ export const router = createRouter({
           name: 'gitops-management',
           component: GitOpsManagementView,
           meta: { title: 'GitOps管理', permission: ['component.gitops.view', 'component.gitops.manage'] },
+        },
+        {
+          path: 'components/agents',
+          name: 'agent-management',
+          component: AgentManagementView,
+          meta: { title: 'Agent管理', permission: ['component.agent.view', 'component.agent.manage'] },
+        },
+        {
+          path: 'components/agent-scripts',
+          name: 'agent-script-management',
+          component: AgentScriptManagementView,
+          meta: { title: '脚本管理', permission: ['component.agent.view', 'component.agent.manage'] },
+        },
+        {
+          path: 'components/agent-tasks',
+          name: 'agent-task-management',
+          component: AgentTaskManagementView,
+          meta: { title: '任务管理', permission: ['component.agent.view', 'component.agent.manage'] },
         },
         {
           path: 'components/executor-params',

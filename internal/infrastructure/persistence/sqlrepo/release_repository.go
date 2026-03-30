@@ -1426,6 +1426,55 @@ ORDER BY concurrent_batch_seq ASC, created_at ASC;`
 	return items, nil
 }
 
+func (r *ReleaseRepository) FindActiveOrderByApplicationEnv(
+	ctx context.Context,
+	applicationID string,
+	envCode string,
+	excludeReleaseOrderID string,
+) (domain.ReleaseOrder, error) {
+	applicationID = strings.TrimSpace(applicationID)
+	envCode = strings.TrimSpace(envCode)
+	excludeReleaseOrderID = strings.TrimSpace(excludeReleaseOrderID)
+	if applicationID == "" || envCode == "" {
+		return domain.ReleaseOrder{}, domain.ErrOrderNotFound
+	}
+
+	const q = `
+SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
+	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+FROM release_order
+WHERE application_id = ?
+  AND env_code = ?
+  AND id <> ?
+  AND status IN (?, ?)
+ORDER BY CASE status
+	WHEN ? THEN 0
+	WHEN ? THEN 1
+	ELSE 9
+END, created_at ASC
+LIMIT 1;`
+
+	row := r.db.QueryRowContext(
+		ctx,
+		q,
+		applicationID,
+		envCode,
+		excludeReleaseOrderID,
+		string(domain.OrderStatusDeploying),
+		string(domain.OrderStatusRunning),
+		string(domain.OrderStatusDeploying),
+		string(domain.OrderStatusRunning),
+	)
+	item, err := scanReleaseOrder(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ReleaseOrder{}, domain.ErrOrderNotFound
+		}
+		return domain.ReleaseOrder{}, err
+	}
+	return item, nil
+}
+
 func (r *ReleaseRepository) FindActiveExecutionLock(
 	ctx context.Context,
 	lockKey string,

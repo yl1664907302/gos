@@ -67,6 +67,10 @@ func main() {
 	if err := bootstrap.InitSchema(executorParamRepo); err != nil {
 		log.Fatalf("init executor param schema: %v", err)
 	}
+	agentRepo := sqlrepo.NewAgentRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(agentRepo); err != nil {
+		log.Fatalf("init agent schema: %v", err)
+	}
 	releaseRepo := sqlrepo.NewReleaseRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(releaseRepo); err != nil {
 		log.Fatalf("init release schema: %v", err)
@@ -133,6 +137,12 @@ func main() {
 	}
 
 	authHandler := httpapi.NewAuthHandler(authSessionManager, userManagement)
+	agentHandler := httpapi.NewAgentHandler(
+		usecase.NewAgentManager(agentRepo),
+		usecase.NewAgentTaskManager(agentRepo),
+		usecase.NewAgentScriptManager(agentRepo),
+		authSessionManager,
+	)
 	userHandler := httpapi.NewUserHandler(userManagement, authSessionManager)
 	handler := httpapi.NewApplicationHandler(
 		usecase.NewCreateApplication(repo),
@@ -286,6 +296,7 @@ func main() {
 
 	router := httpapi.NewRouter(
 		authHandler,
+		agentHandler,
 		userHandler,
 		authSessionManager,
 		handler,

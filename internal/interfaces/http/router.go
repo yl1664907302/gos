@@ -13,6 +13,7 @@ import (
 
 func NewRouter(
 	authHandler *AuthHandler,
+	agentHandler *AgentHandler,
 	userHandler *UserHandler,
 	sessionResolver SessionUserResolver,
 	applicationHandler *ApplicationHandler,
@@ -30,8 +31,10 @@ func NewRouter(
 	router.Use(cors())
 	registerSystemRoutes(router)
 	registerPublicAuthRoutes(router, authHandler)
+	registerPublicAgentRoutes(router, agentHandler)
 	router.Use(authMiddleware(sessionResolver))
 	registerProtectedAuthRoutes(router, authHandler)
+	registerAgentRoutes(router, agentHandler)
 	registerUserRoutes(router, userHandler)
 	registerApplicationRoutes(router, applicationHandler)
 	registerSystemSettingsRoutes(router, systemSettingsHandler)
@@ -45,6 +48,13 @@ func NewRouter(
 	return router
 }
 
+func registerPublicAgentRoutes(router gin.IRouter, agentHandler *AgentHandler) {
+	if agentHandler == nil {
+		return
+	}
+	agentHandler.RegisterPublicRoutes(router)
+}
+
 func registerPublicAuthRoutes(router gin.IRouter, authHandler *AuthHandler) {
 	authHandler.RegisterPublicRoutes(router)
 }
@@ -55,6 +65,13 @@ func registerProtectedAuthRoutes(router gin.IRouter, authHandler *AuthHandler) {
 
 func registerUserRoutes(router gin.IRouter, userHandler *UserHandler) {
 	userHandler.RegisterRoutes(router)
+}
+
+func registerAgentRoutes(router gin.IRouter, agentHandler *AgentHandler) {
+	if agentHandler == nil {
+		return
+	}
+	agentHandler.RegisterRoutes(router)
 }
 
 func registerApplicationRoutes(router gin.IRouter, applicationHandler *ApplicationHandler) {

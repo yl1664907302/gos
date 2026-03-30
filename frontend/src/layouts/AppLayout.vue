@@ -44,6 +44,15 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/components/gitops')) {
     return ['gitops-management']
   }
+  if (route.path.startsWith('/components/agents')) {
+    return ['agent-overview']
+  }
+  if (route.path.startsWith('/components/agent-scripts')) {
+    return ['agent-script-management']
+  }
+  if (route.path.startsWith('/components/agent-tasks')) {
+    return ['agent-task-management']
+  }
   if (route.path.startsWith('/releases')) {
     return ['release-orders']
   }
@@ -60,6 +69,13 @@ const openMenuKeys = computed(() => {
   if (route.path.startsWith('/components/')) {
     if (route.path.startsWith('/components/jenkins') || route.path.startsWith('/components/executor-params')) {
       return ['component-management', 'jenkins-management-group']
+    }
+    if (
+      route.path.startsWith('/components/agents') ||
+      route.path.startsWith('/components/agent-scripts') ||
+      route.path.startsWith('/components/agent-tasks')
+    ) {
+      return ['component-management', 'agent-management-group']
     }
     return ['component-management']
   }
@@ -108,13 +124,21 @@ const canViewArgoCD = computed(
 const canViewGitOps = computed(
   () => authStore.hasPermission('component.gitops.view') || authStore.hasPermission('component.gitops.manage'),
 )
+const canViewAgent = computed(
+  () => authStore.hasPermission('component.agent.view') || authStore.hasPermission('component.agent.manage'),
+)
 const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
 const canManagePermission = computed(() => authStore.hasPermission('system.permission.manage'))
 
 const showApplicationMenu = computed(() => true)
 const showComponentMenu = computed(
-  () => canViewComponent.value || canManagePipelineParam.value || canViewArgoCD.value || canViewGitOps.value,
+  () =>
+    canViewComponent.value ||
+    canManagePipelineParam.value ||
+    canViewArgoCD.value ||
+    canViewGitOps.value ||
+    canViewAgent.value,
 )
 const showReleaseMenu = computed(() => true)
 const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value)
@@ -156,6 +180,18 @@ function goToArgoCDManagement() {
 
 function goToGitOpsManagement() {
   void router.push('/components/gitops')
+}
+
+function goToAgentManagement() {
+  void router.push('/components/agents')
+}
+
+function goToAgentScriptManagement() {
+  void router.push('/components/agent-scripts')
+}
+
+function goToAgentTaskManagement() {
+  void router.push('/components/agent-tasks')
 }
 
 function goToReleaseOrders() {
@@ -242,6 +278,19 @@ async function handleLogout() {
           <a-menu-item v-if="canViewGitOps" key="gitops-management" @click="goToGitOpsManagement">
             GitOps管理
           </a-menu-item>
+          <a-sub-menu v-if="canViewAgent" key="agent-management-group">
+            <template #title>Agent管理</template>
+
+            <a-menu-item key="agent-overview" @click="goToAgentManagement">
+              Agent概览
+            </a-menu-item>
+            <a-menu-item key="agent-script-management" @click="goToAgentScriptManagement">
+              脚本管理
+            </a-menu-item>
+            <a-menu-item key="agent-task-management" @click="goToAgentTaskManagement">
+              任务管理
+            </a-menu-item>
+          </a-sub-menu>
         </a-sub-menu>
 
         <a-sub-menu v-if="showReleaseMenu" key="release-management">
@@ -455,31 +504,24 @@ async function handleLogout() {
 
 .sider-menu :deep(.ant-menu-sub.ant-menu-inline) {
   margin-top: 4px;
-  padding: 2px 0 8px;
+  padding: 2px 0 8px !important;
   background: transparent !important;
 }
 
+.sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-submenu-title),
 .sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item) {
-  margin-inline: 8px 0;
-  padding-inline-start: 18px !important;
+  margin-inline: 0;
+  padding-inline-start: 16px !important;
   color: rgba(203, 213, 225, 0.84) !important;
   border-radius: 12px;
 }
 
 .sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item::before) {
-  content: '';
-  position: absolute;
-  left: 10px;
-  top: 50%;
-  width: 4px;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.62);
-  transform: translateY(-50%);
+  display: none;
 }
 
 .sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item-selected::before) {
-  background: rgba(239, 246, 255, 0.92);
+  display: none;
 }
 
 .sider-footer {
