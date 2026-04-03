@@ -24,6 +24,7 @@ import {
 } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
+  approveReleaseOrder,
   buildReleaseOrderLogStreamURL,
   cancelReleaseOrder,
   executeReleaseOrder,
@@ -31,18 +32,22 @@ import {
   getReleaseOrderByID,
   getReleaseOrderPrecheck,
   getReleaseOrderPipelineStageLog,
+  listReleaseOrderApprovalRecords,
   listReleaseOrderExecutions,
   listReleaseOrderParams,
   listReleaseOrderValueProgress,
   listReleaseOrderPipelineStages,
   listReleaseOrderSteps,
+  rejectReleaseOrder,
   replayReleaseOrderByID,
   rollbackReleaseOrderByID,
+  submitReleaseOrderApproval,
 } from "../../api/release";
 import { useResizableColumns } from "../../composables/useResizableColumns";
 import { useAuthStore } from "../../stores/auth";
 import type {
   ReleaseOperationType,
+  ReleaseOrderApprovalRecord,
   ReleaseOrder,
   ReleaseOrderBusinessStatus,
   ReleaseOrderExecution,
@@ -107,10 +112,13 @@ const querying = ref(false);
 const cancelling = ref(false);
 const executing = ref(false);
 const recovering = ref(false);
+const approvalActing = ref(false);
 const autoRefreshTimer = ref<number | null>(null);
 const executeLocked = ref(false);
 
 const order = ref<ReleaseOrder | null>(null);
+const approvalRecords = ref<ReleaseOrderApprovalRecord[]>([]);
+const approvalRecordsLoading = ref(false);
 const params = ref<ReleaseOrderParam[]>([]);
 const valueProgress = ref<ReleaseOrderValueProgress[]>([]);
 const steps = ref<ReleaseOrderStep[]>([]);
@@ -134,6 +142,11 @@ const concurrentBatchProgress = ref<ReleaseOrderConcurrentBatchProgress | null>(
   null,
 );
 const concurrentBatchLoading = ref(false);
+const expandedHookVariableMap = reactive<Record<string, boolean>>({});
+const expandedHookLogMap = reactive<Record<string, boolean>>({});
+const approvalActionModalVisible = ref(false);
+const approvalActionMode = ref<"submit" | "approve" | "reject">("submit");
+const approvalActionComment = ref("");
 
 const scopeLogStates = reactive<Record<ReleasePipelineScope, ScopeLogState>>({
   ci: createScopeLogState(),
@@ -180,9 +193,81 @@ const currentBusinessStatus = computed<ReleaseOrderBusinessStatus>(() => {
 const canViewParamSnapshot = computed(() =>
   authStore.hasPermission("release.param_snapshot.view"),
 );
+const currentUserID = computed(() => String(authStore.profile?.id || "").trim());
+const canSubmitApprovalPermission = computed(() =>
+  order.value
+    ? authStore.hasApplicationPermission("release.approval.submit", order.value.application_id)
+    : false,
+);
+const canExecutePermission = computed(() =>
+  order.value
+    ? String(order.value.creator_user_id || "").trim() === currentUserID.value
+    : false,
+);
+const isCurrentUserApprover = computed(() => {
+  if (!order.value || !currentUserID.value) {
+    return false;
+  }
+  return (order.value.approval_approver_ids || []).includes(currentUserID.value);
+});
+const showApprovalCard = computed(
+  () => Boolean(order.value?.approval_required) || approvalRecords.value.length > 0,
+);
+const displayApprovalRecords = computed<ReleaseOrderApprovalRecord[]>(() => {
+  if (approvalRecords.value.length > 0) {
+    return approvalRecords.value;
+  }
+  if (!order.value) {
+    return [];
+  }
+  const fallbackRecords: ReleaseOrderApprovalRecord[] = [];
+  if (order.value.approved_at) {
+    fallbackRecords.push({
+      id: `synthetic-approve-${order.value.id}`,
+      release_order_id: order.value.id,
+      action: "approve",
+      operator_user_id: "",
+      operator_name: String(order.value.approved_by || "").trim() || "系统",
+      comment: "",
+      created_at: order.value.approved_at,
+    });
+  }
+  if (order.value.rejected_at) {
+    fallbackRecords.push({
+      id: `synthetic-reject-${order.value.id}`,
+      release_order_id: order.value.id,
+      action: "reject",
+      operator_user_id: "",
+      operator_name: String(order.value.rejected_by || "").trim() || "系统",
+      comment: String(order.value.rejected_reason || "").trim(),
+      created_at: order.value.rejected_at,
+    });
+  }
+  return fallbackRecords;
+});
+const canSubmitApproval = computed(
+  () =>
+    Boolean(order.value?.approval_required) &&
+    currentBusinessStatus.value === "pending_approval" &&
+    canSubmitApprovalPermission.value,
+);
+const canApproveOrder = computed(
+  () =>
+    Boolean(order.value?.approval_required) &&
+    ["pending_approval", "approving"].includes(currentBusinessStatus.value) &&
+    (isCurrentUserApprover.value || authStore.isAdmin),
+);
+const canRejectOrder = computed(
+  () =>
+    Boolean(order.value?.approval_required) &&
+    ["pending_approval", "approving"].includes(currentBusinessStatus.value) &&
+    (isCurrentUserApprover.value || authStore.isAdmin),
+);
 const canCancel = computed(
   () =>
     currentBusinessStatus.value === "pending_execution" ||
+    currentBusinessStatus.value === "pending_approval" ||
+    currentBusinessStatus.value === "approving" ||
     currentBusinessStatus.value === "approved" ||
     currentBusinessStatus.value === "queued" ||
     currentBusinessStatus.value === "deploying",
@@ -192,6 +277,7 @@ const precheckBlocked = computed(
 );
 const canExecute = computed(
   () =>
+    canExecutePermission.value &&
     (currentBusinessStatus.value === "pending_execution" ||
       currentBusinessStatus.value === "approved") &&
     !executeLocked.value &&
@@ -217,6 +303,8 @@ const shouldAutoRefresh = computed(() => {
   }
   return [
     "pending_execution",
+    "pending_approval",
+    "approving",
     "queued",
     "deploying",
     "approved",
@@ -583,6 +671,200 @@ const stepGroups = computed(() => {
     }
   });
   return groups;
+});
+
+const hookProgressItems = computed(() => {
+  const allHookSteps = steps.value
+    .filter((item) =>
+      String(item.step_code || "")
+        .trim()
+        .toLowerCase()
+        .startsWith("hook:"),
+    )
+    .sort(sortSteps);
+  const businessHookSteps = allHookSteps.filter((item) => {
+    const code = String(item.step_code || "")
+      .trim()
+      .toLowerCase();
+    return code !== "hook:prepare" && code !== "hook:summary";
+  });
+  return (businessHookSteps.length > 0 ? businessHookSteps : allHookSteps).map(
+    (item, index) => ({
+      ...item,
+      order_index: index + 1,
+      summary:
+        String(item.message || "").trim() ||
+        (item.status === "pending" ? "等待主发布流程结束后执行 Hook。" : ""),
+    }),
+  );
+});
+
+type HookProgressType = "agent_task" | "webhook_notification" | "generic";
+
+function inferHookProgressType(item: ReleaseOrderStep): HookProgressType {
+  const haystack = [
+    item.step_code,
+    item.step_name,
+    item.message,
+  ]
+    .map((value) =>
+      String(value || "")
+        .trim()
+        .toLowerCase(),
+    )
+    .join(" ");
+  if (haystack.includes("webhook")) {
+    return "webhook_notification";
+  }
+  if (haystack.includes("agent")) {
+    return "agent_task";
+  }
+  return "generic";
+}
+
+function hookProgressTypeText(type: HookProgressType) {
+  switch (type) {
+    case "agent_task":
+      return "Agent 任务";
+    case "webhook_notification":
+      return "Webhook 通知";
+    default:
+      return "通用 Hook";
+  }
+}
+
+function hookExecutionUnitTitle(type: HookProgressType) {
+  switch (type) {
+    case "agent_task":
+      return "Hook 执行单元";
+    default:
+      return `${hookProgressTypeText(type)} Hook 执行单元`;
+  }
+}
+
+function hookExecutionContentText(item: ReleaseOrderStep) {
+  const messageText = String(item.message || "").trim();
+  if (messageText) {
+    return messageText;
+  }
+  if (item.status === "pending") {
+    return "等待主发布流程结束后触发当前 Hook。";
+  }
+  return "当前 Hook 暂无补充执行内容。";
+}
+
+function hookGroupSummaryText(group: {
+  summary: {
+    total: number;
+    pending: number;
+    running: number;
+    success: number;
+    failed: number;
+  };
+}) {
+  const parts: string[] = [];
+  if (group.summary.running > 0) {
+    parts.push(`${group.summary.running} 个执行中`);
+  }
+  if (group.summary.success > 0) {
+    parts.push(`${group.summary.success} 个成功`);
+  }
+  if (group.summary.failed > 0) {
+    parts.push(`${group.summary.failed} 个失败`);
+  }
+  if (group.summary.pending > 0) {
+    parts.push(`${group.summary.pending} 个待执行`);
+  }
+  return `${group.summary.total} 个 Hook${
+    parts.length > 0 ? ` · ${parts.join(" · ")}` : ""
+  }`;
+}
+
+const hookProgressGroups = computed(() => {
+  const grouped = new Map<
+    HookProgressType,
+    {
+      type: HookProgressType;
+      title: string;
+      items: Array<
+        ReleaseOrderStep & {
+          order_index: number;
+          summary: string;
+        }
+      >;
+      summary: {
+        total: number;
+        pending: number;
+        running: number;
+        success: number;
+        failed: number;
+      };
+      overallStatus: "pending" | "running" | "success" | "failed";
+    }
+  >();
+
+  hookProgressItems.value.forEach((item) => {
+    const type = inferHookProgressType(item);
+    if (!grouped.has(type)) {
+      grouped.set(type, {
+        type,
+        title: hookExecutionUnitTitle(type),
+        items: [],
+        summary: {
+          total: 0,
+          pending: 0,
+          running: 0,
+          success: 0,
+          failed: 0,
+        },
+        overallStatus: "pending",
+      });
+    }
+    const group = grouped.get(type)!;
+    group.items.push(item);
+    group.summary.total += 1;
+    switch (item.status) {
+      case "running":
+        group.summary.running += 1;
+        break;
+      case "success":
+        group.summary.success += 1;
+        break;
+      case "failed":
+        group.summary.failed += 1;
+        break;
+      default:
+        group.summary.pending += 1;
+        break;
+    }
+  });
+
+  return Array.from(grouped.values()).map((group) => {
+    if (group.summary.failed > 0) {
+      group.overallStatus = "failed";
+    } else if (group.summary.running > 0) {
+      group.overallStatus = "running";
+    } else if (group.summary.success > 0 && group.summary.pending === 0) {
+      group.overallStatus = "success";
+    } else {
+      group.overallStatus = "pending";
+    }
+    return group;
+  });
+});
+
+const hookContextPreviewItems = computed(() => {
+  if (!order.value) {
+    return [];
+  }
+  return [
+    { label: "发布单号", value: order.value.order_no || "-" },
+    { label: "应用", value: order.value.application_name || "-" },
+    { label: "环境", value: order.value.env_code || "-" },
+    { label: "Git 版本", value: order.value.git_ref || "-" },
+    { label: "镜像版本", value: order.value.image_tag || "-" },
+    { label: "操作类型", value: operationTypeText(order.value.operation_type) },
+  ];
 });
 
 const stageGroupsByScope = computed<
@@ -1113,6 +1395,133 @@ function describeStep(step: ReleaseOrderStep) {
   return parts.join(" ｜ ");
 }
 
+function hookStatusText(status: ReleaseOrderStep["status"]) {
+  switch (status) {
+    case "pending":
+      return "待执行";
+    case "running":
+      return "执行中";
+    case "success":
+      return "成功";
+    case "failed":
+      return "失败";
+    default:
+      return status;
+  }
+}
+
+function approvalModeText(mode: string | null | undefined) {
+  return String(mode || "").trim().toLowerCase() === "all" ? "会签" : "或签";
+}
+
+function approvalActionText(action: ReleaseOrderApprovalRecord["action"]) {
+  switch (action) {
+    case "submit":
+      return "提交审批";
+    case "approve":
+      return "审批通过";
+    case "reject":
+      return "审批拒绝";
+    default:
+      return action;
+  }
+}
+
+const approvalStatusSummary = computed(() => {
+  if (!order.value?.approval_required) {
+    return "当前模板未启用审批流。";
+  }
+  switch (currentBusinessStatus.value) {
+    case "pending_approval":
+      return "当前发布单待审批，发起人可提交审批，审批人也可以直接处理。";
+    case "approving":
+      return "当前发布单正在审批中，审批通过后才允许触发发布。";
+    case "approved":
+      return order.value.approved_by
+        ? `审批已通过，最后确认人：${order.value.approved_by}`
+        : "审批已通过，可继续触发发布。";
+    case "rejected":
+      return order.value.rejected_reason
+        ? `审批已拒绝：${order.value.rejected_reason}`
+        : "审批已拒绝，当前发布单不能继续执行。";
+    default:
+      return "审批流程已完成，可在此查看审批记录与审批人。";
+  }
+});
+
+const approvalActionModalTitle = computed(() => {
+  switch (approvalActionMode.value) {
+    case "submit":
+      return "提交审批";
+    case "approve":
+      return "审批通过";
+    case "reject":
+      return "审批拒绝";
+    default:
+      return "审批操作";
+  }
+});
+
+const approvalActionModalOkText = computed(() => {
+  switch (approvalActionMode.value) {
+    case "submit":
+      return "提交";
+    case "approve":
+      return "通过";
+    case "reject":
+      return "拒绝";
+    default:
+      return "确认";
+  }
+});
+
+const approvalActionPlaceholder = computed(() => {
+  switch (approvalActionMode.value) {
+    case "submit":
+      return "可选填写审批备注，帮助审批人理解本次发布背景。";
+    case "approve":
+      return "可选填写审批意见，例如放行原因、观察项。";
+    case "reject":
+      return "请填写拒绝原因，便于发起人修正发布内容。";
+    default:
+      return "请输入审批备注。";
+  }
+});
+
+function hookToneClass(status: ReleaseOrderStep["status"] | "skipped") {
+  switch (status) {
+    case "success":
+      return "status-pill-success";
+    case "running":
+      return "status-pill-running";
+    case "failed":
+      return "status-pill-failed";
+    case "skipped":
+      return "status-pill-neutral";
+    default:
+      return "status-pill-pending";
+  }
+}
+
+function toggleHookVariables(id: string) {
+  expandedHookVariableMap[id] = !expandedHookVariableMap[id];
+}
+
+function toggleHookLogs(id: string) {
+  expandedHookLogMap[id] = !expandedHookLogMap[id];
+}
+
+function openApprovalActionModal(mode: "submit" | "approve" | "reject") {
+  approvalActionMode.value = mode;
+  approvalActionComment.value = "";
+  approvalActionModalVisible.value = true;
+}
+
+function closeApprovalActionModal() {
+  approvalActionModalVisible.value = false;
+  approvalActionComment.value = "";
+}
+
 function latestScopeStepMessage(
   scope: ReleasePipelineScope,
   preferredStatus?: ReleaseOrderStep["status"],
@@ -1547,6 +1956,7 @@ async function loadDetail(options?: { silent?: boolean }) {
     params.value = paramsResp.data;
     valueProgress.value = valueProgressResp.data;
     steps.value = stepsResp.data;
+    await loadApprovalRecords({ silent: true });
     if (orderResp.data.is_concurrent) {
       await loadConcurrentBatchProgress({ silent });
     } else {
@@ -1683,6 +2093,38 @@ async function loadPrecheck(options?: { silent?: boolean }) {
   }
 }
 
+async function loadApprovalRecords(options?: { silent?: boolean }) {
+  if (!orderID.value) {
+    approvalRecords.value = [];
+    return;
+  }
+  const silent = Boolean(options?.silent);
+  const shouldLoad =
+    Boolean(order.value?.approval_required) ||
+    ["pending_approval", "approving", "approved", "rejected"].includes(
+      currentBusinessStatus.value,
+    );
+  if (!shouldLoad) {
+    approvalRecords.value = [];
+    return;
+  }
+  if (!silent) {
+    approvalRecordsLoading.value = true;
+  }
+  try {
+    const response = await listReleaseOrderApprovalRecords(orderID.value);
+    approvalRecords.value = response.data || [];
+  } catch (error) {
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, "审批记录加载失败"));
+    }
+  } finally {
+    if (!silent) {
+      approvalRecordsLoading.value = false;
+    }
+  }
+}
+
 async function openStageLogDrawer(stage: ReleaseOrderPipelineStage) {
   selectedPipelineStage.value = stage;
   stageLogDrawerVisible.value = true;
@@ -1766,6 +2208,45 @@ async function handleExecute() {
   } finally {
     executing.value = false;
     executeLocked.value = false;
+  }
+}
+
+async function handleApprovalAction() {
+  if (!order.value) {
+    return;
+  }
+  const comment = approvalActionComment.value.trim();
+  if (approvalActionMode.value === "reject" && !comment) {
+    message.warning("请先填写拒绝原因");
+    return;
+  }
+  approvalActing.value = true;
+  try {
+    let response;
+    switch (approvalActionMode.value) {
+      case "submit":
+        response = await submitReleaseOrderApproval(order.value.id, { comment });
+        message.success("审批已提交");
+        break;
+      case "approve":
+        response = await approveReleaseOrder(order.value.id, { comment });
+        message.success("审批已通过");
+        break;
+      case "reject":
+        response = await rejectReleaseOrder(order.value.id, { comment });
+        message.success("审批已拒绝");
+        break;
+      default:
+        return;
+    }
+    order.value = response.data;
+    closeApprovalActionModal();
+    await loadApprovalRecords({ silent: true });
+    await loadDetail({ silent: true });
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, "审批操作失败"));
+  } finally {
+    approvalActing.value = false;
   }
 }
 
@@ -1864,6 +2345,30 @@ onBeforeUnmount(() => {
             <ReloadOutlined />
           </template>
           刷新
+        </a-button>
+        <a-button
+          v-if="canSubmitApproval"
+          :loading="approvalActing && approvalActionMode === 'submit'"
+          @click="openApprovalActionModal('submit')"
+        >
+          提交审批
+        </a-button>
+        <a-button
+          v-if="canApproveOrder"
+          type="primary"
+          ghost
+          :loading="approvalActing && approvalActionMode === 'approve'"
+          @click="openApprovalActionModal('approve')"
+        >
+          审批通过
+        </a-button>
+        <a-button
+          v-if="canRejectOrder"
+          danger
+          :loading="approvalActing && approvalActionMode === 'reject'"
+          @click="openApprovalActionModal('reject')"
+        >
+          审批拒绝
         </a-button>
         <a-popconfirm
           v-if="canExecute"
@@ -2400,6 +2905,107 @@ onBeforeUnmount(() => {
         </a-card>
 
         <a-card
+          v-if="showApprovalCard"
+          class="detail-card"
+          title="审批进度"
+          :loading="loading || approvalRecordsLoading"
+          :bordered="true"
+        >
+          <div class="approval-summary">
+            <div class="approval-summary-head">
+              <div>
+                <div class="approval-summary-title">
+                  {{ statusText(currentBusinessStatus) }}
+                </div>
+                <div class="approval-summary-subtitle">
+                  {{ approvalStatusSummary }}
+                </div>
+              </div>
+              <a-tag
+                :class="['status-tag', statusToneClass(currentBusinessStatus)]"
+              >
+                <LoadingOutlined
+                  v-if="
+                    currentBusinessStatus === 'approving' ||
+                    currentBusinessStatus === 'pending_approval'
+                  "
+                  :spin="currentBusinessStatus === 'approving'"
+                />
+                <span>{{ statusText(currentBusinessStatus) }}</span>
+              </a-tag>
+            </div>
+            <div class="approval-meta-grid">
+              <div class="approval-meta-item">
+                <span class="approval-meta-label">审批方式</span>
+                <span class="approval-meta-value">{{
+                  approvalModeText(order?.approval_mode)
+                }}</span>
+              </div>
+              <div class="approval-meta-item">
+                <span class="approval-meta-label">审批人</span>
+                <span class="approval-meta-value">{{
+                  (order?.approval_approver_names || []).join(" / ") || "-"
+                }}</span>
+              </div>
+              <div class="approval-meta-item" v-if="order?.approved_at">
+                <span class="approval-meta-label">通过时间</span>
+                <span class="approval-meta-value">{{
+                  formatTime(order?.approved_at || null)
+                }}</span>
+              </div>
+              <div class="approval-meta-item" v-if="order?.rejected_at">
+                <span class="approval-meta-label">拒绝时间</span>
+                <span class="approval-meta-value">{{
+                  formatTime(order?.rejected_at || null)
+                }}</span>
+              </div>
+            </div>
+            <a-alert
+              v-if="order?.rejected_reason"
+              class="pipeline-stage-alert"
+              type="warning"
+              show-icon
+              :message="`拒绝原因：${order.rejected_reason}`"
+            />
+          </div>
+
+          <div class="approval-records">
+            <div class="approval-records-header">
+              <span>审批记录</span>
+              <span>{{ displayApprovalRecords.length }} 条</span>
+            </div>
+            <a-empty
+              v-if="displayApprovalRecords.length === 0"
+              description="当前还没有审批动作记录"
+            />
+            <div v-else class="approval-record-list">
+              <div
+                v-for="record in displayApprovalRecords"
+                :key="record.id"
+                class="approval-record-item"
+              >
+                <div class="approval-record-main">
+                  <div class="approval-record-title-row">
+                    <span class="approval-record-title">{{
+                      approvalActionText(record.action)
+                    }}</span>
+                    <a-tag class="status-chip status-chip-section">
+                      {{ record.operator_name || record.operator_user_id || "-" }}
+                    </a-tag>
+                  </div>
+                  <div class="approval-record-time">
+                    {{ formatTime(record.created_at) }}
+                  </div>
+                  <div v-if="record.comment" class="approval-record-comment">
+                    {{ record.comment }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </a-card>
+
+        <a-card
           v-if="showPrecheckCard"
           class="detail-card"
           title="执行前预检"
@@ -2468,6 +3074,121 @@ onBeforeUnmount(() => {
                 <span>执行器：{{ item.execution.provider || "-" }}</span>
                 <span>开始：{{ formatTime(item.execution.started_at) }}</span>
                 <span>结束：{{ formatTime(item.execution.finished_at) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="execution-extra-section">
+            <a-empty
+              v-if="hookProgressItems.length === 0"
+              description="当前发布单未产生 Hook 执行记录"
+            />
+            <div v-else class="execution-substack">
+              <div
+                v-for="group in hookProgressGroups"
+                :key="group.type"
+                class="execution-summary-card execution-summary-card-hook"
+              >
+                <div class="execution-summary-head">
+                  <div>
+                    <div class="execution-summary-title">{{ group.title }}</div>
+                    <div class="execution-summary-subtitle">
+                      {{ hookGroupSummaryText(group) }}
+                    </div>
+                  </div>
+                  <a-tag
+                    :class="['status-tag', hookToneClass(group.overallStatus)]"
+                  >
+                    <LoadingOutlined
+                      v-if="group.overallStatus === 'running'"
+                      spin
+                    />
+                    <span>{{ hookStatusText(group.overallStatus) }}</span>
+                  </a-tag>
+                </div>
+
+                <div class="hook-progress-rows">
+                  <div
+                    v-for="item in group.items"
+                    :key="item.id"
+                    class="hook-progress-row"
+                  >
+                    <div class="hook-progress-row-main">
+                      <div class="hook-progress-item-name-row">
+                        <span class="hook-progress-item-index"
+                          >#{{ item.order_index }}</span
+                        >
+                        <span class="hook-progress-item-name">{{
+                          item.step_name
+                        }}</span>
+                        <a-tag
+                          :class="['status-tag', hookToneClass(item.status)]"
+                        >
+                          <LoadingOutlined v-if="item.status === 'running'" spin />
+                          <span>{{ hookStatusText(item.status) }}</span>
+                        </a-tag>
+                      </div>
+                      <div class="hook-progress-row-detail">
+                        {{ hookExecutionContentText(item) }}
+                      </div>
+                      <div class="hook-progress-row-meta">
+                        <span>{{ item.step_code }}</span>
+                        <span>开始：{{ formatTime(item.started_at) }}</span>
+                        <span>结束：{{ formatTime(item.finished_at) }}</span>
+                      </div>
+                    </div>
+                    <div class="hook-progress-item-actions">
+                      <a-button
+                        type="link"
+                        size="small"
+                        @click="toggleHookVariables(item.id)"
+                      >
+                        {{
+                          expandedHookVariableMap[item.id] ? "收起变量" : "查看变量"
+                        }}
+                      </a-button>
+                      <a-button
+                        type="link"
+                        size="small"
+                        @click="toggleHookLogs(item.id)"
+                      >
+                        {{ expandedHookLogMap[item.id] ? "收起日志" : "查看日志" }}
+                      </a-button>
+                    </div>
+                    <div
+                      v-if="expandedHookVariableMap[item.id]"
+                      class="hook-progress-panel"
+                    >
+                      <div class="hook-progress-panel-title">
+                        变量预览（兼容视图）
+                      </div>
+                      <div class="hook-progress-context-grid">
+                        <div
+                          v-for="contextItem in hookContextPreviewItems"
+                          :key="`${item.id}-${contextItem.label}`"
+                          class="hook-progress-context-item"
+                        >
+                          <span class="hook-progress-context-label">{{
+                            contextItem.label
+                          }}</span>
+                          <span class="hook-progress-context-value">{{
+                            contextItem.value
+                          }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      v-if="expandedHookLogMap[item.id]"
+                      class="hook-progress-panel"
+                    >
+                      <div class="hook-progress-panel-title">执行日志</div>
+                      <pre class="hook-progress-log">{{
+                        item.summary ||
+                        "暂无独立日志输出，当前 Hook 仍在等待后端日志链路接入。"
+                      }}</pre>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -2596,6 +3317,30 @@ onBeforeUnmount(() => {
         stageLogContent || "暂无阶段日志输出"
       }}</pre>
     </a-drawer>
+
+    <a-modal
+      :open="approvalActionModalVisible"
+      :title="approvalActionModalTitle"
+      :confirm-loading="approvalActing"
+      :ok-text="approvalActionModalOkText"
+      cancel-text="取消"
+      @ok="handleApprovalAction"
+      @cancel="closeApprovalActionModal"
+    >
+      <a-form layout="vertical">
+        <a-form-item
+          :label="approvalActionMode === 'reject' ? '拒绝原因' : '审批备注'"
+          :required="approvalActionMode === 'reject'"
+        >
+          <a-textarea
+            v-model:value="approvalActionComment"
+            :rows="4"
+            :maxlength="400"
+            :placeholder="approvalActionPlaceholder"
+          />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -2926,6 +3671,34 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.execution-extra-section {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.execution-extra-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.execution-extra-section-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.execution-extra-section-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+
 .execution-summary-card {
   padding: 16px;
   border-radius: 16px;
@@ -2970,6 +3743,19 @@ onBeforeUnmount(() => {
   margin-top: 14px;
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.execution-summary-caption {
+  margin-top: 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.execution-substack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .scope-section + .scope-section {
@@ -3109,6 +3895,132 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.hook-progress-item-name-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hook-progress-item-index {
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.hook-progress-item-name {
+  color: var(--color-text-main);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.execution-summary-card-hook {
+  padding: 14px 16px;
+}
+
+.hook-progress-rows {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.hook-progress-row {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px dashed rgba(148, 163, 184, 0.2);
+}
+
+.hook-progress-row:first-child {
+  padding-top: 4px;
+  border-top: none;
+}
+
+.hook-progress-row-main {
+  min-width: 0;
+}
+
+.hook-progress-row-detail {
+  margin-top: 8px;
+  color: var(--color-text-main);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.hook-progress-row-meta {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.hook-progress-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.hook-progress-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.hook-progress-panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.hook-progress-context-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hook-progress-context-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.hook-progress-context-label {
+  color: var(--color-text-soft);
+  font-size: 12px;
+}
+
+.hook-progress-context-value {
+  color: var(--color-text-main);
+  font-size: 13px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.hook-progress-log {
+  margin: 0;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 12px;
+  padding: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
 .precheck-item {
   display: flex;
   align-items: flex-start;
@@ -3137,6 +4049,121 @@ onBeforeUnmount(() => {
   margin-top: 4px;
   color: var(--color-text-secondary);
   line-height: 1.6;
+}
+
+.approval-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.approval-summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.approval-summary-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.approval-summary-subtitle {
+  margin-top: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.approval-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.approval-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(248, 250, 252, 0.7);
+}
+
+.approval-meta-label {
+  color: var(--color-text-soft);
+  font-size: 12px;
+}
+
+.approval-meta-value {
+  color: var(--color-text-main);
+  font-size: 13px;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.approval-records {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.approval-records-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.approval-record-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.approval-record-item {
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(248, 250, 252, 0.72);
+}
+
+.approval-record-main {
+  min-width: 0;
+}
+
+.approval-record-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.approval-record-title {
+  color: var(--color-text-main);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.approval-record-time {
+  margin-top: 6px;
+  color: var(--color-text-soft);
+  font-size: 12px;
+}
+
+.approval-record-comment {
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
 }
 
 .context-list {
@@ -3490,6 +4517,25 @@ onBeforeUnmount(() => {
   .context-item {
     grid-template-columns: 1fr;
     gap: 4px;
+  }
+
+  .hook-progress-summary,
+  .hook-progress-item-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .hook-progress-context-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-meta-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-record-title-row {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .batch-progress-stats {

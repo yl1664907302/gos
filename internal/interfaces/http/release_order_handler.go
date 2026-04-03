@@ -65,9 +65,14 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/release-orders/:id/rollback", h.CreateRollbackByOrder)
 	router.POST("/release-orders/:id/replay", h.CreateReplayByOrder)
 	router.GET("/release-orders", h.List)
+	router.GET("/release-approval-records", h.ListApprovalRecordSummaries)
 	router.GET("/release-orders/:id", h.GetByID)
 	router.GET("/release-orders/:id/precheck", h.GetPrecheck)
 	router.GET("/release-orders/:id/concurrent-batch-progress", h.GetConcurrentBatchProgress)
+	router.GET("/release-orders/:id/approval-records", h.ListApprovalRecords)
+	router.POST("/release-orders/:id/submit-approval", h.SubmitApproval)
+	router.POST("/release-orders/:id/approve", h.Approve)
+	router.POST("/release-orders/:id/reject", h.Reject)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
 	router.POST("/release-orders/:id/execute", h.Execute)
 	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
@@ -125,39 +130,48 @@ type BatchExecuteReleaseOrdersRequest struct {
 }
 
 type ReleaseOrderResponse struct {
-	ID                 string     `json:"id"`
-	OrderNo            string     `json:"order_no"`
-	PreviousOrderNo    string     `json:"previous_order_no"`
-	OperationType      string     `json:"operation_type"`
-	SourceOrderID      string     `json:"source_order_id"`
-	SourceOrderNo      string     `json:"source_order_no"`
-	IsConcurrent       bool       `json:"is_concurrent"`
-	ConcurrentBatchNo  string     `json:"concurrent_batch_no"`
-	ConcurrentBatchSeq int        `json:"concurrent_batch_seq"`
-	CDProvider         string     `json:"cd_provider"`
-	ApplicationID      string     `json:"application_id"`
-	ApplicationName    string     `json:"application_name"`
-	TemplateID         string     `json:"template_id"`
-	TemplateName       string     `json:"template_name"`
-	BindingID          string     `json:"binding_id"`
-	PipelineID         string     `json:"pipeline_id"`
-	EnvCode            string     `json:"env_code"`
-	ProjectName        string     `json:"project_name"`
-	SonService         string     `json:"son_service"`
-	GitRef             string     `json:"git_ref"`
-	ImageTag           string     `json:"image_tag"`
-	TriggerType        string     `json:"trigger_type"`
-	Status             string     `json:"status"`
-	BusinessStatus     string     `json:"business_status"`
-	QueuePosition      int        `json:"queue_position"`
-	QueuedReason       string     `json:"queued_reason"`
-	Remark             string     `json:"remark"`
-	CreatorUserID      string     `json:"creator_user_id"`
-	TriggeredBy        string     `json:"triggered_by"`
-	StartedAt          *time.Time `json:"started_at"`
-	FinishedAt         *time.Time `json:"finished_at"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                    string     `json:"id"`
+	OrderNo               string     `json:"order_no"`
+	PreviousOrderNo       string     `json:"previous_order_no"`
+	OperationType         string     `json:"operation_type"`
+	SourceOrderID         string     `json:"source_order_id"`
+	SourceOrderNo         string     `json:"source_order_no"`
+	IsConcurrent          bool       `json:"is_concurrent"`
+	ConcurrentBatchNo     string     `json:"concurrent_batch_no"`
+	ConcurrentBatchSeq    int        `json:"concurrent_batch_seq"`
+	CDProvider            string     `json:"cd_provider"`
+	ApplicationID         string     `json:"application_id"`
+	ApplicationName       string     `json:"application_name"`
+	TemplateID            string     `json:"template_id"`
+	TemplateName          string     `json:"template_name"`
+	BindingID             string     `json:"binding_id"`
+	PipelineID            string     `json:"pipeline_id"`
+	EnvCode               string     `json:"env_code"`
+	ProjectName           string     `json:"project_name"`
+	SonService            string     `json:"son_service"`
+	GitRef                string     `json:"git_ref"`
+	ImageTag              string     `json:"image_tag"`
+	TriggerType           string     `json:"trigger_type"`
+	Status                string     `json:"status"`
+	BusinessStatus        string     `json:"business_status"`
+	ApprovalRequired      bool       `json:"approval_required"`
+	ApprovalMode          string     `json:"approval_mode"`
+	ApprovalApproverIDs   []string   `json:"approval_approver_ids"`
+	ApprovalApproverNames []string   `json:"approval_approver_names"`
+	ApprovedAt            *time.Time `json:"approved_at"`
+	ApprovedBy            string     `json:"approved_by"`
+	RejectedAt            *time.Time `json:"rejected_at"`
+	RejectedBy            string     `json:"rejected_by"`
+	RejectedReason        string     `json:"rejected_reason"`
+	QueuePosition         int        `json:"queue_position"`
+	QueuedReason          string     `json:"queued_reason"`
+	Remark                string     `json:"remark"`
+	CreatorUserID         string     `json:"creator_user_id"`
+	TriggeredBy           string     `json:"triggered_by"`
+	StartedAt             *time.Time `json:"started_at"`
+	FinishedAt            *time.Time `json:"finished_at"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
 type ReleaseOrderParamResponse struct {
@@ -298,6 +312,49 @@ type ReleaseOrderBatchExecuteResponse struct {
 	} `json:"data"`
 }
 
+type ReleaseOrderApprovalActionRequest struct {
+	Comment string `json:"comment"`
+}
+
+type ReleaseOrderApprovalRecordResponse struct {
+	ID             string    `json:"id"`
+	ReleaseOrderID string    `json:"release_order_id"`
+	Action         string    `json:"action"`
+	OperatorUserID string    `json:"operator_user_id"`
+	OperatorName   string    `json:"operator_name"`
+	Comment        string    `json:"comment"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type ReleaseOrderApprovalRecordListResponse struct {
+	Data []ReleaseOrderApprovalRecordResponse `json:"data"`
+}
+
+type ReleaseOrderApprovalRecordSummaryResponse struct {
+	ID              string    `json:"id"`
+	ReleaseOrderID  string    `json:"release_order_id"`
+	OrderNo         string    `json:"order_no"`
+	OrderStatus     string    `json:"order_status"`
+	BusinessStatus  string    `json:"business_status"`
+	ApplicationID   string    `json:"application_id"`
+	ApplicationName string    `json:"application_name"`
+	EnvCode         string    `json:"env_code"`
+	OperationType   string    `json:"operation_type"`
+	TriggeredBy     string    `json:"triggered_by"`
+	Action          string    `json:"action"`
+	OperatorUserID  string    `json:"operator_user_id"`
+	OperatorName    string    `json:"operator_name"`
+	Comment         string    `json:"comment"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type ReleaseOrderApprovalRecordSummaryListResponse struct {
+	Data     []ReleaseOrderApprovalRecordSummaryResponse `json:"data"`
+	Page     int                                         `json:"page"`
+	PageSize int                                         `json:"page_size"`
+	Total    int64                                       `json:"total"`
+}
+
 // Create godoc
 // @Summary      Create release order
 // @Tags         release-orders
@@ -382,6 +439,11 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is required"})
 		return
 	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 	for _, orderID := range req.OrderIDs {
 		item, err := h.manager.GetByID(c.Request.Context(), orderID)
 		if err != nil {
@@ -391,7 +453,7 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 		if !ensureReleaseOrderVisible(c, h.authz, item.ApplicationID, item.CreatorUserID) {
 			return
 		}
-		if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", item.ApplicationID) {
+		if !ensureReleaseOrderExecuteActor(c, currentUser, item) {
 			return
 		}
 	}
@@ -544,15 +606,16 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 	}
 
 	items, total, err := h.manager.List(c.Request.Context(), usecase.ListReleaseOrderInput{
-		ApplicationID:  applicationID,
-		ApplicationIDs: resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
-		CreatorUserID:  resolveReleaseOrderCreatorFilter(currentUser),
-		BindingID:      c.Query("binding_id"),
-		EnvCode:        c.Query("env_code"),
-		Status:         domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
-		TriggerType:    domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
-		Page:           page,
-		PageSize:       pageSize,
+		ApplicationID:          applicationID,
+		ApplicationIDs:         resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		ApprovalApproverUserID: strings.TrimSpace(c.Query("approval_approver_user_id")),
+		CreatorUserID:          resolveReleaseOrderCreatorFilter(currentUser),
+		BindingID:              c.Query("binding_id"),
+		EnvCode:                c.Query("env_code"),
+		Status:                 domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
+		TriggerType:            domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
+		Page:                   page,
+		PageSize:               pageSize,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -565,6 +628,70 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 	resp := make([]ReleaseOrderResponse, 0, len(items))
 	for _, item := range items {
 		resp = append(resp, toReleaseOrderResponse(item))
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data":      resp,
+		"page":      resolvedPage(page),
+		"page_size": resolvedPageSize(pageSize),
+		"total":     total,
+	})
+}
+
+func (h *ReleaseOrderHandler) ListApprovalRecordSummaries(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	page, err := parsePositiveInt(c, "page")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	pageSize, err := parsePositiveInt(c, "page_size")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	applicationID := strings.TrimSpace(c.Query("application_id"))
+	allowAll, visibleApplicationIDs, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	if !ok {
+		return
+	}
+	if !allowAll {
+		if applicationID != "" {
+			if !containsString(visibleApplicationIDs, applicationID) {
+				c.JSON(http.StatusOK, gin.H{
+					"data":      []ReleaseOrderApprovalRecordSummaryResponse{},
+					"page":      resolvedPage(page),
+					"page_size": resolvedPageSize(pageSize),
+					"total":     0,
+				})
+				return
+			}
+		} else if len(visibleApplicationIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{
+				"data":      []ReleaseOrderApprovalRecordSummaryResponse{},
+				"page":      resolvedPage(page),
+				"page_size": resolvedPageSize(pageSize),
+				"total":     0,
+			})
+			return
+		}
+	}
+
+	items, total, err := h.manager.ListApprovalRecordSummaries(c.Request.Context(), usecase.ListApprovalRecordSummaryInput{
+		ApplicationID:  applicationID,
+		ApplicationIDs: resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		OperatorUserID: strings.TrimSpace(c.Query("operator_user_id")),
+		Page:           page,
+		PageSize:       pageSize,
+	})
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := make([]ReleaseOrderApprovalRecordSummaryResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, toReleaseOrderApprovalRecordSummaryResponse(item))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"data":      resp,
@@ -683,6 +810,141 @@ func (h *ReleaseOrderHandler) GetConcurrentBatchProgress(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
+func (h *ReleaseOrderHandler) ListApprovalRecords(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	items, err := h.manager.ListApprovalRecords(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := make([]ReleaseOrderApprovalRecordResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, toReleaseOrderApprovalRecordResponse(item))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": resp})
+}
+
+func (h *ReleaseOrderHandler) SubmitApproval(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.approval.submit", existing.ApplicationID) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	var req ReleaseOrderApprovalActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	item, err := h.manager.SubmitApproval(
+		c.Request.Context(),
+		c.Param("id"),
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+		req.Comment,
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+func (h *ReleaseOrderHandler) Approve(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderApprovalActor(c, currentUser, existing) {
+		return
+	}
+	var req ReleaseOrderApprovalActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	item, err := h.manager.Approve(
+		c.Request.Context(),
+		c.Param("id"),
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+		req.Comment,
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+func (h *ReleaseOrderHandler) Reject(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderApprovalActor(c, currentUser, existing) {
+		return
+	}
+	var req ReleaseOrderApprovalActionRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	item, err := h.manager.Reject(
+		c.Request.Context(),
+		c.Param("id"),
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+		req.Comment,
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
 // Cancel godoc
 // @Summary      Cancel release order
 // @Tags         release-orders
@@ -733,7 +995,12 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing.ApplicationID, existing.CreatorUserID) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
 		return
 	}
 	item, err := h.manager.Execute(c.Request.Context(), c.Param("id"))
@@ -1016,39 +1283,48 @@ func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
 
 func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 	return ReleaseOrderResponse{
-		ID:                 item.ID,
-		OrderNo:            item.OrderNo,
-		PreviousOrderNo:    item.PreviousOrderNo,
-		OperationType:      string(item.OperationType),
-		SourceOrderID:      item.SourceOrderID,
-		SourceOrderNo:      item.SourceOrderNo,
-		IsConcurrent:       item.IsConcurrent,
-		ConcurrentBatchNo:  item.ConcurrentBatchNo,
-		ConcurrentBatchSeq: item.ConcurrentBatchSeq,
-		CDProvider:         item.CDProvider,
-		ApplicationID:      item.ApplicationID,
-		ApplicationName:    item.ApplicationName,
-		TemplateID:         item.TemplateID,
-		TemplateName:       item.TemplateName,
-		BindingID:          item.BindingID,
-		PipelineID:         item.PipelineID,
-		EnvCode:            item.EnvCode,
-		ProjectName:        item.SonService,
-		SonService:         item.SonService,
-		GitRef:             item.GitRef,
-		ImageTag:           item.ImageTag,
-		TriggerType:        string(item.TriggerType),
-		Status:             string(item.Status),
-		BusinessStatus:     string(item.BusinessStatus),
-		QueuePosition:      item.QueuePosition,
-		QueuedReason:       item.QueuedReason,
-		Remark:             item.Remark,
-		CreatorUserID:      item.CreatorUserID,
-		TriggeredBy:        item.TriggeredBy,
-		StartedAt:          item.StartedAt,
-		FinishedAt:         item.FinishedAt,
-		CreatedAt:          item.CreatedAt,
-		UpdatedAt:          item.UpdatedAt,
+		ID:                    item.ID,
+		OrderNo:               item.OrderNo,
+		PreviousOrderNo:       item.PreviousOrderNo,
+		OperationType:         string(item.OperationType),
+		SourceOrderID:         item.SourceOrderID,
+		SourceOrderNo:         item.SourceOrderNo,
+		IsConcurrent:          item.IsConcurrent,
+		ConcurrentBatchNo:     item.ConcurrentBatchNo,
+		ConcurrentBatchSeq:    item.ConcurrentBatchSeq,
+		CDProvider:            item.CDProvider,
+		ApplicationID:         item.ApplicationID,
+		ApplicationName:       item.ApplicationName,
+		TemplateID:            item.TemplateID,
+		TemplateName:          item.TemplateName,
+		BindingID:             item.BindingID,
+		PipelineID:            item.PipelineID,
+		EnvCode:               item.EnvCode,
+		ProjectName:           item.SonService,
+		SonService:            item.SonService,
+		GitRef:                item.GitRef,
+		ImageTag:              item.ImageTag,
+		TriggerType:           string(item.TriggerType),
+		Status:                string(item.Status),
+		BusinessStatus:        string(item.BusinessStatus),
+		ApprovalRequired:      item.ApprovalRequired,
+		ApprovalMode:          string(item.ApprovalMode),
+		ApprovalApproverIDs:   append([]string(nil), item.ApprovalApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), item.ApprovalApproverNames...),
+		ApprovedAt:            item.ApprovedAt,
+		ApprovedBy:            item.ApprovedBy,
+		RejectedAt:            item.RejectedAt,
+		RejectedBy:            item.RejectedBy,
+		RejectedReason:        item.RejectedReason,
+		QueuePosition:         item.QueuePosition,
+		QueuedReason:          item.QueuedReason,
+		Remark:                item.Remark,
+		CreatorUserID:         item.CreatorUserID,
+		TriggeredBy:           item.TriggeredBy,
+		StartedAt:             item.StartedAt,
+		FinishedAt:            item.FinishedAt,
+		CreatedAt:             item.CreatedAt,
+		UpdatedAt:             item.UpdatedAt,
 	}
 }
 
@@ -1200,6 +1476,38 @@ func toReleaseOrderExecutionResponse(item domain.ReleaseOrderExecution) ReleaseO
 	}
 }
 
+func toReleaseOrderApprovalRecordResponse(item domain.ReleaseOrderApprovalRecord) ReleaseOrderApprovalRecordResponse {
+	return ReleaseOrderApprovalRecordResponse{
+		ID:             item.ID,
+		ReleaseOrderID: item.ReleaseOrderID,
+		Action:         string(item.Action),
+		OperatorUserID: item.OperatorUserID,
+		OperatorName:   item.OperatorName,
+		Comment:        item.Comment,
+		CreatedAt:      item.CreatedAt,
+	}
+}
+
+func toReleaseOrderApprovalRecordSummaryResponse(item domain.ReleaseOrderApprovalRecordSummary) ReleaseOrderApprovalRecordSummaryResponse {
+	return ReleaseOrderApprovalRecordSummaryResponse{
+		ID:              item.ID,
+		ReleaseOrderID:  item.ReleaseOrderID,
+		OrderNo:         item.OrderNo,
+		OrderStatus:     string(item.OrderStatus),
+		BusinessStatus:  string(deriveReleaseBusinessStatus(item.OrderStatus, false)),
+		ApplicationID:   item.ApplicationID,
+		ApplicationName: item.ApplicationName,
+		EnvCode:         item.EnvCode,
+		OperationType:   string(item.OperationType),
+		TriggeredBy:     item.TriggeredBy,
+		Action:          string(item.Action),
+		OperatorUserID:  item.OperatorUserID,
+		OperatorName:    item.OperatorName,
+		Comment:         item.Comment,
+		CreatedAt:       item.CreatedAt,
+	}
+}
+
 func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, usecase.ErrInvalidInput),
@@ -1274,6 +1582,41 @@ func ensureReleaseApplicationPermission(
 		strings.TrimSpace(applicationID),
 		"无权限：当前应用的发布权限已变更，请刷新页面后重试",
 	)
+}
+
+func ensureReleaseOrderApprovalActor(
+	c *gin.Context,
+	user userdomain.User,
+	order domain.ReleaseOrder,
+) bool {
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+	currentUserID := strings.TrimSpace(user.ID)
+	for _, item := range order.ApprovalApproverIDs {
+		if strings.TrimSpace(item) == currentUserID {
+			return true
+		}
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: current user is not in approval approver list"})
+	return false
+}
+
+func ensureReleaseOrderExecuteActor(
+	c *gin.Context,
+	user userdomain.User,
+	order domain.ReleaseOrder,
+) bool {
+	currentUserID := strings.TrimSpace(user.ID)
+	if currentUserID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if strings.TrimSpace(order.CreatorUserID) == currentUserID {
+		return true
+	}
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: only release order creator can execute this release order"})
+	return false
 }
 
 func ensureAnyReleaseOrderDisplayPermission(c *gin.Context, authz RequestAuthorizer) bool {

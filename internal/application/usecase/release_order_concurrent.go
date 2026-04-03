@@ -76,8 +76,8 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 		if err != nil {
 			return BatchExecuteReleaseOrdersOutput{}, err
 		}
-		if !isPendingOrderStatus(item.Status) {
-			return BatchExecuteReleaseOrdersOutput{}, fmt.Errorf("%w: 发布单 %s 不是待执行状态", ErrInvalidInput, item.OrderNo)
+		if !isExecutableOrderStatus(item.Status) {
+			return BatchExecuteReleaseOrdersOutput{}, fmt.Errorf("%w: 发布单 %s 不处于待执行或已批准状态", ErrInvalidInput, item.OrderNo)
 		}
 		executions, err := uc.repo.ListExecutions(ctx, item.ID)
 		if err != nil {

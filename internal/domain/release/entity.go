@@ -232,38 +232,47 @@ func (s ValueSource) Valid() bool {
 }
 
 type ReleaseOrder struct {
-	ID                 string
-	OrderNo            string
-	PreviousOrderNo    string
-	OperationType      OperationType
-	SourceOrderID      string
-	SourceOrderNo      string
-	IsConcurrent       bool
-	ConcurrentBatchNo  string
-	ConcurrentBatchSeq int
-	CDProvider         string
-	ApplicationID      string
-	ApplicationName    string
-	TemplateID         string
-	TemplateName       string
-	BindingID          string
-	PipelineID         string
-	EnvCode            string
-	SonService         string
-	GitRef             string
-	ImageTag           string
-	TriggerType        TriggerType
-	Status             OrderStatus
-	BusinessStatus     ReleaseBusinessStatus
-	QueuePosition      int
-	QueuedReason       string
-	Remark             string
-	CreatorUserID      string
-	TriggeredBy        string
-	StartedAt          *time.Time
-	FinishedAt         *time.Time
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                    string
+	OrderNo               string
+	PreviousOrderNo       string
+	OperationType         OperationType
+	SourceOrderID         string
+	SourceOrderNo         string
+	IsConcurrent          bool
+	ConcurrentBatchNo     string
+	ConcurrentBatchSeq    int
+	CDProvider            string
+	ApplicationID         string
+	ApplicationName       string
+	TemplateID            string
+	TemplateName          string
+	BindingID             string
+	PipelineID            string
+	EnvCode               string
+	SonService            string
+	GitRef                string
+	ImageTag              string
+	TriggerType           TriggerType
+	Status                OrderStatus
+	BusinessStatus        ReleaseBusinessStatus
+	ApprovalRequired      bool
+	ApprovalMode          TemplateApprovalMode
+	ApprovalApproverIDs   []string
+	ApprovalApproverNames []string
+	ApprovedAt            *time.Time
+	ApprovedBy            string
+	RejectedAt            *time.Time
+	RejectedBy            string
+	RejectedReason        string
+	QueuePosition         int
+	QueuedReason          string
+	Remark                string
+	CreatorUserID         string
+	TriggeredBy           string
+	StartedAt             *time.Time
+	FinishedAt            *time.Time
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }
 
 type DeploySnapshot struct {
@@ -448,19 +457,39 @@ func (s TemplateStatus) Valid() bool {
 }
 
 type ReleaseTemplate struct {
-	ID              string
-	Name            string
-	ApplicationID   string
-	ApplicationName string
-	BindingID       string
-	BindingName     string
-	BindingType     string
-	GitOpsType      GitOpsType
-	Status          TemplateStatus
-	Remark          string
-	ParamCount      int
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                    string
+	Name                  string
+	ApplicationID         string
+	ApplicationName       string
+	BindingID             string
+	BindingName           string
+	BindingType           string
+	GitOpsType            GitOpsType
+	Status                TemplateStatus
+	ApprovalEnabled       bool
+	ApprovalMode          TemplateApprovalMode
+	ApprovalApproverIDs   []string
+	ApprovalApproverNames []string
+	Remark                string
+	ParamCount            int
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+}
+
+type TemplateApprovalMode string
+
+const (
+	TemplateApprovalModeAny TemplateApprovalMode = "any"
+	TemplateApprovalModeAll TemplateApprovalMode = "all"
+)
+
+func (s TemplateApprovalMode) Valid() bool {
+	switch s {
+	case "", TemplateApprovalModeAny, TemplateApprovalModeAll:
+		return true
+	default:
+		return false
+	}
 }
 
 type ReleaseTemplateBinding struct {
@@ -573,4 +602,109 @@ type ReleaseTemplateGitOpsRule struct {
 	SortNo           int
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
+}
+
+type TemplateHookType string
+
+const (
+	TemplateHookTypeAgentTask           TemplateHookType = "agent_task"
+	TemplateHookTypeWebhookNotification TemplateHookType = "webhook_notification"
+)
+
+func (s TemplateHookType) Valid() bool {
+	switch s {
+	case TemplateHookTypeAgentTask, TemplateHookTypeWebhookNotification:
+		return true
+	default:
+		return false
+	}
+}
+
+type TemplateHookTriggerCondition string
+
+const (
+	TemplateHookTriggerOnSuccess TemplateHookTriggerCondition = "on_success"
+	TemplateHookTriggerOnFailed  TemplateHookTriggerCondition = "on_failed"
+	TemplateHookTriggerAlways    TemplateHookTriggerCondition = "always"
+)
+
+func (s TemplateHookTriggerCondition) Valid() bool {
+	switch s {
+	case TemplateHookTriggerOnSuccess, TemplateHookTriggerOnFailed, TemplateHookTriggerAlways:
+		return true
+	default:
+		return false
+	}
+}
+
+type TemplateHookFailurePolicy string
+
+const (
+	TemplateHookFailurePolicyBlockRelease TemplateHookFailurePolicy = "block_release"
+	TemplateHookFailurePolicyWarnOnly     TemplateHookFailurePolicy = "warn_only"
+)
+
+func (s TemplateHookFailurePolicy) Valid() bool {
+	switch s {
+	case TemplateHookFailurePolicyBlockRelease, TemplateHookFailurePolicyWarnOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseTemplateHook struct {
+	ID               string
+	TemplateID       string
+	HookType         TemplateHookType
+	Name             string
+	TriggerCondition TemplateHookTriggerCondition
+	FailurePolicy    TemplateHookFailurePolicy
+	TargetID         string
+	TargetName       string
+	WebhookMethod    string
+	WebhookURL       string
+	WebhookBody      string
+	Note             string
+	SortNo           int
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type ReleaseOrderApprovalAction string
+
+const (
+	ReleaseOrderApprovalActionSubmit  ReleaseOrderApprovalAction = "submit"
+	ReleaseOrderApprovalActionApprove ReleaseOrderApprovalAction = "approve"
+	ReleaseOrderApprovalActionReject  ReleaseOrderApprovalAction = "reject"
+)
+
+func (s ReleaseOrderApprovalAction) Valid() bool {
+	switch s {
+	case ReleaseOrderApprovalActionSubmit, ReleaseOrderApprovalActionApprove, ReleaseOrderApprovalActionReject:
+		return true
+	default:
+		return false
+	}
+}
+
+type ReleaseOrderApprovalRecord struct {
+	ID             string
+	ReleaseOrderID string
+	Action         ReleaseOrderApprovalAction
+	OperatorUserID string
+	OperatorName   string
+	Comment        string
+	CreatedAt      time.Time
+}
+
+type ReleaseOrderApprovalRecordSummary struct {
+	ReleaseOrderApprovalRecord
+	OrderNo         string
+	OrderStatus     OrderStatus
+	ApplicationID   string
+	ApplicationName string
+	EnvCode         string
+	OperationType   OperationType
+	TriggeredBy     string
 }

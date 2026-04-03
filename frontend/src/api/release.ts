@@ -3,6 +3,10 @@ import { apiBaseURL, http } from "./http";
 import type {
   BatchExecuteReleaseOrdersPayload,
   CreateReleaseOrderPayload,
+  ReleaseOrderApprovalActionPayload,
+  ReleaseOrderApprovalRecordListResponse,
+  ReleaseOrderApprovalRecordSummaryListParams,
+  ReleaseOrderApprovalRecordSummaryListResponse,
   ReleaseOrderBatchExecuteResponse,
   ReleaseOrderConcurrentBatchProgressResponse,
   ReleaseOrderDataResponse,
@@ -98,6 +102,58 @@ export async function getReleaseOrderConcurrentBatchProgress(
 ): Promise<ReleaseOrderConcurrentBatchProgressResponse> {
   const response = await http.get<ReleaseOrderConcurrentBatchProgressResponse>(
     `/release-orders/${id}/concurrent-batch-progress`,
+  );
+  return response.data;
+}
+
+export async function listReleaseOrderApprovalRecords(
+  id: string,
+): Promise<ReleaseOrderApprovalRecordListResponse> {
+  const response = await http.get<ReleaseOrderApprovalRecordListResponse>(
+    `/release-orders/${id}/approval-records`,
+  );
+  return response.data;
+}
+
+export async function listReleaseApprovalRecordSummaries(
+  params: ReleaseOrderApprovalRecordSummaryListParams,
+): Promise<ReleaseOrderApprovalRecordSummaryListResponse> {
+  const response = await http.get<ReleaseOrderApprovalRecordSummaryListResponse>(
+    "/release-approval-records",
+    { params },
+  );
+  return response.data;
+}
+
+export async function submitReleaseOrderApproval(
+  id: string,
+  payload: ReleaseOrderApprovalActionPayload = {},
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${id}/submit-approval`,
+    payload,
+  );
+  return response.data;
+}
+
+export async function approveReleaseOrder(
+  id: string,
+  payload: ReleaseOrderApprovalActionPayload = {},
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${id}/approve`,
+    payload,
+  );
+  return response.data;
+}
+
+export async function rejectReleaseOrder(
+  id: string,
+  payload: ReleaseOrderApprovalActionPayload,
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${id}/reject`,
+    payload,
   );
   return response.data;
 }

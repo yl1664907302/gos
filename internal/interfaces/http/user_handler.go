@@ -201,7 +201,7 @@ func (h *UserHandler) ListUsers(c *gin.Context) {
 }
 
 func (h *UserHandler) ListUserOptions(c *gin.Context) {
-	if !ensurePermission(c, h.authz, "application.manage", "", "") {
+	if !ensureAnyPermission(c, h.authz, "application.manage", "release.template.manage", "system.user.manage") {
 		return
 	}
 	items, err := h.users.ListUserOptions(c.Request.Context())

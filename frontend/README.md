@@ -1,4 +1,4 @@
-# GOS Frontend
+# GOS Release Frontend
 
 基于 `Vue3 + Vite + TypeScript + Ant Design Vue` 的应用管理前端实现，对齐文档：
 - `/Users/lingyunxieqing/Desktop/gos/docs/frontend-requirements-v0.0.1.md`

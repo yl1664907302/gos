@@ -24,7 +24,7 @@ import type { Application } from '../../types/application'
 import type { ReleaseOperationType, ReleaseOrder, ReleaseOrderBusinessStatus } from '../../types/release'
 import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
-type MetricTone = 'default' | 'success' | 'running' | 'danger'
+type MetricTone = 'default' | 'success' | 'running' | 'danger' | 'warning'
 
 function releaseBusinessStatus(order: Pick<ReleaseOrder, 'status' | 'business_status'>): ReleaseOrderBusinessStatus {
   if (order.business_status) {
@@ -181,46 +181,51 @@ const overviewMetrics = computed(() => {
 
 const spotlightCard = computed(() => {
   const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
-  const failed = visibleOrders.find((item) => releaseBusinessStatus(item) === 'deploy_failed')
-  if (failed) {
+  const pendingApprovalOrders = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'pending_approval')
+  const approvingOrders = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'approving')
+  const approvedToday = visibleOrders.filter(
+    (item) => releaseBusinessStatus(item) === 'approved' && dayjs(item.updated_at).isSame(dayjs(), 'day'),
+  )
+
+  if (pendingApprovalOrders.length > 0 || approvingOrders.length > 0) {
+    const priorityOrder = approvingOrders[0] || pendingApprovalOrders[0]
+    const pendingCount = pendingApprovalOrders.length
+    const approvingCount = approvingOrders.length
     return {
-      tone: 'danger' as MetricTone,
+      tone: approvingCount > 0 ? 'warning' as MetricTone : 'running' as MetricTone,
       label: '当前关注',
-      title: '优先处理失败发布',
-      text: `${failed.application_name} · ${failed.env_code || '未标注环境'}`,
-      meta: `最近失败单：${failed.order_no}`,
-      status: releaseBusinessStatus(failed),
+      title: pendingCount + approvingCount > 1 ? `有 ${pendingCount + approvingCount} 张单子等待审批` : '有 1 张单子等待审批',
+      text: `${priorityOrder.application_name} · ${priorityOrder.env_code || '未标注环境'} · ${priorityOrder.order_no}`,
+      meta: `待审批 ${pendingCount} · 审批中 ${approvingCount} · 点击进入审批工作台`,
+      status: releaseBusinessStatus(priorityOrder),
+      needsAttention: true,
+      attentionLabel: '待处理',
     }
   }
-  const running = visibleOrders.find((item) => releaseBusinessStatus(item) === 'deploying')
-  if (running) {
-    return {
-      tone: 'running' as MetricTone,
-      label: '当前关注',
-      title: '有发布正在执行',
-      text: `${running.application_name} · ${running.env_code || '未标注环境'}`,
-      meta: `执行中：${running.order_no}`,
-      status: releaseBusinessStatus(running),
-    }
-  }
-  const ready = workbenchCards.value.find((item) => item.releaseReady)
-  if (ready) {
+
+  if (approvedToday.length > 0) {
+    const latestApproved = approvedToday[0]
     return {
       tone: 'success' as MetricTone,
       label: '当前关注',
-      title: '发布入口已就绪',
-      text: `${ready.application.name} 已具备模板，可直接发起发布`,
-      meta: ready.templateNames.length > 0 ? `当前模板：${ready.templateNames[0]}` : '模板待接入',
-      status: 'deploy_success' as ReleaseOrderBusinessStatus,
+      title: `今日已有 ${approvedToday.length} 张单子完成审批`,
+      text: `${latestApproved.application_name} · ${latestApproved.env_code || '未标注环境'} · ${latestApproved.order_no}`,
+      meta: '点击进入审批工作台，继续处理后续审批单',
+      status: 'approved' as ReleaseOrderBusinessStatus,
+      needsAttention: false,
+      attentionLabel: '',
     }
   }
+
   return {
     tone: 'default' as MetricTone,
     label: '当前关注',
-    title: '先完善应用配置',
-    text: '先检查模板、绑定与负责人信息，再进入发布链路。',
-    meta: '没有可直接发布的应用时，优先补齐发布模板。',
+    title: '当前没有待处理审批',
+    text: '审批工作台当前没有待审批或审批中的发布单',
+    meta: '点击进入审批工作台查看全部审批记录',
     status: 'pending_execution' as ReleaseOrderBusinessStatus,
+    needsAttention: false,
+    attentionLabel: '',
   }
 })
 
@@ -460,6 +465,10 @@ function toReleaseOrderDetail(id: string) {
   void router.push(`/releases/${id}`)
 }
 
+function toApprovalWorkbench() {
+  void router.push('/release-approvals')
+}
+
 async function refreshWorkbench() {
   await loadApplications({ preserveCollapse: true })
   await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
@@ -599,6 +608,8 @@ function spotlightClass(tone: MetricTone) {
       return 'spotlight-card-success'
     case 'running':
       return 'spotlight-card-running'
+    case 'warning':
+      return 'spotlight-card-warning'
     case 'danger':
       return 'spotlight-card-danger'
     default:
@@ -708,12 +719,18 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-        <div class="spotlight-card" :class="spotlightClass(spotlightCard.tone)">
-          <div class="spotlight-label">{{ spotlightCard.label }}</div>
+        <button class="spotlight-card spotlight-card-button" :class="spotlightClass(spotlightCard.tone)" type="button" @click="toApprovalWorkbench">
+          <div class="spotlight-head">
+            <div class="spotlight-label">{{ spotlightCard.label }}</div>
+            <div v-if="spotlightCard.needsAttention" class="spotlight-attention-badge">
+              <span class="spotlight-attention-dot"></span>
+              <span>{{ spotlightCard.attentionLabel }}</span>
+            </div>
+          </div>
           <div class="spotlight-title">{{ spotlightCard.title }}</div>
           <div class="spotlight-text">{{ spotlightCard.text }}</div>
           <div class="spotlight-meta">{{ spotlightCard.meta }}</div>
-        </div>
+        </button>
       </div>
     </a-card>
 
@@ -795,12 +812,19 @@ onUnmounted(() => {
           <span class="workbench-collapsed-item workbench-collapsed-item-block">
             最近发布：{{ card.latestOrder?.order_no || '暂无最近发布' }}
           </span>
-          <span class="workbench-collapsed-item">
-            环境数：{{ card.envSnapshots.length }}
-          </span>
-          <span class="workbench-collapsed-item">
-            {{ card.runningCount > 0 ? `执行中 ${card.runningCount} 次` : '当前无运行中发布' }}
-          </span>
+          <div class="workbench-collapsed-tail">
+            <div class="workbench-collapsed-meta">
+              <span class="workbench-collapsed-item">
+                环境数：{{ card.envSnapshots.length }}
+              </span>
+              <span class="workbench-collapsed-item">
+                {{ card.runningCount > 0 ? `执行中 ${card.runningCount} 次` : '当前无运行中发布' }}
+              </span>
+            </div>
+            <div class="workbench-collapsed-action">
+              <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
+            </div>
+          </div>
         </div>
 
         <div v-show="!isCardCollapsed(card.application.id)" class="workbench-card-expanded">
@@ -859,7 +883,6 @@ onUnmounted(() => {
 
         <div class="workbench-actions">
           <a-space wrap>
-            <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
             <a-button @click="toDetail(card.application.id)">详情</a-button>
             <a-button @click="toReleaseRecords(card.application.id)">发布记录</a-button>
             <a-button @click="toTemplates(card.application.id)">模板</a-button>
@@ -900,37 +923,40 @@ onUnmounted(() => {
             <span v-else class="workbench-footer-empty">暂无发布记录</span>
           </div>
 
-          <a-popover
-            v-if="canViewPipeline || canManageApplication"
-            trigger="click"
-            placement="topRight"
-            overlay-class-name="workbench-manage-popover"
-          >
-            <template #content>
-              <div class="workbench-manage-actions">
-                <a-button v-if="canViewPipeline" block @click="toBindings(card.application.id)">管线绑定</a-button>
-                <a-button v-if="canManageApplication" block @click="toEdit(card.application.id)">编辑</a-button>
-                <a-popconfirm
-                  v-if="canManageApplication"
-                  title="确认删除当前应用吗？"
-                  ok-text="删除"
-                  cancel-text="取消"
-                  @confirm="handleDelete(card.application.id)"
-                >
-                  <template #icon>
-                    <ExclamationCircleOutlined class="danger-icon" />
-                  </template>
-                  <a-button block danger :loading="deletingId === card.application.id">删除</a-button>
-                </a-popconfirm>
-              </div>
-            </template>
-            <a-button class="workbench-manage-trigger">
-              更多操作
-              <template #icon>
-                <MoreOutlined />
+          <div class="workbench-footer-actions">
+            <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
+            <a-popover
+              v-if="canViewPipeline || canManageApplication"
+              trigger="click"
+              placement="topRight"
+              overlay-class-name="workbench-manage-popover"
+            >
+              <template #content>
+                <div class="workbench-manage-actions">
+                  <a-button v-if="canViewPipeline" block @click="toBindings(card.application.id)">管线绑定</a-button>
+                  <a-button v-if="canManageApplication" block @click="toEdit(card.application.id)">编辑</a-button>
+                  <a-popconfirm
+                    v-if="canManageApplication"
+                    title="确认删除当前应用吗？"
+                    ok-text="删除"
+                    cancel-text="取消"
+                    @confirm="handleDelete(card.application.id)"
+                  >
+                    <template #icon>
+                      <ExclamationCircleOutlined class="danger-icon" />
+                    </template>
+                    <a-button block danger :loading="deletingId === card.application.id">删除</a-button>
+                  </a-popconfirm>
+                </div>
               </template>
-            </a-button>
-          </a-popover>
+              <a-button class="workbench-manage-trigger">
+                更多操作
+                <template #icon>
+                  <MoreOutlined />
+                </template>
+              </a-button>
+            </a-popover>
+          </div>
         </div>
         </div>
       </a-card>
@@ -1155,6 +1181,18 @@ onUnmounted(() => {
   box-shadow: 0 20px 44px rgba(15, 23, 42, 0.22);
 }
 
+.spotlight-card-button {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.spotlight-card-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.24);
+}
+
 .spotlight-card-default {
   background:
     radial-gradient(circle at top right, rgba(148, 163, 184, 0.16), transparent 48%),
@@ -1173,6 +1211,12 @@ onUnmounted(() => {
     linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(29, 78, 216, 0.9));
 }
 
+.spotlight-card-warning {
+  background:
+    radial-gradient(circle at top right, rgba(251, 191, 36, 0.26), transparent 48%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(146, 64, 14, 0.94));
+}
+
 .spotlight-card-danger {
   background:
     radial-gradient(circle at top right, rgba(248, 113, 113, 0.24), transparent 48%),
@@ -1184,6 +1228,36 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.08em;
+}
+
+.spotlight-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.spotlight-attention-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.28);
+  color: rgba(254, 242, 242, 0.96);
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.08), 0 10px 24px rgba(127, 29, 29, 0.18);
+}
+
+.spotlight-attention-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #fb7185;
+  box-shadow: 0 0 0 6px rgba(251, 113, 133, 0.14);
+  animation: spotlightPulse 1.8s ease-in-out infinite;
 }
 
 .spotlight-title {
@@ -1205,6 +1279,26 @@ onUnmounted(() => {
   margin-top: 22px;
   color: rgba(226, 232, 240, 0.72);
   font-size: 13px;
+}
+
+.spotlight-link-hint {
+  margin-top: 18px;
+  color: rgba(248, 250, 252, 0.94);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+@keyframes spotlightPulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  50% {
+    transform: scale(1.18);
+    opacity: 0.82;
+  }
 }
 
 .application-workbench-grid {
@@ -1364,6 +1458,28 @@ onUnmounted(() => {
 
 .workbench-collapsed-item-block {
   width: 100%;
+}
+
+.workbench-collapsed-tail {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workbench-collapsed-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workbench-collapsed-action {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .app-state-chip-active {
@@ -1558,6 +1674,13 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   flex: 1;
+}
+
+.workbench-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
 }
 
 .workbench-footer-label {

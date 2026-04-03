@@ -56,6 +56,9 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/releases')) {
     return ['release-orders']
   }
+  if (route.path.startsWith('/release-approvals')) {
+    return ['release-approval-workbench']
+  }
   if (route.path.startsWith('/release-templates')) {
     return ['release-templates']
   }
@@ -80,6 +83,9 @@ const openMenuKeys = computed(() => {
     return ['component-management']
   }
   if (route.path.startsWith('/releases')) {
+    return ['release-management']
+  }
+  if (route.path.startsWith('/release-approvals')) {
     return ['release-management']
   }
   if (route.path.startsWith('/release-templates')) {
@@ -202,6 +208,10 @@ function goToReleaseTemplates() {
   void router.push('/release-templates')
 }
 
+function goToReleaseApprovalWorkbench() {
+  void router.push('/release-approvals')
+}
+
 function goToSystemUsers() {
   void router.push('/system/users')
 }
@@ -227,7 +237,7 @@ async function handleLogout() {
       <div class="sider-brand" @click="goToApplications">
         <div class="brand-mark">G</div>
         <div class="brand-copy">
-          <div class="brand-title">GOS Platform</div>
+          <div class="brand-title">GOS Release</div>
           <div class="brand-subtitle">发布工作台</div>
         </div>
       </div>
@@ -300,6 +310,9 @@ async function handleLogout() {
           <template #title>发布管理</template>
 
           <a-menu-item key="release-orders" @click="goToReleaseOrders">发布单</a-menu-item>
+          <a-menu-item key="release-approval-workbench" @click="goToReleaseApprovalWorkbench">
+            审批工作台
+          </a-menu-item>
           <a-menu-item v-if="canManageReleaseTemplate" key="release-templates" @click="goToReleaseTemplates">
             发布模板
           </a-menu-item>

@@ -52,7 +52,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 		return err
 	}
 
-	template, _, _, templateGitOpsRules, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
+	template, _, _, templateGitOpsRules, _, err := uc.repo.GetTemplateByID(ctx, order.TemplateID)
 	if err != nil {
 		logx.Error("argocd_cd", "start_execution_failed", err,
 			logx.F("order_id", order.ID),
@@ -599,7 +599,7 @@ func (uc *ReleaseOrderManager) ensureArgoCDExecutionSteps(
 		return nil
 	}
 
-	rebuilt := defaultReleaseOrderSteps(order.ID, executions, uc.now(), gitopsType)
+	rebuilt := defaultReleaseOrderSteps(order.ID, executions, uc.now(), gitopsType, nil)
 	existingByCode := make(map[string]domain.ReleaseOrderStep, len(steps))
 	for _, item := range steps {
 		existingByCode[item.StepCode] = item

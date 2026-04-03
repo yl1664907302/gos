@@ -834,7 +834,7 @@ definitions:
 info:
   contact: {}
   description: Internal deployment platform API.
-  title: GOS API
+  title: GOS Release API
   version: "1.0"
 paths:
   /applications:

@@ -6,7 +6,7 @@
     "swagger": "2.0",
     "info": {
         "description": "Internal deployment platform API.",
-        "title": "GOS API",
+        "title": "GOS Release API",
         "contact": {},
         "version": "1.0"
     },

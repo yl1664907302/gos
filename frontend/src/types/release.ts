@@ -50,6 +50,7 @@ export type ReleaseValueSource =
   | "builtin";
 export type ReleaseTemplateStatus = "active" | "inactive";
 export type ReleasePipelineScope = "ci" | "cd";
+export type ReleaseTemplateApprovalMode = "any" | "all";
 export type ReleaseExecutionStatus =
   | "pending"
   | "running"
@@ -83,6 +84,15 @@ export interface ReleaseOrder {
   trigger_type: ReleaseTriggerType;
   status: ReleaseOrderStatus;
   business_status: ReleaseOrderBusinessStatus;
+  approval_required: boolean;
+  approval_mode: ReleaseTemplateApprovalMode | "";
+  approval_approver_ids: string[];
+  approval_approver_names: string[];
+  approved_at: string | null;
+  approved_by: string;
+  rejected_at: string | null;
+  rejected_by: string;
+  rejected_reason: string;
   queue_position: number;
   queued_reason: string;
   remark: string;
@@ -171,6 +181,7 @@ export interface ReleaseOrderPipelineStage {
 
 export interface ReleaseOrderListParams {
   application_id?: string;
+  approval_approver_user_id?: string;
   binding_id?: string;
   env_code?: string;
   status?: ReleaseOrderStatus;
@@ -356,6 +367,10 @@ export interface ReleaseTemplate {
   binding_type: string;
   gitops_type: ReleaseTemplateGitOpsType;
   status: ReleaseTemplateStatus;
+  approval_enabled: boolean;
+  approval_mode: ReleaseTemplateApprovalMode | "";
+  approval_approver_ids: string[];
+  approval_approver_names: string[];
   remark: string;
   param_count: number;
   created_at: string;
@@ -442,6 +457,40 @@ export interface ReleaseTemplateGitOpsRulePayload {
   value_template?: string;
 }
 
+export type ReleaseTemplateHookType = "agent_task" | "webhook_notification";
+export type ReleaseTemplateHookTriggerCondition = "on_success" | "on_failed" | "always";
+export type ReleaseTemplateHookFailurePolicy = "block_release" | "warn_only";
+
+export interface ReleaseTemplateHook {
+  id: string;
+  template_id: string;
+  hook_type: ReleaseTemplateHookType;
+  name: string;
+  trigger_condition: ReleaseTemplateHookTriggerCondition;
+  failure_policy: ReleaseTemplateHookFailurePolicy;
+  target_id: string;
+  target_name: string;
+  webhook_method: string;
+  webhook_url: string;
+  webhook_body: string;
+  note: string;
+  sort_no: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReleaseTemplateHookPayload {
+  hook_type: ReleaseTemplateHookType;
+  name: string;
+  trigger_condition: ReleaseTemplateHookTriggerCondition;
+  failure_policy: ReleaseTemplateHookFailurePolicy;
+  target_id?: string;
+  webhook_method?: string;
+  webhook_url?: string;
+  webhook_body?: string;
+  note?: string;
+}
+
 export interface ReleaseTemplateListParams {
   application_id?: string;
   binding_id?: string;
@@ -463,6 +512,7 @@ export interface ReleaseTemplateDataResponse {
     bindings: ReleaseTemplateBinding[];
     params: ReleaseTemplateParam[];
     gitops_rules: ReleaseTemplateGitOpsRule[];
+    hooks: ReleaseTemplateHook[];
   };
 }
 
@@ -474,12 +524,67 @@ export interface ReleaseTemplatePayload {
   cd_provider?: string;
   gitops_type?: ReleaseTemplateGitOpsType;
   status: ReleaseTemplateStatus;
+  approval_enabled?: boolean;
+  approval_mode?: ReleaseTemplateApprovalMode;
+  approval_approver_ids?: string[];
+  approval_approver_names?: string[];
   remark?: string;
   ci_param_def_ids: string[];
   cd_param_def_ids: string[];
   ci_param_configs?: ReleaseTemplateParamConfigPayload[];
   cd_param_configs?: ReleaseTemplateParamConfigPayload[];
   gitops_rules?: ReleaseTemplateGitOpsRulePayload[];
+  hooks?: ReleaseTemplateHookPayload[];
+}
+
+export interface ReleaseOrderApprovalRecord {
+  id: string;
+  release_order_id: string;
+  action: "submit" | "approve" | "reject";
+  operator_user_id: string;
+  operator_name: string;
+  comment: string;
+  created_at: string;
+}
+
+export interface ReleaseOrderApprovalRecordListResponse {
+  data: ReleaseOrderApprovalRecord[];
+}
+
+export interface ReleaseOrderApprovalRecordSummary {
+  id: string;
+  release_order_id: string;
+  order_no: string;
+  order_status: ReleaseOrderStatus;
+  business_status: ReleaseOrderBusinessStatus;
+  application_id: string;
+  application_name: string;
+  env_code: string;
+  operation_type: ReleaseOperationType;
+  triggered_by: string;
+  action: "submit" | "approve" | "reject";
+  operator_user_id: string;
+  operator_name: string;
+  comment: string;
+  created_at: string;
+}
+
+export interface ReleaseOrderApprovalRecordSummaryListParams {
+  application_id?: string;
+  operator_user_id?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export interface ReleaseOrderApprovalRecordSummaryListResponse {
+  data: ReleaseOrderApprovalRecordSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface ReleaseOrderApprovalActionPayload {
+  comment?: string;
 }
 
 export interface UpdateReleaseTemplatePayload {
@@ -489,10 +594,15 @@ export interface UpdateReleaseTemplatePayload {
   cd_provider?: string;
   gitops_type?: ReleaseTemplateGitOpsType;
   status: ReleaseTemplateStatus;
+  approval_enabled?: boolean;
+  approval_mode?: ReleaseTemplateApprovalMode;
+  approval_approver_ids?: string[];
+  approval_approver_names?: string[];
   remark?: string;
   ci_param_def_ids: string[];
   cd_param_def_ids: string[];
   ci_param_configs?: ReleaseTemplateParamConfigPayload[];
   cd_param_configs?: ReleaseTemplateParamConfigPayload[];
   gitops_rules?: ReleaseTemplateGitOpsRulePayload[];
+  hooks?: ReleaseTemplateHookPayload[];
 }

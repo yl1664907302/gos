@@ -3600,7 +3600,7 @@ var SwaggerInfo = &swag.Spec{
 	Host:             "",
 	BasePath:         "/",
 	Schemes:          []string{"http", "https"},
-	Title:            "GOS API",
+	Title:            "GOS Release API",
 	Description:      "Internal deployment platform API.",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,

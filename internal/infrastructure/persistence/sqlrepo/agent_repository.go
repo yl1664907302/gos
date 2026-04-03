@@ -17,6 +17,8 @@ type AgentRepository struct {
 	dbDriver string
 }
 
+const staleClaimTimeout = time.Minute
+
 func NewAgentRepository(db *sql.DB, dbDriver string) *AgentRepository {
 	return &AgentRepository{db: db, dbDriver: strings.ToLower(strings.TrimSpace(dbDriver))}
 }
@@ -838,10 +840,27 @@ func (r *AgentRepository) ClaimNextPendingTask(ctx context.Context, agentID stri
 	defer func() {
 		_ = tx.Rollback()
 	}()
+	const resetStaleClaimedQ = `
+	UPDATE agent_task
+	SET status = ?, claimed_at = ?, updated_at = ?, last_run_summary = ?
+	WHERE agent_id = ? AND status = ? AND claimed_at > 0 AND claimed_at < ?;`
+	if _, err := tx.ExecContext(
+		ctx,
+		resetStaleClaimedQ,
+		string(domain.TaskStatusQueued),
+		0,
+		now.UTC().UnixNano(),
+		"领取超时，已重新排队",
+		strings.TrimSpace(agentID),
+		string(domain.TaskStatusClaimed),
+		now.Add(-staleClaimTimeout).UTC().UnixNano(),
+	); err != nil {
+		return domain.Task{}, false, err
+	}
 	const activeQ = `
-SELECT COUNT(1)
-FROM agent_task
-WHERE agent_id = ? AND status IN (?, ?);`
+	SELECT COUNT(1)
+	FROM agent_task
+	WHERE agent_id = ? AND status IN (?, ?);`
 	var activeCount int
 	if err := tx.QueryRowContext(ctx, activeQ, strings.TrimSpace(agentID), string(domain.TaskStatusClaimed), string(domain.TaskStatusRunning)).Scan(&activeCount); err != nil {
 		return domain.Task{}, false, err
@@ -891,16 +910,15 @@ WHERE id = ? AND status IN (?, ?);`
 
 func (r *AgentRepository) MarkTaskRunning(ctx context.Context, taskID string, startedAt time.Time) (domain.Task, error) {
 	const q = `
-UPDATE agent_task
-SET status = ?, started_at = ?, updated_at = ?
-WHERE id = ? AND status IN (?, ?);`
+	UPDATE agent_task
+	SET status = ?, started_at = ?, updated_at = ?
+	WHERE id = ? AND status = ?;`
 	res, err := r.db.ExecContext(ctx, q,
 		string(domain.TaskStatusRunning),
 		startedAt.UTC().UnixNano(),
 		startedAt.UTC().UnixNano(),
 		strings.TrimSpace(taskID),
 		string(domain.TaskStatusClaimed),
-		string(domain.TaskStatusPending),
 	)
 	if err != nil {
 		return domain.Task{}, err

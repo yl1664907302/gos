@@ -47,6 +47,14 @@ interface SelectOption {
   value: string;
 }
 
+interface ApprovalFlowNode {
+  key: string;
+  title: string;
+  caption: string;
+  tone: "done" | "active" | "pending" | "rejected";
+}
+
+
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
@@ -56,9 +64,14 @@ const statusOptions: Array<{ label: string; value: ReleaseOrderStatus | "" }> =
   [
     { label: "全部状态", value: "" },
     { label: "待执行", value: "pending" },
-    { label: "执行中", value: "running" },
-    { label: "成功", value: "success" },
-    { label: "失败", value: "failed" },
+    { label: "待审批", value: "pending_approval" },
+    { label: "审批中", value: "approving" },
+    { label: "已批准", value: "approved" },
+    { label: "审批拒绝", value: "rejected" },
+    { label: "排队中", value: "queued" },
+    { label: "发布中", value: "deploying" },
+    { label: "发布成功", value: "deploy_success" },
+    { label: "发布失败", value: "deploy_failed" },
     { label: "已取消", value: "cancelled" },
   ];
 
@@ -177,9 +190,6 @@ const hasFilter = computed(() => {
 const canCreateRelease = computed(() =>
   authStore.hasPermission("release.create"),
 );
-const canExecuteRelease = computed(() =>
-  authStore.hasPermission("release.execute"),
-);
 const canCancelRelease = computed(() =>
   authStore.hasPermission("release.cancel"),
 );
@@ -188,6 +198,14 @@ const canLoadApplications = computed(
     authStore.hasPermission("application.view") ||
     authStore.hasPermission("application.manage"),
 );
+const currentUserID = computed(() => String(authStore.profile?.id || "").trim());
+
+function canCurrentUserExecute(record: ReleaseOrder) {
+  if (!currentUserID.value) {
+    return false;
+  }
+  return String(record.creator_user_id || "").trim() === currentUserID.value;
+}
 
 const currentPageStatusStats = computed(() => {
   const stats: Record<ReleaseOrderStatus, number> = {
@@ -495,6 +513,174 @@ function operationTypeText(
   }
 }
 
+function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
+  const status = orderBusinessStatus(record);
+  const approverNames = (record.approval_approver_names || []).filter(Boolean).join(" / ") || "待配置审批人";
+  const createdCaption = `${record.triggered_by || "系统"} · ${formatTime(record.created_at)}`;
+
+  if (!record.approval_required) {
+    return [
+      {
+        key: "create",
+        title: "创建发布单",
+        caption: createdCaption,
+        tone: "done",
+      },
+      {
+        key: "approval_skipped",
+        title: "无需审批",
+        caption: "当前模板未启用审批流，可直接进入发布执行",
+        tone: "done",
+      },
+      {
+        key: "execute_ready",
+        title: "进入执行阶段",
+        caption:
+          status === "pending_execution"
+            ? "当前可直接发起发布"
+            : status === "queued"
+              ? record.queued_reason || "已进入等待队列"
+              : status === "deploying"
+                ? "主发布流程执行中"
+                : status === "deploy_success"
+                  ? "主发布流程已完成"
+                  : status === "deploy_failed"
+                    ? "主发布流程执行失败"
+                    : status === "cancelled"
+                      ? "发布单已取消"
+                      : "等待后续处理",
+        tone:
+          status === "deploy_failed"
+            ? "rejected"
+            : status === "pending_execution"
+              ? "active"
+              : ["queued", "deploying", "deploy_success", "cancelled"].includes(status)
+                ? "done"
+                : "pending",
+      },
+    ];
+  }
+
+  const submitTone: ApprovalFlowNode["tone"] =
+    status === "pending_approval" ? "active" : ["approving", "approved", "queued", "deploying", "deploy_success", "deploy_failed", "rejected", "cancelled"].includes(status) ? "done" : "pending";
+  const reviewTone: ApprovalFlowNode["tone"] =
+    status === "approving" ? "active" : ["approved", "queued", "deploying", "deploy_success", "deploy_failed", "rejected", "cancelled"].includes(status) ? "done" : "pending";
+  const resultTone: ApprovalFlowNode["tone"] =
+    status === "rejected" ? "rejected" : ["approved", "queued", "deploying", "deploy_success", "deploy_failed", "cancelled"].includes(status) ? "done" : "pending";
+  const executeTone: ApprovalFlowNode["tone"] =
+    status === "approved"
+      ? "active"
+      : status === "queued" || status === "deploying" || status === "deploy_success" || status === "deploy_failed" || status === "cancelled"
+        ? "done"
+        : "pending";
+
+  return [
+    {
+      key: "create",
+      title: "创建发布单",
+      caption: createdCaption,
+      tone: "done",
+    },
+    {
+      key: "submit",
+      title: "提交审批",
+      caption: `审批方式：${record.approval_mode === "all" ? "会签" : "或签"}`,
+      tone: submitTone,
+    },
+    {
+      key: "review",
+      title: "审批处理",
+      caption: `审批人：${approverNames}`,
+      tone: reviewTone,
+    },
+    {
+      key: "result",
+      title: status === "rejected" ? "审批拒绝" : "审批通过",
+      caption:
+        status === "rejected"
+          ? record.rejected_reason || "审批已拒绝，本次发布不会继续执行"
+          : record.approved_by
+            ? `审批人：${record.approved_by}`
+            : "审批通过后才会进入执行阶段",
+      tone: resultTone,
+    },
+    {
+      key: "execute",
+      title: "进入执行阶段",
+      caption:
+        status === "approved"
+          ? "审批已通过，等待发起执行"
+          : status === "queued"
+            ? record.queued_reason || "已进入等待队列"
+            : status === "deploying"
+              ? "主发布流程执行中"
+              : status === "deploy_success"
+                ? "主发布流程已完成"
+                : status === "deploy_failed"
+                  ? "主发布流程执行失败"
+                  : status === "cancelled"
+                    ? "发布单已取消"
+                    : "审批完成后可发起发布",
+      tone: executeTone,
+    },
+  ];
+}
+
+function approvalFlowToneClass(tone: ApprovalFlowNode["tone"]) {
+  switch (tone) {
+    case "done":
+      return "approval-flow-node-done";
+    case "active":
+      return "approval-flow-node-active";
+    case "rejected":
+      return "approval-flow-node-rejected";
+    default:
+      return "approval-flow-node-pending";
+  }
+}
+
+function approvalFlowIcon(tone: ApprovalFlowNode["tone"]) {
+  switch (tone) {
+    case "done":
+      return CheckCircleFilled;
+    case "active":
+      return LoadingOutlined;
+    case "rejected":
+      return CloseCircleFilled;
+    default:
+      return ClockCircleFilled;
+  }
+}
+
+function approvalFlowSummary(record: ReleaseOrder) {
+  if (!record.approval_required) {
+    return "当前发布单未启用审批流，可直接进入发布执行";
+  }
+  const status = orderBusinessStatus(record);
+  switch (status) {
+    case "pending_approval":
+      return "当前发布单等待进入审批处理";
+    case "approving":
+      return "审批链路进行中，等待审批人处理";
+    case "approved":
+      return "审批已通过，等待发起执行";
+    case "rejected":
+      return record.rejected_reason || "审批已拒绝，本次发布不会继续执行";
+    case "queued":
+      return record.queued_reason || "审批已通过，当前在执行队列中等待";
+    case "deploying":
+      return "审批已完成，主发布流程执行中";
+    case "deploy_success":
+      return "审批与主发布流程均已完成";
+    case "deploy_failed":
+      return "审批已完成，但主发布流程执行失败";
+    case "cancelled":
+      return "发布单已取消，审批链路不再推进";
+    default:
+      return "创建后可按流程进入审批与执行阶段";
+  }
+}
+
 function canCancel(record: ReleaseOrder) {
   const businessStatus = orderBusinessStatus(record);
   return (
@@ -507,7 +693,10 @@ function canCancel(record: ReleaseOrder) {
 }
 
 function canExecute(record: ReleaseOrder) {
-  return canExecuteRelease.value && ["pending_execution", "approved"].includes(orderBusinessStatus(record));
+  return (
+    canCurrentUserExecute(record) &&
+    ["pending_execution", "approved"].includes(orderBusinessStatus(record))
+  );
 }
 
 function canRollback(record: ReleaseOrder) {
@@ -562,7 +751,7 @@ const selectedExecutableOrders = computed(() =>
 
 const canBatchExecute = computed(
   () =>
-    canExecuteRelease.value &&
+    canShowBatchExecuteBar.value &&
     selectedExecutableOrders.value.length >= 2 &&
     !batchExecuting.value,
 );
@@ -585,11 +774,17 @@ const batchPreviewPassCount = computed(
       .length,
 );
 
-const tableRowSelection = computed(() =>
-  canExecuteRelease.value ? rowSelection.value : undefined,
+const canShowBatchExecuteBar = computed(
+  () =>
+    dataSource.value.some((item) => String(item.creator_user_id || "").trim() === currentUserID.value),
 );
 
+const tableRowSelection = computed(() => rowSelection.value);
+
 const rowSelection = computed(() => ({
+  type: "checkbox" as const,
+  fixed: true as const,
+  columnWidth: 52,
   selectedRowKeys: selectedOrderIDs.value,
   preserveSelectedRowKeys: false,
   getCheckboxProps: (record: ReleaseOrder) => ({
@@ -804,7 +999,7 @@ async function openExecutePreviewModal(record: ReleaseOrder) {
   try {
     const [orderResp, paramsResp, precheckResp] = await Promise.all([
       getReleaseOrderByID(record.id),
-      listReleaseOrderParams(record.id),
+      listReleaseOrderParams(record.id).catch(() => null),
       getReleaseOrderPrecheck(record.id),
     ]);
     if (!canExecute(orderResp.data)) {
@@ -815,7 +1010,7 @@ async function openExecutePreviewModal(record: ReleaseOrder) {
       return;
     }
     executePreviewOrder.value = orderResp.data;
-    executePreviewParams.value = paramsResp.data;
+    executePreviewParams.value = paramsResp?.data || [];
     executePreviewPrecheck.value = precheckResp.data;
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, "发布预审信息加载失败"));
@@ -1094,7 +1289,7 @@ onBeforeUnmount(() => {
           刷新
         </a-button>
         <a-button
-          v-if="canExecuteRelease"
+          v-if="canShowBatchExecuteBar"
           :disabled="!canBatchExecute"
           :loading="batchExecuting"
           @click="openBatchExecutePreviewModal"
@@ -1253,7 +1448,7 @@ onBeforeUnmount(() => {
     </a-card>
 
     <a-card class="table-card" :bordered="true">
-      <div v-if="canExecuteRelease" class="batch-execute-bar">
+      <div v-if="canShowBatchExecuteBar" class="batch-execute-bar">
         <div class="batch-execute-copy">
           <div class="batch-execute-title">并发执行</div>
           <div class="batch-execute-subtitle">
@@ -1292,6 +1487,40 @@ onBeforeUnmount(() => {
         :pagination="false"
         :scroll="{ x: 1650 }"
       >
+        <template #expandedRowRender="{ record }">
+          <div class="approval-flow-card release-list-expand-card">
+            <div class="approval-flow-head">
+              <div>
+                <div class="approval-flow-kicker">审批流程</div>
+                <div class="approval-flow-title">{{ record.order_no }}</div>
+              </div>
+              <a-tag :color="businessStatusColor(orderBusinessStatus(record))" class="status-tag approval-flow-status-tag">
+                <LoadingOutlined v-if="isRunningBusinessStatus(orderBusinessStatus(record))" spin />
+                <span>{{ businessStatusText(orderBusinessStatus(record)) }}</span>
+              </a-tag>
+            </div>
+            <div class="approval-flow-summary">{{ approvalFlowSummary(record) }}</div>
+            <div class="approval-flow-track">
+              <div
+                v-for="(node, index) in approvalFlowNodes(record)"
+                :key="`${record.id}-${node.key}`"
+                class="approval-flow-node"
+                :class="approvalFlowToneClass(node.tone)"
+              >
+                <div class="approval-flow-node-main">
+                  <div class="approval-flow-node-icon">
+                    <component :is="approvalFlowIcon(node.tone)" :spin="node.tone === 'active'" />
+                  </div>
+                  <div class="approval-flow-node-copy">
+                    <strong>{{ node.title }}</strong>
+                    <p>{{ node.caption }}</p>
+                  </div>
+                </div>
+                <div v-if="index < approvalFlowNodes(record).length - 1" class="approval-flow-connector"></div>
+              </div>
+            </div>
+          </div>
+        </template>
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'status'">
             <a-tag :color="businessStatusColor(orderBusinessStatus(record))" class="status-tag">
@@ -2050,6 +2279,148 @@ onBeforeUnmount(() => {
   gap: 6px;
 }
 
+.approval-flow-card {
+  padding: 18px 20px;
+  border-radius: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 20px 46px rgba(15, 23, 42, 0.06);
+}
+
+.release-list-expand-card {
+  margin: 6px 0 10px;
+}
+
+.approval-flow-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.approval-flow-kicker {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.approval-flow-title {
+  margin-top: 8px;
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.approval-flow-status-tag {
+  margin: 0;
+}
+
+.approval-flow-summary {
+  margin-top: 14px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.approval-flow-track {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.approval-flow-node {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.approval-flow-node-main {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 12px 12px 10px;
+  border-radius: 18px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: #f8fafc;
+}
+
+.approval-flow-node-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
+  font-size: 15px;
+}
+
+.approval-flow-node-copy strong {
+  display: block;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.approval-flow-node-copy p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.approval-flow-connector {
+  align-self: center;
+  width: 18px;
+  height: 1px;
+  margin-right: -2px;
+  background: rgba(148, 163, 184, 0.45);
+}
+
+.approval-flow-node-done .approval-flow-node-main {
+  background: rgba(240, 253, 244, 0.92);
+  border-color: rgba(34, 197, 94, 0.18);
+}
+
+.approval-flow-node-done .approval-flow-node-icon {
+  background: rgba(34, 197, 94, 0.14);
+  color: #16a34a;
+}
+
+.approval-flow-node-active .approval-flow-node-main {
+  background: rgba(239, 246, 255, 0.96);
+  border-color: rgba(37, 99, 235, 0.18);
+}
+
+.approval-flow-node-active .approval-flow-node-icon {
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+}
+
+.approval-flow-node-pending .approval-flow-node-main {
+  background: rgba(248, 250, 252, 0.96);
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+.approval-flow-node-pending .approval-flow-node-icon {
+  background: rgba(148, 163, 184, 0.12);
+  color: #64748b;
+}
+
+.approval-flow-node-rejected .approval-flow-node-main {
+  background: rgba(254, 242, 242, 0.96);
+  border-color: rgba(239, 68, 68, 0.18);
+}
+
+.approval-flow-node-rejected .approval-flow-node-icon {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
 .rollback-trigger-link {
   color: #0f172a;
 }
@@ -2316,6 +2687,29 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 768px) {
+  .approval-flow-card {
+    padding: 16px;
+  }
+
+  .approval-flow-head {
+    flex-direction: column;
+  }
+
+  .approval-flow-track {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-flow-node {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .approval-flow-connector {
+    width: 1px;
+    height: 16px;
+    margin: 0 0 0 14px;
+  }
+
   .page-header {
     flex-direction: column;
     align-items: flex-start;

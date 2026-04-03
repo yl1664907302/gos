@@ -25,7 +25,7 @@ import (
 
 //go:generate swag init -g cmd/server/main.go -o docs --parseInternal
 
-// @title           GOS API
+// @title           GOS Release API
 // @version         1.0
 // @description     Internal deployment platform API.
 // @BasePath        /
@@ -209,13 +209,14 @@ func main() {
 		platformParamRepo,
 		releaseStore,
 		jenkinsClient,
+		agentRepo,
 		argocdAppRepo,
 		argocdClientFactory,
 		gitopsRepo,
 		gitopsServiceFactory,
 		gitopsService,
 	)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, gitopsInstanceManager)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, agentRepo, gitopsInstanceManager)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,

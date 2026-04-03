@@ -38,34 +38,44 @@ func (h *ReleaseTemplateHandler) RegisterRoutes(router gin.IRouter) {
 }
 
 type CreateReleaseTemplateRequest struct {
-	Name           string                              `json:"name"`
-	ApplicationID  string                              `json:"application_id"`
-	CIBindingID    string                              `json:"ci_binding_id"`
-	CDBindingID    string                              `json:"cd_binding_id"`
-	CDProvider     string                              `json:"cd_provider"`
-	GitOpsType     string                              `json:"gitops_type"`
-	Status         string                              `json:"status"`
-	Remark         string                              `json:"remark"`
-	CIParamDefIDs  []string                            `json:"ci_param_def_ids"`
-	CDParamDefIDs  []string                            `json:"cd_param_def_ids"`
-	CIParamConfigs []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
-	CDParamConfigs []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
-	GitOpsRules    []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
+	Name                  string                              `json:"name"`
+	ApplicationID         string                              `json:"application_id"`
+	CIBindingID           string                              `json:"ci_binding_id"`
+	CDBindingID           string                              `json:"cd_binding_id"`
+	CDProvider            string                              `json:"cd_provider"`
+	GitOpsType            string                              `json:"gitops_type"`
+	Status                string                              `json:"status"`
+	Remark                string                              `json:"remark"`
+	ApprovalEnabled       bool                                `json:"approval_enabled"`
+	ApprovalMode          string                              `json:"approval_mode"`
+	ApprovalApproverIDs   []string                            `json:"approval_approver_ids"`
+	ApprovalApproverNames []string                            `json:"approval_approver_names"`
+	CIParamDefIDs         []string                            `json:"ci_param_def_ids"`
+	CDParamDefIDs         []string                            `json:"cd_param_def_ids"`
+	CIParamConfigs        []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
+	CDParamConfigs        []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
+	GitOpsRules           []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
+	Hooks                 []ReleaseTemplateHookRequest        `json:"hooks"`
 }
 
 type UpdateReleaseTemplateRequest struct {
-	Name           string                              `json:"name"`
-	CIBindingID    string                              `json:"ci_binding_id"`
-	CDBindingID    string                              `json:"cd_binding_id"`
-	CDProvider     string                              `json:"cd_provider"`
-	GitOpsType     string                              `json:"gitops_type"`
-	Status         string                              `json:"status"`
-	Remark         string                              `json:"remark"`
-	CIParamDefIDs  []string                            `json:"ci_param_def_ids"`
-	CDParamDefIDs  []string                            `json:"cd_param_def_ids"`
-	CIParamConfigs []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
-	CDParamConfigs []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
-	GitOpsRules    []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
+	Name                  string                              `json:"name"`
+	CIBindingID           string                              `json:"ci_binding_id"`
+	CDBindingID           string                              `json:"cd_binding_id"`
+	CDProvider            string                              `json:"cd_provider"`
+	GitOpsType            string                              `json:"gitops_type"`
+	Status                string                              `json:"status"`
+	Remark                string                              `json:"remark"`
+	ApprovalEnabled       bool                                `json:"approval_enabled"`
+	ApprovalMode          string                              `json:"approval_mode"`
+	ApprovalApproverIDs   []string                            `json:"approval_approver_ids"`
+	ApprovalApproverNames []string                            `json:"approval_approver_names"`
+	CIParamDefIDs         []string                            `json:"ci_param_def_ids"`
+	CDParamDefIDs         []string                            `json:"cd_param_def_ids"`
+	CIParamConfigs        []ReleaseTemplateParamConfigRequest `json:"ci_param_configs"`
+	CDParamConfigs        []ReleaseTemplateParamConfigRequest `json:"cd_param_configs"`
+	GitOpsRules           []ReleaseTemplateGitOpsRuleRequest  `json:"gitops_rules"`
+	Hooks                 []ReleaseTemplateHookRequest        `json:"hooks"`
 }
 
 type ReleaseTemplateParamConfigRequest struct {
@@ -76,19 +86,23 @@ type ReleaseTemplateParamConfigRequest struct {
 }
 
 type ReleaseTemplateResponse struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	ApplicationID   string    `json:"application_id"`
-	ApplicationName string    `json:"application_name"`
-	BindingID       string    `json:"binding_id"`
-	BindingName     string    `json:"binding_name"`
-	BindingType     string    `json:"binding_type"`
-	GitOpsType      string    `json:"gitops_type"`
-	Status          string    `json:"status"`
-	Remark          string    `json:"remark"`
-	ParamCount      int       `json:"param_count"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	ApplicationID         string    `json:"application_id"`
+	ApplicationName       string    `json:"application_name"`
+	BindingID             string    `json:"binding_id"`
+	BindingName           string    `json:"binding_name"`
+	BindingType           string    `json:"binding_type"`
+	GitOpsType            string    `json:"gitops_type"`
+	Status                string    `json:"status"`
+	ApprovalEnabled       bool      `json:"approval_enabled"`
+	ApprovalMode          string    `json:"approval_mode"`
+	ApprovalApproverIDs   []string  `json:"approval_approver_ids"`
+	ApprovalApproverNames []string  `json:"approval_approver_names"`
+	Remark                string    `json:"remark"`
+	ParamCount            int       `json:"param_count"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 type ReleaseTemplateParamResponse struct {
@@ -155,12 +169,43 @@ type ReleaseTemplateGitOpsRuleResponse struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type ReleaseTemplateHookRequest struct {
+	HookType         string `json:"hook_type"`
+	Name             string `json:"name"`
+	TriggerCondition string `json:"trigger_condition"`
+	FailurePolicy    string `json:"failure_policy"`
+	TargetID         string `json:"target_id"`
+	WebhookMethod    string `json:"webhook_method"`
+	WebhookURL       string `json:"webhook_url"`
+	WebhookBody      string `json:"webhook_body"`
+	Note             string `json:"note"`
+}
+
+type ReleaseTemplateHookResponse struct {
+	ID               string    `json:"id"`
+	TemplateID       string    `json:"template_id"`
+	HookType         string    `json:"hook_type"`
+	Name             string    `json:"name"`
+	TriggerCondition string    `json:"trigger_condition"`
+	FailurePolicy    string    `json:"failure_policy"`
+	TargetID         string    `json:"target_id"`
+	TargetName       string    `json:"target_name"`
+	WebhookMethod    string    `json:"webhook_method"`
+	WebhookURL       string    `json:"webhook_url"`
+	WebhookBody      string    `json:"webhook_body"`
+	Note             string    `json:"note"`
+	SortNo           int       `json:"sort_no"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type ReleaseTemplateDataResponse struct {
 	Data struct {
 		Template    ReleaseTemplateResponse             `json:"template"`
 		Bindings    []ReleaseTemplateBindingResponse    `json:"bindings"`
 		Params      []ReleaseTemplateParamResponse      `json:"params"`
 		GitOpsRules []ReleaseTemplateGitOpsRuleResponse `json:"gitops_rules"`
+		Hooks       []ReleaseTemplateHookResponse       `json:"hooks"`
 	} `json:"data"`
 }
 
@@ -181,26 +226,31 @@ func (h *ReleaseTemplateHandler) Create(c *gin.Context) {
 		return
 	}
 
-	template, bindings, params, gitopsRules, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
-		Name:           req.Name,
-		ApplicationID:  req.ApplicationID,
-		CIBindingID:    req.CIBindingID,
-		CDBindingID:    req.CDBindingID,
-		CDProvider:     pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
-		GitOpsType:     releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
-		Status:         releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
-		Remark:         req.Remark,
-		CIParamDefIDs:  req.CIParamDefIDs,
-		CDParamDefIDs:  req.CDParamDefIDs,
-		CIParamConfigs: toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
-		CDParamConfigs: toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
-		GitOpsRules:    toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+	template, bindings, params, gitopsRules, hooks, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseTemplateInput{
+		Name:                  req.Name,
+		ApplicationID:         req.ApplicationID,
+		CIBindingID:           req.CIBindingID,
+		CDBindingID:           req.CDBindingID,
+		CDProvider:            pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:            releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
+		Status:                releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
+		Remark:                req.Remark,
+		ApprovalEnabled:       req.ApprovalEnabled,
+		ApprovalMode:          releasedomain.TemplateApprovalMode(strings.ToLower(strings.TrimSpace(req.ApprovalMode))),
+		ApprovalApproverIDs:   append([]string(nil), req.ApprovalApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), req.ApprovalApproverNames...),
+		CIParamDefIDs:         req.CIParamDefIDs,
+		CDParamDefIDs:         req.CDParamDefIDs,
+		CIParamConfigs:        toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
+		CDParamConfigs:        toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
+		GitOpsRules:           toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+		Hooks:                 toReleaseTemplateHookInputs(req.Hooks),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules))
+	c.JSON(http.StatusCreated, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules, hooks))
 }
 
 func (h *ReleaseTemplateHandler) List(c *gin.Context) {
@@ -243,7 +293,7 @@ func (h *ReleaseTemplateHandler) List(c *gin.Context) {
 }
 
 func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
-	template, bindings, params, gitopsRules, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, bindings, params, gitopsRules, hooks, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -251,11 +301,11 @@ func (h *ReleaseTemplateHandler) GetByID(c *gin.Context) {
 	if !h.ensureTemplateAccess(c, template) {
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(template, bindings, params, gitopsRules, hooks))
 }
 
 func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
-	template, _, _, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	template, _, _, _, _, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -268,25 +318,30 @@ func (h *ReleaseTemplateHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	updated, bindings, params, gitopsRules, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
-		Name:           req.Name,
-		CIBindingID:    req.CIBindingID,
-		CDBindingID:    req.CDBindingID,
-		CDProvider:     pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
-		GitOpsType:     releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
-		Status:         releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
-		Remark:         req.Remark,
-		CIParamDefIDs:  req.CIParamDefIDs,
-		CDParamDefIDs:  req.CDParamDefIDs,
-		CIParamConfigs: toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
-		CDParamConfigs: toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
-		GitOpsRules:    toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+	updated, bindings, params, gitopsRules, hooks, err := h.manager.Update(c.Request.Context(), template.ID, usecase.UpdateReleaseTemplateInput{
+		Name:                  req.Name,
+		CIBindingID:           req.CIBindingID,
+		CDBindingID:           req.CDBindingID,
+		CDProvider:            pipelinedomain.Provider(strings.ToLower(strings.TrimSpace(req.CDProvider))),
+		GitOpsType:            releasedomain.GitOpsType(strings.ToLower(strings.TrimSpace(req.GitOpsType))),
+		Status:                releasedomain.TemplateStatus(strings.TrimSpace(req.Status)),
+		Remark:                req.Remark,
+		ApprovalEnabled:       req.ApprovalEnabled,
+		ApprovalMode:          releasedomain.TemplateApprovalMode(strings.ToLower(strings.TrimSpace(req.ApprovalMode))),
+		ApprovalApproverIDs:   append([]string(nil), req.ApprovalApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), req.ApprovalApproverNames...),
+		CIParamDefIDs:         req.CIParamDefIDs,
+		CDParamDefIDs:         req.CDParamDefIDs,
+		CIParamConfigs:        toReleaseTemplateParamConfigInputs(req.CIParamConfigs),
+		CDParamConfigs:        toReleaseTemplateParamConfigInputs(req.CDParamConfigs),
+		GitOpsRules:           toReleaseTemplateGitOpsRuleInputs(req.GitOpsRules),
+		Hooks:                 toReleaseTemplateHookInputs(req.Hooks),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, bindings, params, gitopsRules))
+	c.JSON(http.StatusOK, toReleaseTemplateDataResponse(updated, bindings, params, gitopsRules, hooks))
 }
 
 func (h *ReleaseTemplateHandler) Delete(c *gin.Context) {
@@ -417,19 +472,23 @@ func resolveReleaseTemplateListFilterApplications(
 
 func toReleaseTemplateResponse(item releasedomain.ReleaseTemplate) ReleaseTemplateResponse {
 	return ReleaseTemplateResponse{
-		ID:              item.ID,
-		Name:            item.Name,
-		ApplicationID:   item.ApplicationID,
-		ApplicationName: item.ApplicationName,
-		BindingID:       item.BindingID,
-		BindingName:     item.BindingName,
-		BindingType:     item.BindingType,
-		GitOpsType:      string(item.GitOpsType),
-		Status:          string(item.Status),
-		Remark:          item.Remark,
-		ParamCount:      item.ParamCount,
-		CreatedAt:       item.CreatedAt,
-		UpdatedAt:       item.UpdatedAt,
+		ID:                    item.ID,
+		Name:                  item.Name,
+		ApplicationID:         item.ApplicationID,
+		ApplicationName:       item.ApplicationName,
+		BindingID:             item.BindingID,
+		BindingName:           item.BindingName,
+		BindingType:           item.BindingType,
+		GitOpsType:            string(item.GitOpsType),
+		Status:                string(item.Status),
+		ApprovalEnabled:       item.ApprovalEnabled,
+		ApprovalMode:          string(item.ApprovalMode),
+		ApprovalApproverIDs:   append([]string(nil), item.ApprovalApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), item.ApprovalApproverNames...),
+		Remark:                item.Remark,
+		ParamCount:            item.ParamCount,
+		CreatedAt:             item.CreatedAt,
+		UpdatedAt:             item.UpdatedAt,
 	}
 }
 
@@ -501,6 +560,24 @@ func toReleaseTemplateParamConfigInputs(items []ReleaseTemplateParamConfigReques
 	return result
 }
 
+func toReleaseTemplateHookInputs(items []ReleaseTemplateHookRequest) []usecase.ReleaseTemplateHookInput {
+	result := make([]usecase.ReleaseTemplateHookInput, 0, len(items))
+	for _, item := range items {
+		result = append(result, usecase.ReleaseTemplateHookInput{
+			HookType:         releasedomain.TemplateHookType(strings.ToLower(strings.TrimSpace(item.HookType))),
+			Name:             item.Name,
+			TriggerCondition: releasedomain.TemplateHookTriggerCondition(strings.ToLower(strings.TrimSpace(item.TriggerCondition))),
+			FailurePolicy:    releasedomain.TemplateHookFailurePolicy(strings.ToLower(strings.TrimSpace(item.FailurePolicy))),
+			TargetID:         item.TargetID,
+			WebhookMethod:    item.WebhookMethod,
+			WebhookURL:       item.WebhookURL,
+			WebhookBody:      item.WebhookBody,
+			Note:             item.Note,
+		})
+	}
+	return result
+}
+
 func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOpsRule) ReleaseTemplateGitOpsRuleResponse {
 	return ReleaseTemplateGitOpsRuleResponse{
 		ID:               item.ID,
@@ -522,11 +599,32 @@ func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOp
 	}
 }
 
+func toReleaseTemplateHookResponse(item releasedomain.ReleaseTemplateHook) ReleaseTemplateHookResponse {
+	return ReleaseTemplateHookResponse{
+		ID:               item.ID,
+		TemplateID:       item.TemplateID,
+		HookType:         string(item.HookType),
+		Name:             item.Name,
+		TriggerCondition: string(item.TriggerCondition),
+		FailurePolicy:    string(item.FailurePolicy),
+		TargetID:         item.TargetID,
+		TargetName:       item.TargetName,
+		WebhookMethod:    item.WebhookMethod,
+		WebhookURL:       item.WebhookURL,
+		WebhookBody:      item.WebhookBody,
+		Note:             item.Note,
+		SortNo:           item.SortNo,
+		CreatedAt:        item.CreatedAt,
+		UpdatedAt:        item.UpdatedAt,
+	}
+}
+
 func toReleaseTemplateDataResponse(
 	template releasedomain.ReleaseTemplate,
 	bindings []releasedomain.ReleaseTemplateBinding,
 	params []releasedomain.ReleaseTemplateParam,
 	gitopsRules []releasedomain.ReleaseTemplateGitOpsRule,
+	hooks []releasedomain.ReleaseTemplateHook,
 ) ReleaseTemplateDataResponse {
 	resp := ReleaseTemplateDataResponse{}
 	resp.Data.Template = toReleaseTemplateResponse(template)
@@ -541,6 +639,10 @@ func toReleaseTemplateDataResponse(
 	resp.Data.GitOpsRules = make([]ReleaseTemplateGitOpsRuleResponse, 0, len(gitopsRules))
 	for _, item := range gitopsRules {
 		resp.Data.GitOpsRules = append(resp.Data.GitOpsRules, toReleaseTemplateGitOpsRuleResponse(item))
+	}
+	resp.Data.Hooks = make([]ReleaseTemplateHookResponse, 0, len(hooks))
+	for _, item := range hooks {
+		resp.Data.Hooks = append(resp.Data.Hooks, toReleaseTemplateHookResponse(item))
 	}
 	return resp
 }

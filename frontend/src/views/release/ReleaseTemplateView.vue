@@ -5,9 +5,11 @@ import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { listApplications } from '../../api/application'
+import { listAllAgentTasks } from '../../api/agent'
 import { listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api/gitops'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
+import { listUserOptions } from '../../api/user'
 import {
   createReleaseTemplate,
   deleteReleaseTemplate,
@@ -17,13 +19,18 @@ import {
 } from '../../api/release'
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import type { Application } from '../../types/application'
+import type { AgentTask } from '../../types/agent'
 import type { PipelineBinding, ExecutorParamDef } from '../../types/pipeline'
 import type { GitOpsFieldCandidate, GitOpsValuesCandidate } from '../../types/gitops'
 import type { PlatformParamDict } from '../../types/platform-param'
+import type { UserOption } from '../../types/user'
 import type {
   ReleasePipelineScope,
   ReleaseTemplate,
   ReleaseTemplateBinding,
+  ReleaseTemplateHook,
+  ReleaseTemplateHookPayload,
+  ReleaseTemplateApprovalMode,
   ReleaseTemplateParamConfigPayload,
   ReleaseTemplateParamValueSource,
   ReleaseTemplateGitOpsRule,
@@ -57,6 +64,8 @@ interface TemplateFormState {
   name: string
   application_id: string
   status: ReleaseTemplateStatus
+  approval_enabled: boolean
+  approval_mode: ReleaseTemplateApprovalMode
   remark: string
 }
 
@@ -81,6 +90,24 @@ interface GitOpsRuleFormItem {
   document_name: string
   target_path: string
   value_template: string
+}
+
+type ReleaseTemplateHookTypePreview = 'agent_task' | 'webhook_notification'
+type ReleaseTemplateHookTriggerConditionPreview = 'on_success' | 'on_failed' | 'always'
+type ReleaseTemplateHookFailurePolicyPreview = 'block_release' | 'warn_only'
+
+interface HookFormItem {
+  local_id: string
+  name: string
+  hook_type: ReleaseTemplateHookTypePreview
+  trigger_condition: ReleaseTemplateHookTriggerConditionPreview
+  failure_policy: ReleaseTemplateHookFailurePolicyPreview
+  target_id: string
+  target_name: string
+  webhook_method: 'POST' | 'PUT' | 'PATCH'
+  webhook_url: string
+  webhook_body_template: string
+  note: string
 }
 
 const builtinTemplateSourceKeys = new Set([
@@ -109,8 +136,12 @@ const formState = reactive<TemplateFormState>({
   name: '',
   application_id: '',
   status: 'active',
+  approval_enabled: false,
+  approval_mode: 'any',
   remark: '',
 })
+const approvalApproverIDs = ref<string[]>([])
+const userOptions = ref<UserOption[]>([])
 
 const scopeStates = reactive<Record<ReleasePipelineScope, ScopeState>>({
   ci: {
@@ -156,6 +187,11 @@ const cdMode = ref<CDMode>('argocd')
 const argocdInfoActiveKeys = ref<string[]>([])
 const releasePageGuideActiveKeys = ref<string[]>([])
 const gitopsRuleActiveKeys = ref<string[]>([])
+const templateHooks = ref<HookFormItem[]>([])
+const hookTypePickerVisible = ref(false)
+const pendingHookType = ref<ReleaseTemplateHookTypePreview>('agent_task')
+const agentTaskTemplates = ref<AgentTask[]>([])
+const loadingAgentTaskTemplates = ref(false)
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -166,6 +202,8 @@ const scopeDescriptions: Record<ReleasePipelineScope, string> = {
   ci: 'CI 固定使用 Jenkins；参数仅允许来自 CI 绑定管线，并且必须已完成平台标准 Key 映射。',
   cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或内置字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
 }
+
+const hookVariableSourceTags = ['固定值', '标准字段', '内置字段']
 
 const initialColumns: TableColumnsType<ReleaseTemplate> = [
   { title: '模板名称', dataIndex: 'name', key: 'name', width: 220 },
@@ -192,6 +230,130 @@ const statusOptions = [
   { label: 'active', value: 'active' },
   { label: 'inactive', value: 'inactive' },
 ] as const
+
+const approvalModeOptions = [
+  { label: '任一人通过', value: 'any' },
+  { label: '全部通过', value: 'all' },
+] as const
+
+const userOptionChoices = computed(() =>
+  userOptions.value.map((item) => ({
+    label: `${item.display_name || item.username} (${item.username})`,
+    value: item.id,
+  })),
+)
+
+function hookTypeLabel(type: ReleaseTemplateHookTypePreview) {
+  return type === 'agent_task' ? 'Agent 任务' : 'Webhook 通知'
+}
+
+function createHookFormItem(type: ReleaseTemplateHookTypePreview): HookFormItem {
+  return {
+    local_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: type === 'agent_task' ? '发布后 Agent 任务' : '发布后 Webhook 通知',
+    hook_type: type,
+    trigger_condition: 'on_success',
+    failure_policy: type === 'agent_task' ? 'block_release' : 'warn_only',
+    target_id: '',
+    target_name: '',
+    webhook_method: 'POST',
+    webhook_url: '',
+    webhook_body_template: `{
+  "order_no": "{order_no}",
+  "env": "{env}"
+}`,
+    note: '',
+  }
+}
+
+function createHookFormItemFromResponse(item: ReleaseTemplateHook): HookFormItem {
+  return {
+    local_id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name: item.name,
+    hook_type: item.hook_type,
+    trigger_condition: item.trigger_condition,
+    failure_policy: item.failure_policy,
+    target_id: item.target_id || '',
+    target_name: item.target_name || '',
+    webhook_method: ((item.webhook_method || 'POST').toUpperCase() as 'POST' | 'PUT' | 'PATCH'),
+    webhook_url: item.webhook_url || '',
+    webhook_body_template: item.webhook_body || '',
+    note: item.note || '',
+  }
+}
+
+const hookSummaryItems = computed(() => [
+  { label: 'Hook 阶段', value: 'post_release' },
+  { label: '执行方式', value: templateHooks.value.length ? '串行执行' : '待配置' },
+  { label: 'Hook 数量', value: `${templateHooks.value.length} 个` },
+  { label: '详情页', value: '直接展示进度' },
+])
+
+function agentTaskTypeLabel(taskType: string) {
+  switch (taskType) {
+    case 'script_file_task':
+      return '脚本文件任务'
+    case 'file_distribution_task':
+      return '文件下发任务'
+    default:
+      return 'Shell 脚本'
+  }
+}
+
+const agentTaskTemplateOptions = computed<SelectOption[]>(() =>
+  agentTaskTemplates.value
+    .filter((item) => !String(item.agent_id || '').trim())
+    .map((item) => ({
+      label: `${item.name} · ${item.task_mode === 'resident' ? '常驻任务' : '临时任务'} / ${agentTaskTypeLabel(item.task_type)}`,
+      value: item.id,
+    })),
+)
+
+function findAgentTaskTemplate(taskID: string) {
+  const normalized = String(taskID || '').trim()
+  if (!normalized) {
+    return null
+  }
+  return agentTaskTemplates.value.find((item) => item.id === normalized) || null
+}
+
+function syncHookTargetName(item: HookFormItem) {
+  if (item.hook_type !== 'agent_task') {
+    item.target_name = ''
+    return
+  }
+  const selected = findAgentTaskTemplate(item.target_id)
+  item.target_name = selected?.name || ''
+}
+
+function openHookTypePicker() {
+  pendingHookType.value = 'agent_task'
+  hookTypePickerVisible.value = true
+}
+
+function confirmAddHook() {
+  templateHooks.value.push(createHookFormItem(pendingHookType.value))
+  hookTypePickerVisible.value = false
+}
+
+function removeHook(localID: string) {
+  templateHooks.value = templateHooks.value.filter((item) => item.local_id !== localID)
+}
+
+function hookTriggerLabel(type: ReleaseTemplateHookTriggerConditionPreview) {
+  switch (type) {
+    case 'on_success':
+      return '主流程成功后'
+    case 'on_failed':
+      return '主流程失败后'
+    default:
+      return '始终触发'
+  }
+}
+
+function hookFailureLabel(type: ReleaseTemplateHookFailurePolicyPreview) {
+  return type === 'block_release' ? '失败阻断发布单' : '失败仅告警'
+}
 
 const modalTitle = computed(() => (modalMode.value === 'create' ? '新增发布模板' : '编辑发布模板'))
 
@@ -724,7 +886,10 @@ function resetFormState() {
   formState.name = ''
   formState.application_id = ''
   formState.status = 'active'
+  formState.approval_enabled = false
+  formState.approval_mode = 'any'
   formState.remark = ''
+  approvalApproverIDs.value = []
   scopeStates.ci.enabled = true
   scopeStates.cd.enabled = false
   resetScopeState('ci')
@@ -737,6 +902,9 @@ function resetFormState() {
   cdMode.value = 'argocd'
   argocdInfoActiveKeys.value = []
   gitopsRuleActiveKeys.value = []
+  templateHooks.value = []
+  hookTypePickerVisible.value = false
+  pendingHookType.value = 'agent_task'
 }
 
 function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGitOpsRulePayload {
@@ -771,6 +939,11 @@ function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGi
 }
 
 function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
+  const approverIDs = approvalApproverIDs.value.map((item) => String(item || '').trim()).filter(Boolean)
+  const approverNames = approverIDs.map((item) => {
+    const matched = userOptions.value.find((candidate) => candidate.id === item)
+    return matched?.display_name || matched?.username || item
+  })
   return {
     name: formState.name.trim(),
     ...(modalMode.value === 'create' ? { application_id: formState.application_id.trim() } : {}),
@@ -779,6 +952,10 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     cd_provider: scopeStates.cd.enabled ? (isCDUsingPipeline() ? (selectedBinding('cd')?.provider || 'jenkins') : 'argocd') : undefined,
     gitops_type: scopeStates.cd.enabled && isCDUsingArgoCD() ? normalizedGitOpsType(gitOpsType.value) : undefined,
     status: formState.status,
+    approval_enabled: formState.approval_enabled,
+    approval_mode: formState.approval_enabled ? formState.approval_mode : undefined,
+    approval_approver_ids: formState.approval_enabled ? approverIDs : [],
+    approval_approver_names: formState.approval_enabled ? approverNames : [],
     remark: formState.remark.trim() || undefined,
     ci_param_def_ids: scopeStates.ci.enabled ? [...scopeStates.ci.selected_param_def_ids] : [],
     cd_param_def_ids: scopeStates.cd.enabled && isCDUsingPipeline() ? [...scopeStates.cd.selected_param_def_ids] : [],
@@ -788,6 +965,17 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
       scopeStates.cd.enabled && isCDUsingArgoCD()
         ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item))
         : [],
+    hooks: templateHooks.value.map<ReleaseTemplateHookPayload>((item) => ({
+      hook_type: item.hook_type,
+      name: item.name.trim(),
+      trigger_condition: item.trigger_condition,
+      failure_policy: item.failure_policy,
+      target_id: item.hook_type === 'agent_task' ? item.target_id.trim() || undefined : undefined,
+      webhook_method: item.hook_type === 'webhook_notification' ? item.webhook_method : undefined,
+      webhook_url: item.hook_type === 'webhook_notification' ? item.webhook_url.trim() || undefined : undefined,
+      webhook_body: item.hook_type === 'webhook_notification' ? item.webhook_body_template : undefined,
+      note: item.note.trim() || undefined,
+    })),
   }
 }
 
@@ -802,6 +990,29 @@ async function loadPlatformParamMap() {
     platformParamDicts.value = response.data
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '标准字库加载失败'))
+  }
+}
+
+async function loadApprovalUserOptions() {
+  try {
+    const response = await listUserOptions()
+    userOptions.value = response.data || []
+  } catch (error) {
+    userOptions.value = []
+    message.error(extractHTTPErrorMessage(error, '审批人选项加载失败'))
+  }
+}
+
+async function loadAgentTaskTemplates() {
+  loadingAgentTaskTemplates.value = true
+  try {
+    const response = await listAllAgentTasks({ page: 1, page_size: 200 })
+    agentTaskTemplates.value = response.data
+  } catch (error) {
+    agentTaskTemplates.value = []
+    message.error(extractHTTPErrorMessage(error, 'Agent 任务模板加载失败'))
+  } finally {
+    loadingAgentTaskTemplates.value = false
   }
 }
 
@@ -1144,6 +1355,7 @@ function handlePageChange(page: number, pageSize: number) {
 function openCreateModal() {
   modalMode.value = 'create'
   resetFormState()
+  void loadAgentTaskTemplates()
   modalVisible.value = true
 }
 
@@ -1167,12 +1379,16 @@ async function openEditModal(record: ReleaseTemplate) {
   modalVisible.value = true
   modalLoading.value = true
   try {
+    await loadAgentTaskTemplates()
     const response = await getReleaseTemplateByID(record.id)
-    const { template, bindings, params, gitops_rules } = response.data
+    const { template, bindings, params, gitops_rules, hooks } = response.data
     formState.id = template.id
     formState.name = template.name
     formState.application_id = template.application_id
     formState.status = template.status
+    formState.approval_enabled = Boolean(template.approval_enabled)
+    formState.approval_mode = (template.approval_mode || 'any') as ReleaseTemplateApprovalMode
+    approvalApproverIDs.value = [...(template.approval_approver_ids || [])]
     formState.remark = template.remark
     gitOpsType.value = normalizedGitOpsType(template.gitops_type)
 
@@ -1226,6 +1442,8 @@ async function openEditModal(record: ReleaseTemplate) {
         value_template: item.value_template,
       }),
     )
+    templateHooks.value = (hooks || []).map((item: ReleaseTemplateHook) => createHookFormItemFromResponse(item))
+    templateHooks.value.forEach((item) => syncHookTargetName(item))
     gitopsRuleActiveKeys.value = []
     if (gitopsRules.value.some((item) => formatGitOpsRuleTargetSummary(item).stale)) {
       message.warning(
@@ -1288,6 +1506,9 @@ function validateScopeState() {
         throw new Error('请为 GitOps 替换规则选择 YAML 字段')
       }
     }
+  }
+  if (formState.approval_enabled && approvalApproverIDs.value.length === 0) {
+    throw new Error('请至少选择一位审批人')
   }
 }
 
@@ -1356,7 +1577,7 @@ async function handleDelete(record: ReleaseTemplate) {
 }
 
 onMounted(async () => {
-  await Promise.all([loadPlatformParamMap(), loadApplications()])
+  await Promise.all([loadPlatformParamMap(), loadApplications(), loadAgentTaskTemplates(), loadApprovalUserOptions()])
   await loadTemplates()
 })
 </script>
@@ -1528,6 +1749,50 @@ onMounted(async () => {
               </a-form-item>
             </a-col>
           </a-row>
+        </a-card>
+
+        <a-card class="scope-card scope-card-base" :bordered="false">
+          <div class="template-param-config-header">
+            <div class="template-param-config-title">审批配置</div>
+            <div class="template-param-config-subtitle">按模板决定当前发布是否必须先走审批流。审批通过后，发布单才允许进入执行阶段。</div>
+          </div>
+          <a-row :gutter="16">
+            <a-col :xs="24" :md="8">
+              <a-form-item label="启用审批">
+                <a-switch v-model:checked="formState.approval_enabled" />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="8">
+              <a-form-item label="审批方式">
+                <a-select
+                  v-model:value="formState.approval_mode"
+                  :disabled="!formState.approval_enabled"
+                  :options="approvalModeOptions"
+                />
+              </a-form-item>
+            </a-col>
+            <a-col :xs="24" :md="8">
+              <a-form-item label="审批人">
+                <a-select
+                  v-model:value="approvalApproverIDs"
+                  mode="multiple"
+                  allow-clear
+                  show-search
+                  option-filter-prop="label"
+                  :disabled="!formState.approval_enabled"
+                  placeholder="请选择审批人"
+                  :options="userOptionChoices"
+                />
+              </a-form-item>
+            </a-col>
+          </a-row>
+          <a-alert
+            v-if="formState.approval_enabled"
+            class="scope-alert"
+            type="info"
+            show-icon
+            :message="formState.approval_mode === 'all' ? '当前模板启用会签：所有审批人都通过后，发布单才会进入已批准状态。' : '当前模板启用或签：任一审批人通过后，发布单即可进入已批准状态。'"
+          />
         </a-card>
 
         <a-row :gutter="16">
@@ -1977,6 +2242,216 @@ onMounted(async () => {
             </a-card>
           </a-col>
         </a-row>
+
+        <a-card class="scope-card hook-config-card" :bordered="true">
+          <template #title>发布后 Hook</template>
+          <template #extra>
+            <a-space>
+              <a-tag class="dashboard-chip dashboard-chip-running">规划中</a-tag>
+              <a-button type="dashed" size="small" @click="openHookTypePicker">
+                <template #icon><PlusOutlined /></template>
+                新增 Hook
+              </a-button>
+            </a-space>
+          </template>
+
+          <a-alert
+            class="scope-alert"
+            type="info"
+            show-icon
+            message="发布模板中的 Hook 会在主发布流程结束后串行执行。当前先完成模板页适配，待后端 Hook 模块落地后开放保存。"
+          />
+
+          <div class="hook-template-summary-grid">
+            <div v-for="item in hookSummaryItems" :key="item.label" class="hook-template-summary-item">
+              <div class="hook-template-summary-label">{{ item.label }}</div>
+              <div class="hook-template-summary-value">{{ item.value }}</div>
+            </div>
+          </div>
+
+          <div class="hook-template-capability-header">
+            <div>
+              <div class="hook-template-capability-title">Hook 配置适配预览</div>
+              <div class="hook-template-capability-subtitle">
+                点击新增 Hook，先选择类型，再补充表单字段。当前支持 Agent 任务和 Webhook 通知两类发布后 Hook。
+              </div>
+            </div>
+            <a-tag class="dashboard-chip dashboard-chip-neutral">详情页直接看进度</a-tag>
+          </div>
+
+          <a-empty v-if="!templateHooks.length" description="暂未配置发布后 Hook，可点击右上角新增 Hook" />
+
+          <div v-else class="hook-template-capability-grid">
+            <div v-for="(item, index) in templateHooks" :key="item.local_id" class="hook-template-capability-card">
+              <div class="hook-template-capability-card-head">
+                <div>
+                  <div class="hook-template-capability-card-title">
+                    Hook {{ index + 1 }}：{{ item.name || '未命名 Hook' }}
+                  </div>
+                  <div class="hook-template-capability-card-meta">
+                    {{ hookTypeLabel(item.hook_type) }} · {{ item.hook_type === 'agent_task' ? '发布后 Agent 任务' : '发布后 Webhook 通知' }}
+                  </div>
+                </div>
+                <a-space>
+                  <a-tag class="dashboard-chip dashboard-chip-neutral">{{ hookTypeLabel(item.hook_type) }}</a-tag>
+                  <a-button type="link" danger size="small" @click="removeHook(item.local_id)">删除</a-button>
+                </a-space>
+              </div>
+
+              <a-row :gutter="12">
+                <a-col :span="24">
+                  <a-form-item label="Hook 名称" class="template-param-inline-item">
+                    <a-input
+                      v-model:value="item.name"
+                      allow-clear
+                      :placeholder="item.hook_type === 'agent_task' ? '例如：发布后 Agent 任务' : '例如：发布后 Webhook 通知'"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col :xs="24" :md="12">
+                  <a-form-item label="触发条件" class="template-param-inline-item">
+                    <a-segmented
+                      v-model:value="item.trigger_condition"
+                      :options="[
+                        { label: '仅成功后', value: 'on_success' },
+                        { label: '仅失败后', value: 'on_failed' },
+                        { label: '始终触发', value: 'always' },
+                      ]"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col :xs="24" :md="12">
+                  <a-form-item label="失败策略" class="template-param-inline-item">
+                    <a-segmented
+                      v-model:value="item.failure_policy"
+                      :options="[
+                        { label: '阻断发布单', value: 'block_release' },
+                        { label: '仅告警', value: 'warn_only' },
+                      ]"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24">
+                  <a-form-item :label="item.hook_type === 'agent_task' ? '目标 Agent 任务' : 'Webhook URL'" class="template-param-inline-item">
+                    <a-select
+                      v-if="item.hook_type === 'agent_task'"
+                      v-model:value="item.target_id" @change="syncHookTargetName(item)"
+                      allow-clear
+                      show-search
+                      option-filter-prop="label"
+                      :loading="loadingAgentTaskTemplates"
+                      :options="agentTaskTemplateOptions"
+                      placeholder="请选择真实 Agent 任务模板"
+                    />
+                    <a-input
+                      v-else
+                      v-model:value="item.webhook_url"
+                      allow-clear
+                      placeholder="例如：https://notify.example.com/release/hook"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col v-if="item.hook_type === 'agent_task' && !agentTaskTemplateOptions.length" :span="24">
+                  <div class="hook-template-capability-note">
+                    当前还没有可引用的未分配 Agent 任务模板，请先到 Agent 任务管理中创建任务模板。
+                  </div>
+                </a-col>
+                <a-col v-if="item.hook_type === 'agent_task' && findAgentTaskTemplate(item.target_id)" :span="24">
+                  <a-descriptions :column="1" size="small" bordered class="hook-template-description">
+                    <a-descriptions-item label="已选任务">
+                      {{ findAgentTaskTemplate(item.target_id)?.name }}
+                    </a-descriptions-item>
+                    <a-descriptions-item label="任务模式">
+                      {{ findAgentTaskTemplate(item.target_id)?.task_mode === 'resident' ? '常驻任务' : '临时任务' }}
+                    </a-descriptions-item>
+                    <a-descriptions-item label="任务类型">
+                      {{ agentTaskTypeLabel(String(findAgentTaskTemplate(item.target_id)?.task_type || '')) }}
+                    </a-descriptions-item>
+                    <a-descriptions-item label="脚本">
+                      {{ findAgentTaskTemplate(item.target_id)?.script_name || findAgentTaskTemplate(item.target_id)?.script_path || '未绑定脚本' }}
+                    </a-descriptions-item>
+                  </a-descriptions>
+                </a-col>
+                <a-col v-if="item.hook_type === 'webhook_notification'" :xs="24" :md="8">
+                  <a-form-item label="请求方法" class="template-param-inline-item">
+                    <a-select
+                      v-model:value="item.webhook_method"
+                      :options="[
+                        { label: 'POST', value: 'POST' },
+                        { label: 'PUT', value: 'PUT' },
+                        { label: 'PATCH', value: 'PATCH' },
+                      ]"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col v-if="item.hook_type === 'webhook_notification'" :xs="24" :md="16">
+                  <a-form-item label="Body 模板" class="template-param-inline-item">
+                    <a-textarea
+                      v-model:value="item.webhook_body_template"
+                      :auto-size="{ minRows: 4, maxRows: 8 }"
+                      placeholder="请输入 Webhook body 模板，支持 {env}、{order_no} 等变量"
+                    />
+                  </a-form-item>
+                </a-col>
+                <a-col :span="24">
+                  <a-form-item label="补充说明" class="template-param-inline-item">
+                    <a-textarea
+                      v-model:value="item.note"
+                      :auto-size="{ minRows: 2, maxRows: 4 }"
+                      placeholder="例如：用于联调校验、通知回调或特殊环境后置动作"
+                    />
+                  </a-form-item>
+                </a-col>
+              </a-row>
+
+              <div class="hook-template-variable-row">
+                <div class="hook-template-variable-title">变量来源</div>
+                <div class="hook-template-variable-tags">
+                  <a-tag v-for="source in hookVariableSourceTags" :key="`${item.local_id}-${source}`" class="dashboard-chip dashboard-chip-neutral">
+                    {{ source }}
+                  </a-tag>
+                </div>
+              </div>
+
+              <a-descriptions :column="1" size="small" bordered class="hook-template-description">
+                <a-descriptions-item label="当前摘要">
+                  {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }}
+                </a-descriptions-item>
+                <a-descriptions-item label="详情展示">
+                  发布单详情直接展示 Hook 执行进度、变量和日志
+                </a-descriptions-item>
+              </a-descriptions>
+            </div>
+          </div>
+        </a-card>
+        <a-modal
+          :open="hookTypePickerVisible"
+          title="新增 Hook"
+          width="520"
+          ok-text="添加"
+          cancel-text="取消"
+          @ok="confirmAddHook"
+          @cancel="hookTypePickerVisible = false"
+        >
+          <a-form layout="vertical">
+            <a-form-item label="Hook 类型">
+              <a-segmented
+                v-model:value="pendingHookType"
+                :options="[
+                  { label: 'Agent 任务', value: 'agent_task' },
+                  { label: 'Webhook 通知', value: 'webhook_notification' },
+                ]"
+              />
+            </a-form-item>
+            <a-alert
+              type="info"
+              show-icon
+              :message="pendingHookType === 'agent_task'
+                ? '新增后会补充 Agent 任务名称、触发条件、失败策略等字段。'
+                : '新增后会补充 Webhook URL、请求方法、Body 模板等字段。'"
+            />
+          </a-form>
+        </a-modal>
         </a-form>
       </a-spin>
     </a-modal>
@@ -2327,6 +2802,120 @@ onMounted(async () => {
   margin-bottom: 0;
 }
 
+.hook-config-card {
+  margin-top: 16px;
+}
+
+.hook-template-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.hook-template-summary-item {
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.97) 100%);
+}
+
+.hook-template-summary-label {
+  font-size: 12px;
+  color: var(--color-text-soft);
+}
+
+.hook-template-summary-value {
+  margin-top: 4px;
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.hook-template-capability-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hook-template-capability-title {
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.hook-template-capability-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-soft);
+}
+
+.hook-template-capability-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.hook-template-capability-card {
+  padding: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.97) 100%);
+}
+
+.hook-template-capability-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hook-template-capability-card-title {
+  font-weight: 700;
+  color: var(--color-text-main);
+}
+
+.hook-template-capability-card-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-soft);
+}
+
+.hook-template-variable-row {
+  margin: 12px 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hook-template-variable-title {
+  min-width: 64px;
+  font-size: 12px;
+  color: var(--color-text-soft);
+}
+
+.hook-template-variable-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.hook-template-capability-note {
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-soft);
+}
+
+.hook-template-description {
+  background: rgba(255, 255, 255, 0.66);
+}
+
 .gitops-rule-panel {
   display: flex;
   flex-direction: column;
@@ -2449,9 +3038,24 @@ onMounted(async () => {
   .scope-card {
     margin-bottom: 16px;
   }
+
+  .hook-template-summary-grid,
+  .hook-template-capability-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 768px) {
+  .hook-template-capability-header,
+  .hook-template-capability-card-head,
+  .hook-template-variable-row {
+    flex-direction: column;
+  }
+
+  .hook-template-variable-tags {
+    justify-content: flex-start;
+  }
+
   .page-header {
     flex-direction: column;
     align-items: flex-start;

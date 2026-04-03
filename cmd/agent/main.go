@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -111,6 +112,8 @@ type runtimeState struct {
 	lastTaskSummary    string
 	lastTaskFinishedAt string
 }
+
+const maxCapturedOutputBytes = 64 * 1024
 
 func (s *runtimeState) snapshot() heartbeatRequest {
 	s.mu.RLock()
@@ -379,7 +382,17 @@ func executeTask(client *http.Client, cfg runtimeConfig, task *taskOutput, hostn
 		AgentCode: cfg.AgentCode,
 		Token:     cfg.Token,
 	}, nil); err != nil {
-		state.markFinished("failed", "任务启动上报失败", time.Now().UTC())
+		finishedAt := time.Now().UTC()
+		failureReason := "任务启动上报失败"
+		state.markFinished("failed", failureReason, finishedAt)
+		_ = sendHeartbeat(client, cfg, hostname, hostIP, state)
+		_ = postJSON(client, cfg.BaseURL+"/agent/tasks/"+task.ID+"/finish", taskFinishRequest{
+			AgentCode:     cfg.AgentCode,
+			Token:         cfg.Token,
+			Status:        "failed",
+			ExitCode:      1,
+			FailureReason: failureReason,
+		}, nil)
 		log.Printf("start task %s failed: %v", task.ID, err)
 		return
 	}
@@ -473,8 +486,8 @@ func runScript(execDir, shellType, scriptPath string, timeoutSec int) (stdoutTex
 	defer cancel()
 	cmd := exec.CommandContext(ctx, shellPath, scriptPath)
 	cmd.Dir = execDir
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	stdout := newLimitedBuffer(maxCapturedOutputBytes)
+	stderr := newLimitedBuffer(maxCapturedOutputBytes)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	runErr := cmd.Run()
@@ -586,7 +599,8 @@ func postJSON(client *http.Client, endpoint string, payload any, output any) err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return &statusError{Code: resp.StatusCode}
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return &statusError{Code: resp.StatusCode, Body: trimText(string(responseBody), 500)}
 	}
 	if output != nil {
 		if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
@@ -596,9 +610,57 @@ func postJSON(client *http.Client, endpoint string, payload any, output any) err
 	return nil
 }
 
-type statusError struct{ Code int }
+type statusError struct {
+	Code int
+	Body string
+}
 
-func (e *statusError) Error() string { return http.StatusText(e.Code) }
+func (e *statusError) Error() string {
+	if strings.TrimSpace(e.Body) == "" {
+		return http.StatusText(e.Code)
+	}
+	return fmt.Sprintf("%s: %s", http.StatusText(e.Code), strings.TrimSpace(e.Body))
+}
+
+type limitedBuffer struct {
+	max       int
+	buf       bytes.Buffer
+	truncated bool
+}
+
+func newLimitedBuffer(max int) limitedBuffer {
+	return limitedBuffer{max: max}
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	if b.max <= 0 {
+		b.truncated = true
+		return len(p), nil
+	}
+	remaining := b.max - b.buf.Len()
+	if remaining > 0 {
+		if len(p) <= remaining {
+			_, _ = b.buf.Write(p)
+		} else {
+			_, _ = b.buf.Write(p[:remaining])
+			b.truncated = true
+		}
+	} else {
+		b.truncated = true
+	}
+	return len(p), nil
+}
+
+func (b *limitedBuffer) String() string {
+	text := b.buf.String()
+	if b.truncated {
+		if text == "" {
+			return "[output truncated]"
+		}
+		return text + "\n[output truncated]"
+	}
+	return text
+}
 
 func envOrDefault(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {

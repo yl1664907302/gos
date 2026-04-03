@@ -34,6 +34,17 @@ type Repository interface {
 		finishedAt *time.Time,
 		updatedAt time.Time,
 	) (ReleaseOrder, error)
+	UpdateApprovalStatus(
+		ctx context.Context,
+		id string,
+		status OrderStatus,
+		approvedAt *time.Time,
+		approvedBy string,
+		rejectedAt *time.Time,
+		rejectedBy string,
+		rejectedReason string,
+		updatedAt time.Time,
+	) (ReleaseOrder, error)
 	ListExecutions(ctx context.Context, releaseOrderID string) ([]ReleaseOrderExecution, error)
 	GetExecutionByScope(ctx context.Context, releaseOrderID string, scope PipelineScope) (ReleaseOrderExecution, error)
 	UpdateExecutionByScope(
@@ -61,11 +72,12 @@ type Repository interface {
 		bindings []ReleaseTemplateBinding,
 		params []ReleaseTemplateParam,
 		gitopsRules []ReleaseTemplateGitOpsRule,
+		hooks []ReleaseTemplateHook,
 	) error
 	GetTemplateByID(
 		ctx context.Context,
 		id string,
-	) (ReleaseTemplate, []ReleaseTemplateBinding, []ReleaseTemplateParam, []ReleaseTemplateGitOpsRule, error)
+	) (ReleaseTemplate, []ReleaseTemplateBinding, []ReleaseTemplateParam, []ReleaseTemplateGitOpsRule, []ReleaseTemplateHook, error)
 	ListTemplates(ctx context.Context, filter TemplateListFilter) ([]ReleaseTemplate, int64, error)
 	UpdateTemplate(
 		ctx context.Context,
@@ -73,20 +85,25 @@ type Repository interface {
 		bindings []ReleaseTemplateBinding,
 		params []ReleaseTemplateParam,
 		gitopsRules []ReleaseTemplateGitOpsRule,
+		hooks []ReleaseTemplateHook,
 	) error
 	DeleteTemplate(ctx context.Context, id string) error
+	CreateApprovalRecord(ctx context.Context, item ReleaseOrderApprovalRecord) error
+	ListApprovalRecords(ctx context.Context, releaseOrderID string) ([]ReleaseOrderApprovalRecord, error)
+	ListApprovalRecordSummaries(ctx context.Context, filter ApprovalRecordListFilter) ([]ReleaseOrderApprovalRecordSummary, int64, error)
 }
 
 type ListFilter struct {
-	ApplicationID  string
-	ApplicationIDs []string
-	CreatorUserID  string
-	BindingID      string
-	EnvCode        string
-	Status         OrderStatus
-	TriggerType    TriggerType
-	Page           int
-	PageSize       int
+	ApplicationID          string
+	ApplicationIDs         []string
+	ApprovalApproverUserID string
+	CreatorUserID          string
+	BindingID              string
+	EnvCode                string
+	Status                 OrderStatus
+	TriggerType            TriggerType
+	Page                   int
+	PageSize               int
 }
 
 type StepUpdateInput struct {
@@ -111,6 +128,14 @@ type TemplateListFilter struct {
 	ApplicationIDs []string
 	BindingID      string
 	Status         TemplateStatus
+	Page           int
+	PageSize       int
+}
+
+type ApprovalRecordListFilter struct {
+	ApplicationID  string
+	ApplicationIDs []string
+	OperatorUserID string
 	Page           int
 	PageSize       int
 }

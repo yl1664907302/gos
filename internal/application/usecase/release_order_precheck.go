@@ -92,18 +92,32 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 	switch order.Status {
 	case domain.OrderStatusPending:
 		statusItem.Message = "发布单处于待执行状态"
+	case domain.OrderStatusApproved:
+		statusItem.Message = "发布单已审批通过，可进入执行阶段"
 	case domain.OrderStatusQueued:
 		statusItem.Status = ReleaseOrderPrecheckItemStatusWarn
 		statusItem.Message = "发布单已进入等待队列"
 	case domain.OrderStatusRunning:
 		statusItem.Message = "发布单已进入调度中"
+	case domain.OrderStatusPendingApproval:
+		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+		statusItem.Message = "发布单待审批，审批通过后才允许触发"
+		output.Executable = false
+	case domain.OrderStatusApproving:
+		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+		statusItem.Message = "发布单审批中，审批完成后才允许触发"
+		output.Executable = false
+	case domain.OrderStatusRejected:
+		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+		statusItem.Message = "发布单审批已拒绝，无法继续触发"
+		output.Executable = false
 	case domain.OrderStatusDeploying:
 		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
 		statusItem.Message = "发布单已进入发布中，无法再次触发"
 		output.Executable = false
 	default:
 		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "当前发布单不是待执行状态，无法再次触发"
+		statusItem.Message = "当前发布单不是可执行状态，无法再次触发"
 		output.Executable = false
 	}
 	output.Items = append(output.Items, statusItem)
@@ -367,7 +381,7 @@ func (uc *ReleaseOrderManager) buildGitOpsRepoBranchLockKey(
 	if err != nil && !errors.Is(err, domain.ErrDeploySnapshotNotFound) {
 		return "", err
 	}
-	template, _, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(order.TemplateID))
+	template, _, _, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(order.TemplateID))
 	if err != nil {
 		return "", err
 	}

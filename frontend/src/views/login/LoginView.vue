@@ -51,8 +51,8 @@ async function handleSubmit() {
     <div class="login-shell">
       <a-card class="login-card" :bordered="false">
         <div class="login-card-head">
-          <div class="login-card-eyebrow">GOS Platform</div>
-          <h2 class="login-title">GOS</h2>
+          <div class="login-card-eyebrow">GOS Release</div>
+          <h2 class="login-title">GOS Release</h2>
         </div>
 
         <a-form

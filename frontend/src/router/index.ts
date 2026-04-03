@@ -17,9 +17,11 @@ import AgentTaskManagementView from '../views/component/AgentTaskManagementView.
 import AgentScriptManagementView from '../views/component/AgentScriptManagementView.vue'
 import ForbiddenView from '../views/exception/ForbiddenView.vue'
 import LoginView from '../views/login/LoginView.vue'
+import OfficialWebsiteView from '../views/marketing/OfficialWebsiteView.vue'
 import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
 import ReleaseOrderDetailView from '../views/release/ReleaseOrderDetailView.vue'
 import ReleaseOrderListView from '../views/release/ReleaseOrderListView.vue'
+import ReleaseApprovalWorkbenchView from '../views/release/ReleaseApprovalWorkbenchView.vue'
 import ReleaseTemplateView from '../views/release/ReleaseTemplateView.vue'
 import SystemPermissionView from '../views/system/SystemPermissionView.vue'
 import SystemSettingsView from '../views/system/SystemSettingsView.vue'
@@ -53,6 +55,12 @@ export const router = createRouter({
   history: createWebHistory(),
   routes: [
     {
+      path: '/',
+      name: 'official-website',
+      component: OfficialWebsiteView,
+      meta: { title: 'GOS Release', public: true },
+    },
+    {
       path: '/login',
       name: 'login',
       component: LoginView,
@@ -69,53 +77,49 @@ export const router = createRouter({
       component: AppLayout,
       children: [
         {
-          path: '',
-          redirect: '/applications',
-        },
-        {
-          path: 'applications',
+          path: '/applications',
           name: 'application-list',
           component: ApplicationListView,
           meta: { title: '我的应用' },
         },
         {
-          path: 'applications/new',
+          path: '/applications/new',
           name: 'application-create',
           component: ApplicationCreateView,
           meta: { title: '新增应用', permission: 'application.manage' },
         },
         {
-          path: 'applications/:id',
+          path: '/applications/:id',
           name: 'application-detail',
           component: ApplicationDetailView,
           meta: { title: '应用详情', permission: ['application.view', 'application.manage', 'release.create'] },
         },
         {
-          path: 'applications/:id/edit',
+          path: '/applications/:id/edit',
           name: 'application-edit',
           component: ApplicationEditView,
           meta: { title: '编辑应用', permission: 'application.manage' },
         },
         {
-          path: 'applications/:id/pipeline-bindings',
+          path: '/applications/:id/pipeline-bindings',
           name: 'application-pipeline-bindings',
           component: ApplicationPipelineBindingView,
           meta: { title: '管线绑定', permission: ['pipeline.view', 'pipeline.manage'] },
         },
         {
-          path: 'platform-param-dicts',
+          path: '/platform-param-dicts',
           name: 'platform-param-dicts',
           component: PlatformParamDictView,
           meta: { title: '标准字库', permission: 'platform_param.manage' },
         },
         {
-          path: 'components/jenkins',
+          path: '/components/jenkins',
           name: 'jenkins-management',
           component: JenkinsManagementView,
           meta: { title: '管线列表', permission: 'component.view' },
         },
         {
-          path: 'components/argocd',
+          path: '/components/argocd',
           name: 'argocd-management',
           component: ArgoCDManagementView,
           meta: {
@@ -131,73 +135,79 @@ export const router = createRouter({
           },
         },
         {
-          path: 'components/gitops',
+          path: '/components/gitops',
           name: 'gitops-management',
           component: GitOpsManagementView,
           meta: { title: 'GitOps管理', permission: ['component.gitops.view', 'component.gitops.manage'] },
         },
         {
-          path: 'components/agents',
+          path: '/components/agents',
           name: 'agent-management',
           component: AgentManagementView,
           meta: { title: 'Agent管理', permission: ['component.agent.view', 'component.agent.manage'] },
         },
         {
-          path: 'components/agent-scripts',
+          path: '/components/agent-scripts',
           name: 'agent-script-management',
           component: AgentScriptManagementView,
           meta: { title: '脚本管理', permission: ['component.agent.view', 'component.agent.manage'] },
         },
         {
-          path: 'components/agent-tasks',
+          path: '/components/agent-tasks',
           name: 'agent-task-management',
           component: AgentTaskManagementView,
           meta: { title: '任务管理', permission: ['component.agent.view', 'component.agent.manage'] },
         },
         {
-          path: 'components/executor-params',
+          path: '/components/executor-params',
           name: 'executor-param-management',
           component: ExecutorParamManagementView,
           meta: { title: '执行器参数', permission: 'pipeline_param.manage' },
         },
         {
-          path: 'releases',
+          path: '/releases',
           name: 'release-order-list',
           component: ReleaseOrderListView,
           meta: { title: '发布单' },
         },
         {
-          path: 'releases/new',
+          path: '/release-approvals',
+          name: 'release-approval-workbench',
+          component: ReleaseApprovalWorkbenchView,
+          meta: { title: '审批工作台' },
+        },
+        {
+          path: '/releases/new',
           name: 'release-order-create',
           component: ReleaseOrderCreateView,
           meta: { title: '新建发布单', permission: 'release.create' },
         },
         {
-          path: 'releases/:id',
+          path: '/releases/:id',
           name: 'release-order-detail',
           component: ReleaseOrderDetailView,
           meta: { title: '发布单详情' },
         },
         {
-          path: 'release-templates',
+          path: '/release-templates',
           name: 'release-template-list',
           component: ReleaseTemplateView,
           meta: { title: '发布模板', permission: 'release.template.manage' },
         },
         {
-          path: 'system/users',
+          path: '/system/users',
           name: 'system-users',
           component: SystemUserView,
           meta: { title: '用户管理', permission: 'system.user.manage' },
         },
         {
-          path: 'system/permissions',
+          path: '/system/permissions',
           name: 'system-permissions',
           component: SystemPermissionView,
           meta: { title: '权限授权', permission: 'system.permission.manage' },
         },
         {
-          path: 'system/settings',
+          path: '/system/settings',
           name: 'system-settings',
           component: SystemSettingsView,
           meta: { title: '系统设置', permission: 'system.permission.manage' },

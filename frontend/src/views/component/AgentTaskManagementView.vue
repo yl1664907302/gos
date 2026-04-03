@@ -898,7 +898,7 @@ onBeforeUnmount(() => {
         </a-card>
       </a-tab-pane>
 
-      <a-tab-pane key="history" tab="历史任务">
+      <a-tab-pane key="history" tab="临时任务">
         <a-card class="table-card" :bordered="false">
           <div class="history-toolbar">
             <a-space>
@@ -911,13 +911,6 @@ onBeforeUnmount(() => {
                 :options="historyAgentOptions"
                 :filter-option="(input: string, option: any) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
                 @change="applyHistoryFilter"
-              />
-              <a-input
-                v-model:value="historyFilters.agent_keyword"
-                allow-clear
-                placeholder="按 Agent 名称 / 编码查询"
-                style="width: 260px"
-                @pressEnter="applyHistoryFilter"
               />
               <a-button type="primary" @click="applyHistoryFilter">查询</a-button>
               <a-button @click="resetHistoryFilter">重置</a-button>

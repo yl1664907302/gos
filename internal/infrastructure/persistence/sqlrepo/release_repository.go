@@ -62,6 +62,15 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	image_tag VARCHAR(200) NOT NULL DEFAULT '',
 	trigger_type VARCHAR(50) NOT NULL,
 	status VARCHAR(50) NOT NULL DEFAULT 'pending',
+	approval_required TINYINT(1) NOT NULL DEFAULT 0,
+	approval_mode VARCHAR(32) NOT NULL DEFAULT '',
+	approval_approver_ids_json TEXT NOT NULL,
+	approval_approver_names_json TEXT NOT NULL,
+	approved_at BIGINT NULL,
+	approved_by VARCHAR(64) NOT NULL DEFAULT '',
+	rejected_at BIGINT NULL,
+	rejected_by VARCHAR(64) NOT NULL DEFAULT '',
+	rejected_reason VARCHAR(1000) NOT NULL DEFAULT '',
 	remark VARCHAR(500) NOT NULL DEFAULT '',
 	creator_user_id VARCHAR(64) NOT NULL DEFAULT '',
 	triggered_by VARCHAR(64) NOT NULL DEFAULT '',
@@ -183,6 +192,10 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_type VARCHAR(32) NOT NULL DEFAULT '',
 	gitops_type VARCHAR(32) NOT NULL DEFAULT '',
 	status VARCHAR(32) NOT NULL DEFAULT 'active',
+	approval_enabled TINYINT(1) NOT NULL DEFAULT 0,
+	approval_mode VARCHAR(32) NOT NULL DEFAULT '',
+	approval_approver_ids_json TEXT NOT NULL,
+	approval_approver_names_json TEXT NOT NULL,
 	remark VARCHAR(500) NOT NULL DEFAULT '',
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
@@ -247,6 +260,34 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	updated_at BIGINT NOT NULL,
 	KEY idx_release_template_gitops_rule_template_sort (template_id, sort_no)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_template_hook (
+	id VARCHAR(64) PRIMARY KEY,
+	template_id VARCHAR(64) NOT NULL,
+	hook_type VARCHAR(64) NOT NULL,
+	name VARCHAR(255) NOT NULL DEFAULT '',
+	trigger_condition VARCHAR(32) NOT NULL DEFAULT 'on_success',
+	failure_policy VARCHAR(32) NOT NULL DEFAULT 'warn_only',
+	target_id VARCHAR(64) NOT NULL DEFAULT '',
+	target_name VARCHAR(255) NOT NULL DEFAULT '',
+	webhook_method VARCHAR(16) NOT NULL DEFAULT '',
+	webhook_url VARCHAR(500) NOT NULL DEFAULT '',
+	webhook_body TEXT NOT NULL,
+	note VARCHAR(500) NOT NULL DEFAULT '',
+	sort_no INT NOT NULL DEFAULT 0,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	KEY idx_release_template_hook_template_sort (template_id, sort_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS release_order_approval_record (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	action VARCHAR(32) NOT NULL,
+	operator_user_id VARCHAR(64) NOT NULL DEFAULT '',
+	operator_name VARCHAR(100) NOT NULL DEFAULT '',
+	comment VARCHAR(1000) NOT NULL DEFAULT '',
+	created_at BIGINT NOT NULL,
+	KEY idx_release_order_approval_record_order_created (release_order_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 		}, nil
 
 	case "sqlite":
@@ -273,6 +314,15 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	image_tag TEXT NOT NULL DEFAULT '',
 	trigger_type TEXT NOT NULL,
 	status TEXT NOT NULL DEFAULT 'pending',
+	approval_required INTEGER NOT NULL DEFAULT 0,
+	approval_mode TEXT NOT NULL DEFAULT '',
+	approval_approver_ids_json TEXT NOT NULL DEFAULT '[]',
+	approval_approver_names_json TEXT NOT NULL DEFAULT '[]',
+	approved_at INTEGER NULL,
+	approved_by TEXT NOT NULL DEFAULT '',
+	rejected_at INTEGER NULL,
+	rejected_by TEXT NOT NULL DEFAULT '',
+	rejected_reason TEXT NOT NULL DEFAULT '',
 	remark TEXT NOT NULL DEFAULT '',
 	creator_user_id TEXT NOT NULL DEFAULT '',
 	triggered_by TEXT NOT NULL DEFAULT '',
@@ -392,6 +442,10 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	binding_type TEXT NOT NULL DEFAULT '',
 	gitops_type TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL DEFAULT 'active',
+	approval_enabled INTEGER NOT NULL DEFAULT 0,
+	approval_mode TEXT NOT NULL DEFAULT '',
+	approval_approver_ids_json TEXT NOT NULL DEFAULT '[]',
+	approval_approver_names_json TEXT NOT NULL DEFAULT '[]',
 	remark TEXT NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL,
@@ -456,6 +510,34 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	updated_at INTEGER NOT NULL
 );`,
 			`CREATE INDEX IF NOT EXISTS idx_release_template_gitops_rule_template_sort ON release_template_gitops_rule (template_id, sort_no);`,
+			`CREATE TABLE IF NOT EXISTS release_template_hook (
+	id TEXT PRIMARY KEY,
+	template_id TEXT NOT NULL,
+	hook_type TEXT NOT NULL,
+	name TEXT NOT NULL DEFAULT '',
+	trigger_condition TEXT NOT NULL DEFAULT 'on_success',
+	failure_policy TEXT NOT NULL DEFAULT 'warn_only',
+	target_id TEXT NOT NULL DEFAULT '',
+	target_name TEXT NOT NULL DEFAULT '',
+	webhook_method TEXT NOT NULL DEFAULT '',
+	webhook_url TEXT NOT NULL DEFAULT '',
+	webhook_body TEXT NOT NULL DEFAULT '',
+	note TEXT NOT NULL DEFAULT '',
+	sort_no INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_template_hook_template_sort ON release_template_hook (template_id, sort_no);`,
+			`CREATE TABLE IF NOT EXISTS release_order_approval_record (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	operator_user_id TEXT NOT NULL DEFAULT '',
+	operator_name TEXT NOT NULL DEFAULT '',
+	comment TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL
+);`,
+			`CREATE INDEX IF NOT EXISTS idx_release_order_approval_record_order_created ON release_order_approval_record (release_order_id, created_at);`,
 		}, nil
 
 	default:
@@ -583,6 +665,19 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value VARCHAR(500) NOT NULL DEFAULT '' AFTER source_param_name;`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key VARCHAR(100) NOT NULL DEFAULT '' AFTER source_from;`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name VARCHAR(100) NOT NULL DEFAULT '' AFTER locator_param_key;`},
+			{"release_template", "approval_enabled", `ALTER TABLE release_template ADD COLUMN approval_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER status;`},
+			{"release_template", "approval_mode", `ALTER TABLE release_template ADD COLUMN approval_mode VARCHAR(32) NOT NULL DEFAULT '' AFTER approval_enabled;`},
+			{"release_template", "approval_approver_ids_json", `ALTER TABLE release_template ADD COLUMN approval_approver_ids_json TEXT NOT NULL AFTER approval_mode;`},
+			{"release_template", "approval_approver_names_json", `ALTER TABLE release_template ADD COLUMN approval_approver_names_json TEXT NOT NULL AFTER approval_approver_ids_json;`},
+			{"release_order", "approval_required", `ALTER TABLE release_order ADD COLUMN approval_required TINYINT(1) NOT NULL DEFAULT 0 AFTER status;`},
+			{"release_order", "approval_mode", `ALTER TABLE release_order ADD COLUMN approval_mode VARCHAR(32) NOT NULL DEFAULT '' AFTER approval_required;`},
+			{"release_order", "approval_approver_ids_json", `ALTER TABLE release_order ADD COLUMN approval_approver_ids_json TEXT NOT NULL AFTER approval_mode;`},
+			{"release_order", "approval_approver_names_json", `ALTER TABLE release_order ADD COLUMN approval_approver_names_json TEXT NOT NULL AFTER approval_approver_ids_json;`},
+			{"release_order", "approved_at", `ALTER TABLE release_order ADD COLUMN approved_at BIGINT NULL AFTER approval_approver_names_json;`},
+			{"release_order", "approved_by", `ALTER TABLE release_order ADD COLUMN approved_by VARCHAR(64) NOT NULL DEFAULT '' AFTER approved_at;`},
+			{"release_order", "rejected_at", `ALTER TABLE release_order ADD COLUMN rejected_at BIGINT NULL AFTER approved_by;`},
+			{"release_order", "rejected_by", `ALTER TABLE release_order ADD COLUMN rejected_by VARCHAR(64) NOT NULL DEFAULT '' AFTER rejected_at;`},
+			{"release_order", "rejected_reason", `ALTER TABLE release_order ADD COLUMN rejected_reason VARCHAR(1000) NOT NULL DEFAULT '' AFTER rejected_by;`},
 		} {
 			exists, err = r.mysqlColumnExists(ctx, columnStmt.table, columnStmt.column)
 			if err != nil {
@@ -677,6 +772,38 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 		}
 		_, err = r.db.ExecContext(ctx, `CREATE INDEX idx_release_order_batch ON release_order (concurrent_batch_no);`)
 		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate key name") {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_order_approval_record (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	action VARCHAR(32) NOT NULL,
+	operator_user_id VARCHAR(64) NOT NULL DEFAULT '',
+	operator_name VARCHAR(100) NOT NULL DEFAULT '',
+	comment VARCHAR(1000) NOT NULL DEFAULT '',
+	created_at BIGINT NOT NULL,
+	KEY idx_release_order_approval_record_order_created (release_order_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(ctx, `UPDATE release_template SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(ctx, `UPDATE release_template SET approval_approver_names_json = '[]' WHERE approval_approver_names_json IS NULL OR TRIM(approval_approver_names_json) = '';`)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_names_json = '[]' WHERE approval_approver_names_json IS NULL OR TRIM(approval_approver_names_json) = '';`)
+		if err != nil {
 			return err
 		}
 		return nil
@@ -776,6 +903,19 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name TEXT NOT NULL DEFAULT '';`},
+			{"release_template", "approval_enabled", `ALTER TABLE release_template ADD COLUMN approval_enabled INTEGER NOT NULL DEFAULT 0;`},
+			{"release_template", "approval_mode", `ALTER TABLE release_template ADD COLUMN approval_mode TEXT NOT NULL DEFAULT '';`},
+			{"release_template", "approval_approver_ids_json", `ALTER TABLE release_template ADD COLUMN approval_approver_ids_json TEXT NOT NULL DEFAULT '[]';`},
+			{"release_template", "approval_approver_names_json", `ALTER TABLE release_template ADD COLUMN approval_approver_names_json TEXT NOT NULL DEFAULT '[]';`},
+			{"release_order", "approval_required", `ALTER TABLE release_order ADD COLUMN approval_required INTEGER NOT NULL DEFAULT 0;`},
+			{"release_order", "approval_mode", `ALTER TABLE release_order ADD COLUMN approval_mode TEXT NOT NULL DEFAULT '';`},
+			{"release_order", "approval_approver_ids_json", `ALTER TABLE release_order ADD COLUMN approval_approver_ids_json TEXT NOT NULL DEFAULT '[]';`},
+			{"release_order", "approval_approver_names_json", `ALTER TABLE release_order ADD COLUMN approval_approver_names_json TEXT NOT NULL DEFAULT '[]';`},
+			{"release_order", "approved_at", `ALTER TABLE release_order ADD COLUMN approved_at INTEGER NULL;`},
+			{"release_order", "approved_by", `ALTER TABLE release_order ADD COLUMN approved_by TEXT NOT NULL DEFAULT '';`},
+			{"release_order", "rejected_at", `ALTER TABLE release_order ADD COLUMN rejected_at INTEGER NULL;`},
+			{"release_order", "rejected_by", `ALTER TABLE release_order ADD COLUMN rejected_by TEXT NOT NULL DEFAULT '';`},
+			{"release_order", "rejected_reason", `ALTER TABLE release_order ADD COLUMN rejected_reason TEXT NOT NULL DEFAULT '';`},
 		} {
 			tableColumns, tableErr := r.sqliteTableColumns(ctx, columnStmt.table)
 			if tableErr != nil {
@@ -862,6 +1002,35 @@ WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
 		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_release_execution_lock_order ON release_execution_lock (release_order_id);`); err != nil {
 			return err
 		}
+		if _, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS release_order_approval_record (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL,
+	action TEXT NOT NULL,
+	operator_user_id TEXT NOT NULL DEFAULT '',
+	operator_name TEXT NOT NULL DEFAULT '',
+	comment TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL
+);`,
+		); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_release_order_approval_record_order_created ON release_order_approval_record (release_order_id, created_at);`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `UPDATE release_template SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `UPDATE release_template SET approval_approver_names_json = '[]' WHERE approval_approver_names_json IS NULL OR TRIM(approval_approver_names_json) = '';`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_names_json = '[]' WHERE approval_approver_names_json IS NULL OR TRIM(approval_approver_names_json) = '';`); err != nil {
+			return err
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported db driver: %s", r.dbDriver)
@@ -930,8 +1099,8 @@ func (r *ReleaseRepository) Create(
 	const insertOrder = `
 INSERT INTO release_order (
 	id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code,
-	son_service, git_ref, image_tag, trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	son_service, git_ref, image_tag, trigger_type, status, approval_required, approval_mode, approval_approver_ids_json, approval_approver_names_json, approved_at, approved_by, rejected_at, rejected_by, rejected_reason, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	_, err = tx.ExecContext(
 		ctx,
@@ -957,6 +1126,15 @@ INSERT INTO release_order (
 		order.ImageTag,
 		string(order.TriggerType),
 		string(order.Status),
+		boolToDBValue(r.dbDriver, order.ApprovalRequired),
+		string(order.ApprovalMode),
+		marshalStringSlice(order.ApprovalApproverIDs),
+		marshalStringSlice(order.ApprovalApproverNames),
+		nullableUnixNano(order.ApprovedAt),
+		strings.TrimSpace(order.ApprovedBy),
+		nullableUnixNano(order.RejectedAt),
+		strings.TrimSpace(order.RejectedBy),
+		strings.TrimSpace(order.RejectedReason),
 		order.Remark,
 		order.CreatorUserID,
 		order.TriggeredBy,
@@ -1057,7 +1235,7 @@ INSERT INTO release_order_step (
 func (r *ReleaseRepository) GetByID(ctx context.Context, id string) (domain.ReleaseOrder, error) {
 	const q = `
 SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, approval_required, approval_mode, approval_approver_ids_json, approval_approver_names_json, approved_at, approved_by, rejected_at, rejected_by, rejected_reason, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE id = ?;`
 
@@ -1102,6 +1280,10 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 		where = append(where, "creator_user_id = ?")
 		args = append(args, filter.CreatorUserID)
 	}
+	if value := strings.TrimSpace(filter.ApprovalApproverUserID); value != "" {
+		where = append(where, "approval_approver_ids_json LIKE ?")
+		args = append(args, `%\"`+value+`\"%`)
+	}
 	if filter.EnvCode != "" {
 		where = append(where, "env_code = ?")
 		args = append(args, filter.EnvCode)
@@ -1126,7 +1308,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 
 	listQuery := `
 SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, approval_required, approval_mode, approval_approver_ids_json, approval_approver_names_json, approved_at, approved_by, rejected_at, rejected_by, rejected_reason, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order`
 	if len(where) > 0 {
 		listQuery += " WHERE " + strings.Join(where, " AND ")
@@ -1169,9 +1351,19 @@ func (r *ReleaseRepository) ListTrackableOrders(
 	const countQuery = `
 SELECT COUNT(DISTINCT ro.id)
 FROM release_order ro
-JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE ro.status IN (?, ?, ?)
-  AND roe.status IN (?, ?);`
+WHERE (
+    ro.status IN (?, ?, ?)
+    OR (
+      ro.status IN (?, ?, ?)
+      AND EXISTS (
+        SELECT 1
+        FROM release_order_step ros
+        WHERE ros.release_order_id = ro.id
+          AND ros.step_code LIKE 'hook:%'
+          AND ros.status IN (?, ?)
+      )
+    )
+  );`
 
 	var total int64
 	if err := r.db.QueryRowContext(
@@ -1180,19 +1372,32 @@ WHERE ro.status IN (?, ?, ?)
 		string(domain.OrderStatusRunning),
 		string(domain.OrderStatusQueued),
 		string(domain.OrderStatusDeploying),
-		string(domain.ExecutionStatusPending),
-		string(domain.ExecutionStatusRunning),
+		string(domain.OrderStatusSuccess),
+		string(domain.OrderStatusFailed),
+		string(domain.OrderStatusCancelled),
+		string(domain.StepStatusPending),
+		string(domain.StepStatusRunning),
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 
 	const listQuery = `
 SELECT DISTINCT ro.id, ro.order_no, ro.previous_order_no, ro.operation_type, ro.source_order_id, ro.source_order_no, ro.is_concurrent, ro.concurrent_batch_no, ro.concurrent_batch_seq, ro.application_id, ro.application_name, ro.template_id, ro.template_name, ro.binding_id, ro.pipeline_id, ro.env_code, ro.son_service, ro.git_ref, ro.image_tag,
-	ro.trigger_type, ro.status, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
+	ro.trigger_type, ro.status, ro.approval_required, ro.approval_mode, ro.approval_approver_ids_json, ro.approval_approver_names_json, ro.approved_at, ro.approved_by, ro.rejected_at, ro.rejected_by, ro.rejected_reason, ro.remark, ro.creator_user_id, ro.triggered_by, ro.started_at, ro.finished_at, ro.created_at, ro.updated_at
 FROM release_order ro
-JOIN release_order_execution roe ON roe.release_order_id = ro.id
-WHERE ro.status IN (?, ?, ?)
-  AND roe.status IN (?, ?)
+WHERE (
+    ro.status IN (?, ?, ?)
+    OR (
+      ro.status IN (?, ?, ?)
+      AND EXISTS (
+        SELECT 1
+        FROM release_order_step ros
+        WHERE ros.release_order_id = ro.id
+          AND ros.step_code LIKE 'hook:%'
+          AND ros.status IN (?, ?)
+      )
+    )
+  )
 ORDER BY ro.created_at DESC
 LIMIT ? OFFSET ?;`
 
@@ -1203,8 +1408,11 @@ LIMIT ? OFFSET ?;`
 		string(domain.OrderStatusRunning),
 		string(domain.OrderStatusQueued),
 		string(domain.OrderStatusDeploying),
-		string(domain.ExecutionStatusPending),
-		string(domain.ExecutionStatusRunning),
+		string(domain.OrderStatusSuccess),
+		string(domain.OrderStatusFailed),
+		string(domain.OrderStatusCancelled),
+		string(domain.StepStatusPending),
+		string(domain.StepStatusRunning),
 		pageSize,
 		offset,
 	)
@@ -1246,6 +1454,47 @@ WHERE id = ?;`
 		string(status),
 		nullableUnixNano(startedAt),
 		nullableUnixNano(finishedAt),
+		updatedAt.UTC().UnixNano(),
+		id,
+	)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if affected == 0 {
+		return domain.ReleaseOrder{}, domain.ErrOrderNotFound
+	}
+	return r.GetByID(ctx, id)
+}
+
+func (r *ReleaseRepository) UpdateApprovalStatus(
+	ctx context.Context,
+	id string,
+	status domain.OrderStatus,
+	approvedAt *time.Time,
+	approvedBy string,
+	rejectedAt *time.Time,
+	rejectedBy string,
+	rejectedReason string,
+	updatedAt time.Time,
+) (domain.ReleaseOrder, error) {
+	const q = `
+UPDATE release_order
+SET status = ?, approved_at = ?, approved_by = ?, rejected_at = ?, rejected_by = ?, rejected_reason = ?, updated_at = ?
+WHERE id = ?;`
+
+	res, err := r.db.ExecContext(
+		ctx,
+		q,
+		string(status),
+		nullableUnixNano(approvedAt),
+		strings.TrimSpace(approvedBy),
+		nullableUnixNano(rejectedAt),
+		strings.TrimSpace(rejectedBy),
+		strings.TrimSpace(rejectedReason),
 		updatedAt.UTC().UnixNano(),
 		id,
 	)
@@ -1401,7 +1650,7 @@ func (r *ReleaseRepository) ListByConcurrentBatchNo(ctx context.Context, batchNo
 	}
 	const q = `
 SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, approval_required, approval_mode, approval_approver_ids_json, approval_approver_names_json, approved_at, approved_by, rejected_at, rejected_by, rejected_reason, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE concurrent_batch_no = ?
 ORDER BY concurrent_batch_seq ASC, created_at ASC;`
@@ -1441,7 +1690,7 @@ func (r *ReleaseRepository) FindActiveOrderByApplicationEnv(
 
 	const q = `
 SELECT id, order_no, previous_order_no, operation_type, source_order_id, source_order_no, is_concurrent, concurrent_batch_no, concurrent_batch_seq, application_id, application_name, template_id, template_name, binding_id, pipeline_id, env_code, son_service, git_ref, image_tag,
-	trigger_type, status, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
+	trigger_type, status, approval_required, approval_mode, approval_approver_ids_json, approval_approver_names_json, approved_at, approved_by, rejected_at, rejected_by, rejected_reason, remark, creator_user_id, triggered_by, started_at, finished_at, created_at, updated_at
 FROM release_order
 WHERE application_id = ?
   AND env_code = ?
@@ -2039,6 +2288,7 @@ func (r *ReleaseRepository) CreateTemplate(
 	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
 	gitopsRules []domain.ReleaseTemplateGitOpsRule,
+	hooks []domain.ReleaseTemplateHook,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2052,8 +2302,8 @@ func (r *ReleaseRepository) CreateTemplate(
 
 	const insertTemplate = `
 INSERT INTO release_template (
-	id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, remark, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, approval_enabled, approval_mode, approval_approver_ids_json, approval_approver_names_json, remark, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	if _, err = tx.ExecContext(
 		ctx,
@@ -2067,6 +2317,10 @@ INSERT INTO release_template (
 		template.BindingType,
 		string(template.GitOpsType),
 		string(template.Status),
+		boolToDBValue(r.dbDriver, template.ApprovalEnabled),
+		string(template.ApprovalMode),
+		marshalStringSlice(template.ApprovalApproverIDs),
+		marshalStringSlice(template.ApprovalApproverNames),
 		template.Remark,
 		template.CreatedAt.UTC().UnixNano(),
 		template.UpdatedAt.UTC().UnixNano(),
@@ -2086,6 +2340,9 @@ INSERT INTO release_template (
 	if err := r.insertTemplateGitOpsRules(ctx, tx, gitopsRules); err != nil {
 		return err
 	}
+	if err := r.insertTemplateHooks(ctx, tx, hooks); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return err
@@ -2097,9 +2354,9 @@ INSERT INTO release_template (
 func (r *ReleaseRepository) GetTemplateByID(
 	ctx context.Context,
 	id string,
-) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, []domain.ReleaseTemplateGitOpsRule, error) {
+) (domain.ReleaseTemplate, []domain.ReleaseTemplateBinding, []domain.ReleaseTemplateParam, []domain.ReleaseTemplateGitOpsRule, []domain.ReleaseTemplateHook, error) {
 	const q = `
-SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, remark, created_at, updated_at
+SELECT id, name, application_id, application_name, binding_id, binding_name, binding_type, gitops_type, status, approval_enabled, approval_mode, approval_approver_ids_json, approval_approver_names_json, remark, created_at, updated_at
 FROM release_template
 WHERE id = ?;`
 
@@ -2107,24 +2364,28 @@ WHERE id = ?;`
 	item, err := scanReleaseTemplate(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.ReleaseTemplate{}, nil, nil, nil, domain.ErrTemplateNotFound
+			return domain.ReleaseTemplate{}, nil, nil, nil, nil, domain.ErrTemplateNotFound
 		}
-		return domain.ReleaseTemplate{}, nil, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	bindings, err := r.listTemplateBindings(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	params, err := r.listTemplateParams(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	gitopsRules, err := r.listTemplateGitOpsRules(ctx, item.ID)
 	if err != nil {
-		return domain.ReleaseTemplate{}, nil, nil, nil, err
+		return domain.ReleaseTemplate{}, nil, nil, nil, nil, err
+	}
+	hooks, err := r.listTemplateHooks(ctx, item.ID)
+	if err != nil {
+		return domain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	item.ParamCount = len(params)
-	return item, bindings, params, gitopsRules, nil
+	return item, bindings, params, gitopsRules, hooks, nil
 }
 
 func (r *ReleaseRepository) ListTemplates(
@@ -2172,7 +2433,7 @@ func (r *ReleaseRepository) ListTemplates(
 
 	listQuery := `
 SELECT
-	t.id, t.name, t.application_id, t.application_name, t.binding_id, t.binding_name, t.binding_type, t.gitops_type, t.status, t.remark, t.created_at, t.updated_at,
+	t.id, t.name, t.application_id, t.application_name, t.binding_id, t.binding_name, t.binding_type, t.gitops_type, t.status, t.approval_enabled, t.approval_mode, t.approval_approver_ids_json, t.approval_approver_names_json, t.remark, t.created_at, t.updated_at,
 	COALESCE(p.param_count, 0)
 FROM release_template t
 LEFT JOIN (
@@ -2212,6 +2473,7 @@ func (r *ReleaseRepository) UpdateTemplate(
 	bindings []domain.ReleaseTemplateBinding,
 	params []domain.ReleaseTemplateParam,
 	gitopsRules []domain.ReleaseTemplateGitOpsRule,
+	hooks []domain.ReleaseTemplateHook,
 ) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -2225,7 +2487,7 @@ func (r *ReleaseRepository) UpdateTemplate(
 
 	const updateTemplate = `
 UPDATE release_template
-SET name = ?, application_name = ?, binding_name = ?, binding_type = ?, gitops_type = ?, status = ?, remark = ?, updated_at = ?
+SET name = ?, application_name = ?, binding_name = ?, binding_type = ?, gitops_type = ?, status = ?, approval_enabled = ?, approval_mode = ?, approval_approver_ids_json = ?, approval_approver_names_json = ?, remark = ?, updated_at = ?
 WHERE id = ?;`
 	res, err := tx.ExecContext(
 		ctx,
@@ -2236,6 +2498,10 @@ WHERE id = ?;`
 		template.BindingType,
 		string(template.GitOpsType),
 		string(template.Status),
+		boolToDBValue(r.dbDriver, template.ApprovalEnabled),
+		string(template.ApprovalMode),
+		marshalStringSlice(template.ApprovalApproverIDs),
+		marshalStringSlice(template.ApprovalApproverNames),
 		template.Remark,
 		template.UpdatedAt.UTC().UnixNano(),
 		template.ID,
@@ -2260,6 +2526,9 @@ WHERE id = ?;`
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_gitops_rule WHERE template_id = ?;`, template.ID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_hook WHERE template_id = ?;`, template.ID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, template.ID); err != nil {
 		return err
 	}
@@ -2270,6 +2539,9 @@ WHERE id = ?;`
 		return err
 	}
 	if err := r.insertTemplateGitOpsRules(ctx, tx, gitopsRules); err != nil {
+		return err
+	}
+	if err := r.insertTemplateHooks(ctx, tx, hooks); err != nil {
 		return err
 	}
 
@@ -2297,6 +2569,9 @@ func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_gitops_rule WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_hook WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM release_template_binding WHERE template_id = ?;`, strings.TrimSpace(id)); err != nil {
 		return err
 	}
@@ -2317,6 +2592,145 @@ func (r *ReleaseRepository) DeleteTemplate(ctx context.Context, id string) error
 	}
 	tx = nil
 	return nil
+}
+
+func (r *ReleaseRepository) CreateApprovalRecord(ctx context.Context, item domain.ReleaseOrderApprovalRecord) error {
+	const q = `
+INSERT INTO release_order_approval_record (
+	id, release_order_id, action, operator_user_id, operator_name, comment, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := r.db.ExecContext(
+		ctx,
+		q,
+		item.ID,
+		item.ReleaseOrderID,
+		string(item.Action),
+		strings.TrimSpace(item.OperatorUserID),
+		strings.TrimSpace(item.OperatorName),
+		strings.TrimSpace(item.Comment),
+		item.CreatedAt.UTC().UnixNano(),
+	)
+	return err
+}
+
+func (r *ReleaseRepository) ListApprovalRecords(ctx context.Context, releaseOrderID string) ([]domain.ReleaseOrderApprovalRecord, error) {
+	const q = `
+SELECT id, release_order_id, action, operator_user_id, operator_name, comment, created_at
+FROM release_order_approval_record
+WHERE release_order_id = ?
+ORDER BY created_at ASC, id ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, strings.TrimSpace(releaseOrderID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrderApprovalRecord, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrderApprovalRecord(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) ListApprovalRecordSummaries(ctx context.Context, filter domain.ApprovalRecordListFilter) ([]domain.ReleaseOrderApprovalRecordSummary, int64, error) {
+	if filter.Page <= 0 {
+		filter.Page = 1
+	}
+	if filter.PageSize <= 0 {
+		filter.PageSize = 20
+	}
+	if filter.PageSize > 100 {
+		filter.PageSize = 100
+	}
+
+	where := make([]string, 0, 4)
+	args := make([]any, 0, 8)
+	if value := strings.TrimSpace(filter.ApplicationID); value != "" {
+		where = append(where, "ro.application_id = ?")
+		args = append(args, value)
+	} else if len(filter.ApplicationIDs) > 0 {
+		placeholders := make([]string, 0, len(filter.ApplicationIDs))
+		for _, item := range filter.ApplicationIDs {
+			value := strings.TrimSpace(item)
+			if value == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, value)
+		}
+		if len(placeholders) == 0 {
+			return []domain.ReleaseOrderApprovalRecordSummary{}, 0, nil
+		}
+		where = append(where, "ro.application_id IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	if value := strings.TrimSpace(filter.OperatorUserID); value != "" {
+		where = append(where, "ar.operator_user_id = ?")
+		args = append(args, value)
+	}
+
+	countQuery := `
+SELECT COUNT(1)
+FROM release_order_approval_record ar
+INNER JOIN release_order ro ON ro.id = ar.release_order_id`
+	if len(where) > 0 {
+		countQuery += " WHERE " + strings.Join(where, " AND ")
+	}
+	var total int64
+	if err := r.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `
+SELECT
+  ar.id,
+  ar.release_order_id,
+  ar.action,
+  ar.operator_user_id,
+  ar.operator_name,
+  ar.comment,
+  ar.created_at,
+  ro.order_no,
+  ro.status,
+  ro.application_id,
+  ro.application_name,
+  ro.env_code,
+  ro.operation_type,
+  ro.triggered_by
+FROM release_order_approval_record ar
+INNER JOIN release_order ro ON ro.id = ar.release_order_id`
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	query += " ORDER BY ar.created_at DESC, ar.id DESC LIMIT ? OFFSET ?;"
+
+	offset := (filter.Page - 1) * filter.PageSize
+	rows, err := r.db.QueryContext(ctx, query, append(args, filter.PageSize, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseOrderApprovalRecordSummary, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseOrderApprovalRecordSummary(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
 }
 
 func (r *ReleaseRepository) insertTemplateBindings(
@@ -2426,6 +2840,42 @@ INSERT INTO release_template_gitops_rule (
 	return nil
 }
 
+func (r *ReleaseRepository) insertTemplateHooks(
+	ctx context.Context,
+	tx *sql.Tx,
+	hooks []domain.ReleaseTemplateHook,
+) error {
+	const insertHook = `
+INSERT INTO release_template_hook (
+	id, template_id, hook_type, name, trigger_condition, failure_policy, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	for _, item := range hooks {
+		if _, err := tx.ExecContext(
+			ctx,
+			insertHook,
+			item.ID,
+			item.TemplateID,
+			string(item.HookType),
+			item.Name,
+			string(item.TriggerCondition),
+			string(item.FailurePolicy),
+			item.TargetID,
+			item.TargetName,
+			item.WebhookMethod,
+			item.WebhookURL,
+			item.WebhookBody,
+			item.Note,
+			item.SortNo,
+			item.CreatedAt.UTC().UnixNano(),
+			item.UpdatedAt.UTC().UnixNano(),
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *ReleaseRepository) listTemplateBindings(
 	ctx context.Context,
 	templateID string,
@@ -2516,6 +2966,36 @@ ORDER BY sort_no ASC, created_at ASC;`
 	return items, nil
 }
 
+func (r *ReleaseRepository) listTemplateHooks(
+	ctx context.Context,
+	templateID string,
+) ([]domain.ReleaseTemplateHook, error) {
+	const q = `
+SELECT id, template_id, hook_type, name, trigger_condition, failure_policy, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
+FROM release_template_hook
+WHERE template_id = ?
+ORDER BY sort_no ASC, created_at ASC;`
+
+	rows, err := r.db.QueryContext(ctx, q, templateID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ReleaseTemplateHook, 0)
+	for rows.Next() {
+		item, scanErr := scanReleaseTemplateHook(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	var (
 		item              domain.ReleaseOrder
@@ -2523,6 +3003,12 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		triggerType       string
 		status            string
 		isConcurrentValue any
+		approvalRequired  any
+		approvalMode      string
+		approverIDsJSON   string
+		approverNamesJSON string
+		approvedAt        sql.NullInt64
+		rejectedAt        sql.NullInt64
 		startedAt         sql.NullInt64
 		finishedAt        sql.NullInt64
 		createdAt         int64
@@ -2550,6 +3036,15 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 		&item.ImageTag,
 		&triggerType,
 		&status,
+		&approvalRequired,
+		&approvalMode,
+		&approverIDsJSON,
+		&approverNamesJSON,
+		&approvedAt,
+		&item.ApprovedBy,
+		&rejectedAt,
+		&item.RejectedBy,
+		&item.RejectedReason,
 		&item.Remark,
 		&item.CreatorUserID,
 		&item.TriggeredBy,
@@ -2565,6 +3060,18 @@ func scanReleaseOrder(s scanner) (domain.ReleaseOrder, error) {
 	item.IsConcurrent = scanBoolValue(isConcurrentValue)
 	item.TriggerType = domain.TriggerType(triggerType)
 	item.Status = domain.OrderStatus(status)
+	item.ApprovalRequired = scanBoolValue(approvalRequired)
+	item.ApprovalMode = domain.TemplateApprovalMode(strings.TrimSpace(approvalMode))
+	item.ApprovalApproverIDs = unmarshalStringSlice(approverIDsJSON)
+	item.ApprovalApproverNames = unmarshalStringSlice(approverNamesJSON)
+	if approvedAt.Valid {
+		t := time.Unix(0, approvedAt.Int64).UTC()
+		item.ApprovedAt = &t
+	}
+	if rejectedAt.Valid {
+		t := time.Unix(0, rejectedAt.Int64).UTC()
+		item.RejectedAt = &t
+	}
 	if startedAt.Valid {
 		t := time.Unix(0, startedAt.Int64).UTC()
 		item.StartedAt = &t
@@ -2763,11 +3270,15 @@ func scanReleaseTemplateBinding(s scanner) (domain.ReleaseTemplateBinding, error
 
 func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 	var (
-		item      domain.ReleaseTemplate
-		gitopsRaw string
-		statusRaw string
-		createdAt int64
-		updatedAt int64
+		item              domain.ReleaseTemplate
+		gitopsRaw         string
+		statusRaw         string
+		approvalEnabled   any
+		approvalMode      string
+		approverIDsJSON   string
+		approverNamesJSON string
+		createdAt         int64
+		updatedAt         int64
 	)
 	if err := s.Scan(
 		&item.ID,
@@ -2779,6 +3290,10 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 		&item.BindingType,
 		&gitopsRaw,
 		&statusRaw,
+		&approvalEnabled,
+		&approvalMode,
+		&approverIDsJSON,
+		&approverNamesJSON,
 		&item.Remark,
 		&createdAt,
 		&updatedAt,
@@ -2787,6 +3302,10 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 	}
 	item.GitOpsType = domain.GitOpsType(gitopsRaw)
 	item.Status = domain.TemplateStatus(statusRaw)
+	item.ApprovalEnabled = scanBoolValue(approvalEnabled)
+	item.ApprovalMode = domain.TemplateApprovalMode(strings.TrimSpace(approvalMode))
+	item.ApprovalApproverIDs = unmarshalStringSlice(approverIDsJSON)
+	item.ApprovalApproverNames = unmarshalStringSlice(approverNamesJSON)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
@@ -2794,11 +3313,15 @@ func scanReleaseTemplate(s scanner) (domain.ReleaseTemplate, error) {
 
 func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 	var (
-		item      domain.ReleaseTemplate
-		gitopsRaw string
-		statusRaw string
-		createdAt int64
-		updatedAt int64
+		item              domain.ReleaseTemplate
+		gitopsRaw         string
+		statusRaw         string
+		approvalEnabled   any
+		approvalMode      string
+		approverIDsJSON   string
+		approverNamesJSON string
+		createdAt         int64
+		updatedAt         int64
 	)
 	if err := s.Scan(
 		&item.ID,
@@ -2810,6 +3333,10 @@ func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 		&item.BindingType,
 		&gitopsRaw,
 		&statusRaw,
+		&approvalEnabled,
+		&approvalMode,
+		&approverIDsJSON,
+		&approverNamesJSON,
 		&item.Remark,
 		&createdAt,
 		&updatedAt,
@@ -2819,6 +3346,10 @@ func scanReleaseTemplateWithCount(s scanner) (domain.ReleaseTemplate, error) {
 	}
 	item.GitOpsType = domain.GitOpsType(gitopsRaw)
 	item.Status = domain.TemplateStatus(statusRaw)
+	item.ApprovalEnabled = scanBoolValue(approvalEnabled)
+	item.ApprovalMode = domain.TemplateApprovalMode(strings.TrimSpace(approvalMode))
+	item.ApprovalApproverIDs = unmarshalStringSlice(approverIDsJSON)
+	item.ApprovalApproverNames = unmarshalStringSlice(approverNamesJSON)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil
@@ -2894,6 +3425,97 @@ func scanReleaseTemplateGitOpsRule(s scanner) (domain.ReleaseTemplateGitOpsRule,
 	item.SourceFrom = domain.GitOpsRuleSourceFrom(sourceFrom)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseTemplateHook(s scanner) (domain.ReleaseTemplateHook, error) {
+	var (
+		item             domain.ReleaseTemplateHook
+		hookType         string
+		triggerCondition string
+		failurePolicy    string
+		createdAt        int64
+		updatedAt        int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.TemplateID,
+		&hookType,
+		&item.Name,
+		&triggerCondition,
+		&failurePolicy,
+		&item.TargetID,
+		&item.TargetName,
+		&item.WebhookMethod,
+		&item.WebhookURL,
+		&item.WebhookBody,
+		&item.Note,
+		&item.SortNo,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ReleaseTemplateHook{}, err
+	}
+	item.HookType = domain.TemplateHookType(hookType)
+	item.TriggerCondition = domain.TemplateHookTriggerCondition(triggerCondition)
+	item.FailurePolicy = domain.TemplateHookFailurePolicy(failurePolicy)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanReleaseOrderApprovalRecord(s scanner) (domain.ReleaseOrderApprovalRecord, error) {
+	var (
+		item      domain.ReleaseOrderApprovalRecord
+		actionRaw string
+		createdAt int64
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&actionRaw,
+		&item.OperatorUserID,
+		&item.OperatorName,
+		&item.Comment,
+		&createdAt,
+	); err != nil {
+		return domain.ReleaseOrderApprovalRecord{}, err
+	}
+	item.Action = domain.ReleaseOrderApprovalAction(actionRaw)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	return item, nil
+}
+
+func scanReleaseOrderApprovalRecordSummary(s scanner) (domain.ReleaseOrderApprovalRecordSummary, error) {
+	var (
+		item             domain.ReleaseOrderApprovalRecordSummary
+		actionRaw        string
+		createdAt        int64
+		orderStatusRaw   string
+		operationTypeRaw string
+	)
+	if err := s.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&actionRaw,
+		&item.OperatorUserID,
+		&item.OperatorName,
+		&item.Comment,
+		&createdAt,
+		&item.OrderNo,
+		&orderStatusRaw,
+		&item.ApplicationID,
+		&item.ApplicationName,
+		&item.EnvCode,
+		&operationTypeRaw,
+		&item.TriggeredBy,
+	); err != nil {
+		return domain.ReleaseOrderApprovalRecordSummary{}, err
+	}
+	item.Action = domain.ReleaseOrderApprovalAction(actionRaw)
+	item.OrderStatus = domain.OrderStatus(orderStatusRaw)
+	item.OperationType = domain.OperationType(operationTypeRaw)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	return item, nil
 }
 

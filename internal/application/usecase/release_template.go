@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	agentdomain "gos/internal/domain/agent"
 	appdomain "gos/internal/domain/application"
 	argocddomain "gos/internal/domain/argocdapp"
 	pipelineparamdomain "gos/internal/domain/executorparam"
@@ -37,6 +38,7 @@ type ReleaseTemplateManager struct {
 	paramRepo    pipelineparamdomain.Repository
 	platformRepo platformparamdomain.Repository
 	argocdRepo   argocddomain.Repository
+	agentRepo    agentdomain.Repository
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader
 	now          func() time.Time
 }
@@ -63,34 +65,44 @@ type gitOpsValuesTargetSelection struct {
 }
 
 type CreateReleaseTemplateInput struct {
-	Name           string
-	ApplicationID  string
-	CIBindingID    string
-	CDBindingID    string
-	CDProvider     pipelinedomain.Provider
-	GitOpsType     releasedomain.GitOpsType
-	Status         releasedomain.TemplateStatus
-	Remark         string
-	CIParamDefIDs  []string
-	CDParamDefIDs  []string
-	CIParamConfigs []ReleaseTemplateParamConfigInput
-	CDParamConfigs []ReleaseTemplateParamConfigInput
-	GitOpsRules    []ReleaseTemplateGitOpsRuleInput
+	Name                  string
+	ApplicationID         string
+	CIBindingID           string
+	CDBindingID           string
+	CDProvider            pipelinedomain.Provider
+	GitOpsType            releasedomain.GitOpsType
+	Status                releasedomain.TemplateStatus
+	Remark                string
+	ApprovalEnabled       bool
+	ApprovalMode          releasedomain.TemplateApprovalMode
+	ApprovalApproverIDs   []string
+	ApprovalApproverNames []string
+	CIParamDefIDs         []string
+	CDParamDefIDs         []string
+	CIParamConfigs        []ReleaseTemplateParamConfigInput
+	CDParamConfigs        []ReleaseTemplateParamConfigInput
+	GitOpsRules           []ReleaseTemplateGitOpsRuleInput
+	Hooks                 []ReleaseTemplateHookInput
 }
 
 type UpdateReleaseTemplateInput struct {
-	Name           string
-	CIBindingID    string
-	CDBindingID    string
-	CDProvider     pipelinedomain.Provider
-	GitOpsType     releasedomain.GitOpsType
-	Status         releasedomain.TemplateStatus
-	Remark         string
-	CIParamDefIDs  []string
-	CDParamDefIDs  []string
-	CIParamConfigs []ReleaseTemplateParamConfigInput
-	CDParamConfigs []ReleaseTemplateParamConfigInput
-	GitOpsRules    []ReleaseTemplateGitOpsRuleInput
+	Name                  string
+	CIBindingID           string
+	CDBindingID           string
+	CDProvider            pipelinedomain.Provider
+	GitOpsType            releasedomain.GitOpsType
+	Status                releasedomain.TemplateStatus
+	Remark                string
+	ApprovalEnabled       bool
+	ApprovalMode          releasedomain.TemplateApprovalMode
+	ApprovalApproverIDs   []string
+	ApprovalApproverNames []string
+	CIParamDefIDs         []string
+	CDParamDefIDs         []string
+	CIParamConfigs        []ReleaseTemplateParamConfigInput
+	CDParamConfigs        []ReleaseTemplateParamConfigInput
+	GitOpsRules           []ReleaseTemplateGitOpsRuleInput
+	Hooks                 []ReleaseTemplateHookInput
 }
 
 type ReleaseTemplateParamConfigInput struct {
@@ -98,6 +110,18 @@ type ReleaseTemplateParamConfigInput struct {
 	ValueSource        releasedomain.TemplateParamValueSource
 	SourceParamKey     string
 	FixedValue         string
+}
+
+type ReleaseTemplateHookInput struct {
+	HookType         releasedomain.TemplateHookType
+	Name             string
+	TriggerCondition releasedomain.TemplateHookTriggerCondition
+	FailurePolicy    releasedomain.TemplateHookFailurePolicy
+	TargetID         string
+	WebhookMethod    string
+	WebhookURL       string
+	WebhookBody      string
+	Note             string
 }
 
 type ListReleaseTemplateInput struct {
@@ -109,6 +133,13 @@ type ListReleaseTemplateInput struct {
 	PageSize       int
 }
 
+type normalizedTemplateApprovalConfig struct {
+	Enabled       bool
+	Mode          releasedomain.TemplateApprovalMode
+	ApproverIDs   []string
+	ApproverNames []string
+}
+
 func NewReleaseTemplateManager(
 	repo releasedomain.Repository,
 	appRepo appdomain.Repository,
@@ -116,6 +147,7 @@ func NewReleaseTemplateManager(
 	paramRepo pipelineparamdomain.Repository,
 	platformRepo platformparamdomain.Repository,
 	argocdRepo argocddomain.Repository,
+	agentRepo agentdomain.Repository,
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader,
 ) *ReleaseTemplateManager {
 	return &ReleaseTemplateManager{
@@ -125,6 +157,7 @@ func NewReleaseTemplateManager(
 		paramRepo:    paramRepo,
 		platformRepo: platformRepo,
 		argocdRepo:   argocdRepo,
+		agentRepo:    agentRepo,
 		gitopsReader: gitopsReader,
 		now: func() time.Time {
 			return time.Now().UTC()
@@ -135,7 +168,7 @@ func NewReleaseTemplateManager(
 func (uc *ReleaseTemplateManager) Create(
 	ctx context.Context,
 	input CreateReleaseTemplateInput,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, []releasedomain.ReleaseTemplateHook, error) {
 	name := strings.TrimSpace(input.Name)
 	applicationID := strings.TrimSpace(input.ApplicationID)
 	logx.Info("release_template", "create_start",
@@ -152,7 +185,7 @@ func (uc *ReleaseTemplateManager) Create(
 			logx.F("name", name),
 			logx.F("application_id", applicationID),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
 	status := input.Status
@@ -165,10 +198,24 @@ func (uc *ReleaseTemplateManager) Create(
 			logx.F("application_id", applicationID),
 			logx.F("status", status),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, ErrInvalidStatus
+	}
+	approvalConfig, err := normalizeTemplateApprovalConfig(
+		input.ApprovalEnabled,
+		input.ApprovalMode,
+		input.ApprovalApproverIDs,
+		input.ApprovalApproverNames,
+	)
+	if err != nil {
+		logx.Error("release_template", "create_failed", err,
+			logx.F("name", name),
+			logx.F("application_id", applicationID),
+			logx.F("reason", "invalid_approval_config"),
+		)
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
-	templateBindings, params, gitopsRules, appName, err := uc.buildTemplatePayload(
+	templateBindings, params, gitopsRules, hooks, appName, err := uc.buildTemplatePayload(
 		ctx,
 		applicationID,
 		input.CIBindingID,
@@ -180,31 +227,36 @@ func (uc *ReleaseTemplateManager) Create(
 		input.CIParamConfigs,
 		input.CDParamConfigs,
 		input.GitOpsRules,
+		input.Hooks,
 	)
 	if err != nil {
 		logx.Error("release_template", "create_failed", err,
 			logx.F("name", name),
 			logx.F("application_id", applicationID),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
 	now := uc.now()
 	summaryName, summaryType := summarizeTemplateBindings(templateBindings)
 	template := releasedomain.ReleaseTemplate{
-		ID:              generateID("rt"),
-		Name:            name,
-		ApplicationID:   applicationID,
-		ApplicationName: appName,
-		BindingID:       applicationID,
-		BindingName:     summaryName,
-		BindingType:     summaryType,
-		GitOpsType:      normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
-		Status:          status,
-		Remark:          strings.TrimSpace(input.Remark),
-		ParamCount:      len(params),
-		CreatedAt:       now,
-		UpdatedAt:       now,
+		ID:                    generateID("rt"),
+		Name:                  name,
+		ApplicationID:         applicationID,
+		ApplicationName:       appName,
+		BindingID:             applicationID,
+		BindingName:           summaryName,
+		BindingType:           summaryType,
+		GitOpsType:            normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
+		Status:                status,
+		ApprovalEnabled:       approvalConfig.Enabled,
+		ApprovalMode:          approvalConfig.Mode,
+		ApprovalApproverIDs:   append([]string(nil), approvalConfig.ApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), approvalConfig.ApproverNames...),
+		Remark:                strings.TrimSpace(input.Remark),
+		ParamCount:            len(params),
+		CreatedAt:             now,
+		UpdatedAt:             now,
 	}
 	for idx := range templateBindings {
 		templateBindings[idx].TemplateID = template.ID
@@ -221,14 +273,19 @@ func (uc *ReleaseTemplateManager) Create(
 		gitopsRules[idx].CreatedAt = now
 		gitopsRules[idx].UpdatedAt = now
 	}
+	for idx := range hooks {
+		hooks[idx].TemplateID = template.ID
+		hooks[idx].CreatedAt = now
+		hooks[idx].UpdatedAt = now
+	}
 
-	if err := uc.repo.CreateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+	if err := uc.repo.CreateTemplate(ctx, template, templateBindings, params, gitopsRules, hooks); err != nil {
 		logx.Error("release_template", "create_failed", err,
 			logx.F("template_id", template.ID),
 			logx.F("name", template.Name),
 			logx.F("application_id", template.ApplicationID),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	logx.Info("release_template", "create_success",
 		logx.F("template_id", template.ID),
@@ -244,10 +301,10 @@ func (uc *ReleaseTemplateManager) Create(
 func (uc *ReleaseTemplateManager) GetByID(
 	ctx context.Context,
 	id string,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, []releasedomain.ReleaseTemplateHook, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidID
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, ErrInvalidID
 	}
 	return uc.repo.GetTemplateByID(ctx, id)
 }
@@ -289,7 +346,7 @@ func (uc *ReleaseTemplateManager) Update(
 	ctx context.Context,
 	id string,
 	input UpdateReleaseTemplateInput,
-) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, error) {
+) (releasedomain.ReleaseTemplate, []releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, []releasedomain.ReleaseTemplateHook, error) {
 	id = strings.TrimSpace(id)
 	logx.Info("release_template", "update_start",
 		logx.F("template_id", id),
@@ -299,12 +356,12 @@ func (uc *ReleaseTemplateManager) Update(
 		logx.F("gitops_type", input.GitOpsType),
 	)
 	if id == "" {
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidID
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, ErrInvalidID
 	}
-	current, _, _, _, err := uc.repo.GetTemplateByID(ctx, id)
+	current, _, _, _, _, err := uc.repo.GetTemplateByID(ctx, id)
 	if err != nil {
 		logx.Error("release_template", "update_failed", err, logx.F("template_id", id))
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
 	name := strings.TrimSpace(input.Name)
@@ -321,10 +378,23 @@ func (uc *ReleaseTemplateManager) Update(
 			logx.F("template_id", id),
 			logx.F("status", status),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, ErrInvalidStatus
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, ErrInvalidStatus
+	}
+	approvalConfig, err := normalizeTemplateApprovalConfig(
+		input.ApprovalEnabled,
+		input.ApprovalMode,
+		input.ApprovalApproverIDs,
+		input.ApprovalApproverNames,
+	)
+	if err != nil {
+		logx.Error("release_template", "update_failed", err,
+			logx.F("template_id", id),
+			logx.F("reason", "invalid_approval_config"),
+		)
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
-	templateBindings, params, gitopsRules, appName, err := uc.buildTemplatePayload(
+	templateBindings, params, gitopsRules, hooks, appName, err := uc.buildTemplatePayload(
 		ctx,
 		current.ApplicationID,
 		input.CIBindingID,
@@ -336,31 +406,36 @@ func (uc *ReleaseTemplateManager) Update(
 		input.CIParamConfigs,
 		input.CDParamConfigs,
 		input.GitOpsRules,
+		input.Hooks,
 	)
 	if err != nil {
 		logx.Error("release_template", "update_failed", err,
 			logx.F("template_id", id),
 			logx.F("application_id", current.ApplicationID),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 
 	now := uc.now()
 	summaryName, summaryType := summarizeTemplateBindings(templateBindings)
 	template := releasedomain.ReleaseTemplate{
-		ID:              current.ID,
-		Name:            name,
-		ApplicationID:   current.ApplicationID,
-		ApplicationName: appName,
-		BindingID:       current.ApplicationID,
-		BindingName:     summaryName,
-		BindingType:     summaryType,
-		GitOpsType:      normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
-		Status:          status,
-		Remark:          strings.TrimSpace(input.Remark),
-		ParamCount:      len(params),
-		CreatedAt:       current.CreatedAt,
-		UpdatedAt:       now,
+		ID:                    current.ID,
+		Name:                  name,
+		ApplicationID:         current.ApplicationID,
+		ApplicationName:       appName,
+		BindingID:             current.ApplicationID,
+		BindingName:           summaryName,
+		BindingType:           summaryType,
+		GitOpsType:            normalizeTemplateGitOpsType(input.GitOpsType, templateUsesArgoCD(templateBindings)),
+		Status:                status,
+		ApprovalEnabled:       approvalConfig.Enabled,
+		ApprovalMode:          approvalConfig.Mode,
+		ApprovalApproverIDs:   append([]string(nil), approvalConfig.ApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), approvalConfig.ApproverNames...),
+		Remark:                strings.TrimSpace(input.Remark),
+		ParamCount:            len(params),
+		CreatedAt:             current.CreatedAt,
+		UpdatedAt:             now,
 	}
 	for idx := range templateBindings {
 		templateBindings[idx].TemplateID = template.ID
@@ -377,13 +452,18 @@ func (uc *ReleaseTemplateManager) Update(
 		gitopsRules[idx].CreatedAt = now
 		gitopsRules[idx].UpdatedAt = now
 	}
+	for idx := range hooks {
+		hooks[idx].TemplateID = template.ID
+		hooks[idx].CreatedAt = now
+		hooks[idx].UpdatedAt = now
+	}
 
-	if err := uc.repo.UpdateTemplate(ctx, template, templateBindings, params, gitopsRules); err != nil {
+	if err := uc.repo.UpdateTemplate(ctx, template, templateBindings, params, gitopsRules, hooks); err != nil {
 		logx.Error("release_template", "update_failed", err,
 			logx.F("template_id", template.ID),
 			logx.F("application_id", template.ApplicationID),
 		)
-		return releasedomain.ReleaseTemplate{}, nil, nil, nil, err
+		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
 	}
 	logx.Info("release_template", "update_success",
 		logx.F("template_id", template.ID),
@@ -410,6 +490,58 @@ func (uc *ReleaseTemplateManager) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func normalizeTemplateApprovalConfig(
+	enabled bool,
+	mode releasedomain.TemplateApprovalMode,
+	approverIDs []string,
+	approverNames []string,
+) (normalizedTemplateApprovalConfig, error) {
+	if !enabled {
+		return normalizedTemplateApprovalConfig{
+			Enabled:       false,
+			Mode:          "",
+			ApproverIDs:   []string{},
+			ApproverNames: []string{},
+		}, nil
+	}
+	if mode == "" {
+		mode = releasedomain.TemplateApprovalModeAny
+	}
+	if !mode.Valid() {
+		return normalizedTemplateApprovalConfig{}, fmt.Errorf("%w: invalid approval_mode", ErrInvalidInput)
+	}
+	normalizedIDs := make([]string, 0, len(approverIDs))
+	normalizedNames := make([]string, 0, len(approverIDs))
+	seen := make(map[string]struct{}, len(approverIDs))
+	for idx, rawID := range approverIDs {
+		id := strings.TrimSpace(rawID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		name := id
+		if idx < len(approverNames) {
+			if candidate := strings.TrimSpace(approverNames[idx]); candidate != "" {
+				name = candidate
+			}
+		}
+		normalizedIDs = append(normalizedIDs, id)
+		normalizedNames = append(normalizedNames, name)
+	}
+	if len(normalizedIDs) == 0 {
+		return normalizedTemplateApprovalConfig{}, fmt.Errorf("%w: approval approvers are required", ErrInvalidInput)
+	}
+	return normalizedTemplateApprovalConfig{
+		Enabled:       true,
+		Mode:          mode,
+		ApproverIDs:   normalizedIDs,
+		ApproverNames: normalizedNames,
+	}, nil
+}
+
 func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	ctx context.Context,
 	applicationID string,
@@ -422,13 +554,14 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	ciParamConfigs []ReleaseTemplateParamConfigInput,
 	cdParamConfigs []ReleaseTemplateParamConfigInput,
 	gitopsRuleInputs []ReleaseTemplateGitOpsRuleInput,
-) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, string, error) {
+	hookInputs []ReleaseTemplateHookInput,
+) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, []releasedomain.ReleaseTemplateHook, string, error) {
 	bindings := make([]releasedomain.ReleaseTemplateBinding, 0, 2)
 	params := make([]releasedomain.ReleaseTemplateParam, 0)
 
 	appName := ""
 	if uc.pipelineRepo == nil {
-		return nil, nil, nil, "", fmt.Errorf("%w: pipeline repository is not configured", ErrInvalidInput)
+		return nil, nil, nil, nil, "", fmt.Errorf("%w: pipeline repository is not configured", ErrInvalidInput)
 	}
 
 	ciBinding, ciParams, appName, err := uc.buildTemplateScopePayload(
@@ -443,7 +576,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		1,
 	)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
 	}
 	if ciBinding != nil {
 		bindings = append(bindings, *ciBinding)
@@ -462,7 +595,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 		2,
 	)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
 	}
 	if appName == "" {
 		appName = derivedAppName
@@ -473,20 +606,24 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	}
 
 	if len(bindings) == 0 {
-		return nil, nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
+		return nil, nil, nil, nil, "", fmt.Errorf("%w: at least one of ci/cd must be enabled", ErrInvalidInput)
 	}
 	gitopsType = normalizeTemplateGitOpsType(gitopsType, templateUsesArgoCD(bindings))
 	if err := uc.validateArgoCDTemplateConfig(ctx, bindings, params, gitopsType); err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
 	}
 	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsType, gitopsRuleInputs)
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
+	}
+	hooks, err := uc.buildTemplateHooks(ctx, hookInputs)
+	if err != nil {
+		return nil, nil, nil, nil, "", err
 	}
 	if appName == "" && len(bindings) > 0 {
 		appName = bindings[0].BindingName
 	}
-	return bindings, params, gitopsRules, appName, nil
+	return bindings, params, gitopsRules, hooks, appName, nil
 }
 
 func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
@@ -740,6 +877,100 @@ func normalizeStringIDs(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+func (uc *ReleaseTemplateManager) buildTemplateHooks(
+	ctx context.Context,
+	inputs []ReleaseTemplateHookInput,
+) ([]releasedomain.ReleaseTemplateHook, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	result := make([]releasedomain.ReleaseTemplateHook, 0, len(inputs))
+	seenNames := make(map[string]struct{}, len(inputs))
+	for idx, input := range inputs {
+		hookType := releasedomain.TemplateHookType(strings.ToLower(strings.TrimSpace(string(input.HookType))))
+		if !hookType.Valid() {
+			return nil, fmt.Errorf("%w: unsupported hook_type", ErrInvalidInput)
+		}
+		name := strings.TrimSpace(input.Name)
+		if name == "" {
+			switch hookType {
+			case releasedomain.TemplateHookTypeAgentTask:
+				name = "发布后 Agent 任务"
+			case releasedomain.TemplateHookTypeWebhookNotification:
+				name = "发布后 Webhook 通知"
+			}
+		}
+		nameKey := strings.ToLower(name)
+		if _, exists := seenNames[nameKey]; exists {
+			return nil, fmt.Errorf("%w: duplicated hook name %s", ErrInvalidInput, name)
+		}
+		seenNames[nameKey] = struct{}{}
+
+		triggerCondition := releasedomain.TemplateHookTriggerCondition(strings.ToLower(strings.TrimSpace(string(input.TriggerCondition))))
+		if triggerCondition == "" {
+			triggerCondition = releasedomain.TemplateHookTriggerOnSuccess
+		}
+		if !triggerCondition.Valid() {
+			return nil, fmt.Errorf("%w: invalid hook trigger_condition", ErrInvalidInput)
+		}
+
+		failurePolicy := releasedomain.TemplateHookFailurePolicy(strings.ToLower(strings.TrimSpace(string(input.FailurePolicy))))
+		if failurePolicy == "" {
+			failurePolicy = releasedomain.TemplateHookFailurePolicyWarnOnly
+		}
+		if !failurePolicy.Valid() {
+			return nil, fmt.Errorf("%w: invalid hook failure_policy", ErrInvalidInput)
+		}
+
+		item := releasedomain.ReleaseTemplateHook{
+			ID:               generateID("rth"),
+			HookType:         hookType,
+			Name:             name,
+			TriggerCondition: triggerCondition,
+			FailurePolicy:    failurePolicy,
+			SortNo:           idx + 1,
+			Note:             strings.TrimSpace(input.Note),
+		}
+
+		switch hookType {
+		case releasedomain.TemplateHookTypeAgentTask:
+			taskID := strings.TrimSpace(input.TargetID)
+			if taskID == "" {
+				return nil, fmt.Errorf("%w: agent task hook requires target task", ErrInvalidInput)
+			}
+			if uc.agentRepo == nil {
+				return nil, fmt.Errorf("%w: agent repository is not configured", ErrInvalidInput)
+			}
+			task, err := uc.agentRepo.GetTaskByID(ctx, taskID)
+			if err != nil {
+				return nil, err
+			}
+			item.TargetID = task.ID
+			item.TargetName = firstNonEmpty(strings.TrimSpace(task.Name), task.ID)
+		case releasedomain.TemplateHookTypeWebhookNotification:
+			webhookURL := strings.TrimSpace(input.WebhookURL)
+			if webhookURL == "" {
+				return nil, fmt.Errorf("%w: webhook hook requires webhook_url", ErrInvalidInput)
+			}
+			method := strings.ToUpper(strings.TrimSpace(input.WebhookMethod))
+			if method == "" {
+				method = "POST"
+			}
+			switch method {
+			case "POST", "PUT", "PATCH":
+			default:
+				return nil, fmt.Errorf("%w: unsupported webhook_method", ErrInvalidInput)
+			}
+			item.WebhookMethod = method
+			item.WebhookURL = webhookURL
+			item.WebhookBody = strings.TrimSpace(input.WebhookBody)
+		}
+
+		result = append(result, item)
+	}
+	return result, nil
 }
 
 func normalizeTemplateGitOpsType(candidate releasedomain.GitOpsType, usesArgoCD bool) releasedomain.GitOpsType {

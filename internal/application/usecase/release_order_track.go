@@ -588,21 +588,12 @@ func (uc *TrackReleaseExecution) finalizeOrder(
 		return false, true, nil
 	}
 
-	orderStatus := domain.OrderStatusSuccess
-	message := "发布完成"
-	for _, item := range executions {
-		switch item.Status {
-		case domain.ExecutionStatusFailed:
-			orderStatus = domain.OrderStatusFailed
-			message = "存在失败执行单元"
-		case domain.ExecutionStatusCancelled:
-			if orderStatus != domain.OrderStatusFailed {
-				orderStatus = domain.OrderStatusCancelled
-				message = "存在已取消执行单元"
-			}
-		case domain.ExecutionStatusPending, domain.ExecutionStatusRunning:
-			return false, false, nil
-		}
+	stepUpdated, finished, orderStatus, message, err := uc.manager.syncHooksAfterRelease(ctx, order, executions)
+	if err != nil {
+		return false, false, err
+	}
+	if !finished {
+		return stepUpdated, false, nil
 	}
 
 	stepStatus := domain.StepStatusSuccess
@@ -619,7 +610,7 @@ func (uc *TrackReleaseExecution) finalizeOrder(
 	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
 		return false, false, err
 	}
-	return updated, false, nil
+	return updated || stepUpdated, false, nil
 }
 
 func (uc *TrackReleaseExecution) failRemainingExecutions(
@@ -654,11 +645,10 @@ func (uc *TrackReleaseExecution) failRemainingExecutions(
 	if _, err := uc.finishStep(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message); err != nil {
 		return false, err
 	}
-	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
-		return false, err
-	}
-	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
-		return false, err
+	if order.Status == domain.OrderStatusPending || order.Status == domain.OrderStatusQueued || order.Status == domain.OrderStatusDeploying {
+		if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, firstNonNilTime(order.StartedAt, &now), nil, now); err != nil {
+			return false, err
+		}
 	}
 	return updated || true, nil
 }
