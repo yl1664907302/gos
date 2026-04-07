@@ -7,8 +7,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { listApplications } from '../../api/application'
 import { listAllAgentTasks } from '../../api/agent'
 import { listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api/gitops'
+import { listNotificationHooks } from '../../api/notification'
 import { listPlatformParamDicts } from '../../api/platform-param'
-import { listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
+import { getPipelineBindingByID, listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
 import { listUserOptions } from '../../api/user'
 import {
   createReleaseTemplate,
@@ -20,6 +21,7 @@ import {
 import { useResizableColumns } from '../../composables/useResizableColumns'
 import type { Application } from '../../types/application'
 import type { AgentTask } from '../../types/agent'
+import type { NotificationHook } from '../../types/notification'
 import type { PipelineBinding, ExecutorParamDef } from '../../types/pipeline'
 import type { GitOpsFieldCandidate, GitOpsValuesCandidate } from '../../types/gitops'
 import type { PlatformParamDict } from '../../types/platform-param'
@@ -92,7 +94,7 @@ interface GitOpsRuleFormItem {
   value_template: string
 }
 
-type ReleaseTemplateHookTypePreview = 'agent_task' | 'webhook_notification'
+type ReleaseTemplateHookTypePreview = 'agent_task' | 'notification_hook' | 'webhook_notification'
 type ReleaseTemplateHookTriggerConditionPreview = 'on_success' | 'on_failed' | 'always'
 type ReleaseTemplateHookFailurePolicyPreview = 'block_release' | 'warn_only'
 
@@ -175,6 +177,13 @@ const filters = reactive({
 const applicationRecords = ref<Application[]>([])
 const applicationOptions = ref<SelectOption[]>([])
 const bindingOptions = ref<BindingOption[]>([])
+const loadedTemplateBindings = ref<ReleaseTemplateBinding[]>([])
+const scopeBindingWarnings = reactive<Record<ReleasePipelineScope, string>>({
+  ci: '',
+  cd: '',
+})
+const templateBindingWarnings = ref<Record<string, string>>({})
+const templateBindingWarningCache = ref<Record<string, string>>({})
 const loadingBindings = ref(false)
 const platformParamNameMap = ref<Record<string, string>>({})
 const platformParamDicts = ref<PlatformParamDict[]>([])
@@ -192,6 +201,13 @@ const hookTypePickerVisible = ref(false)
 const pendingHookType = ref<ReleaseTemplateHookTypePreview>('agent_task')
 const agentTaskTemplates = ref<AgentTask[]>([])
 const loadingAgentTaskTemplates = ref(false)
+const notificationHooks = ref<NotificationHook[]>([])
+const loadingNotificationHooks = ref(false)
+const bindingOptionsCache = ref<Record<string, BindingOption[]>>({})
+const selectableParamsCache = ref<Record<string, ExecutorParamDef[]>>({})
+const gitOpsFieldCandidateCache = ref<Record<string, GitOpsFieldCandidate[]>>({})
+const gitOpsValuesCandidateCache = ref<Record<string, GitOpsValuesCandidate[]>>({})
+const bindingLookupCache = ref<Record<string, boolean>>({})
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -244,16 +260,28 @@ const userOptionChoices = computed(() =>
 )
 
 function hookTypeLabel(type: ReleaseTemplateHookTypePreview) {
-  return type === 'agent_task' ? 'Agent 任务' : 'Webhook 通知'
+  switch (type) {
+    case 'agent_task':
+      return 'Agent 任务'
+    case 'notification_hook':
+      return '通知 Hook'
+    default:
+      return 'Webhook 通知'
+  }
 }
 
 function createHookFormItem(type: ReleaseTemplateHookTypePreview): HookFormItem {
   return {
     local_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    name: type === 'agent_task' ? '发布后 Agent 任务' : '发布后 Webhook 通知',
+    name:
+      type === 'agent_task'
+        ? '发布后 Agent 任务'
+        : type === 'notification_hook'
+          ? '发布后通知 Hook'
+          : '发布后 Webhook 通知',
     hook_type: type,
     trigger_condition: 'on_success',
-    failure_policy: type === 'agent_task' ? 'block_release' : 'warn_only',
+    failure_policy: type === 'webhook_notification' ? 'warn_only' : 'block_release',
     target_id: '',
     target_name: '',
     webhook_method: 'POST',
@@ -286,7 +314,7 @@ const hookSummaryItems = computed(() => [
   { label: 'Hook 阶段', value: 'post_release' },
   { label: '执行方式', value: templateHooks.value.length ? '串行执行' : '待配置' },
   { label: 'Hook 数量', value: `${templateHooks.value.length} 个` },
-  { label: '详情页', value: '直接展示进度' },
+  { label: '变量', value: '标准平台 Key / 内置字段' },
 ])
 
 function agentTaskTypeLabel(taskType: string) {
@@ -309,6 +337,15 @@ const agentTaskTemplateOptions = computed<SelectOption[]>(() =>
     })),
 )
 
+const notificationHookOptions = computed<SelectOption[]>(() =>
+  notificationHooks.value
+    .filter((item) => item.enabled)
+    .map((item) => ({
+      label: `${item.name} · ${item.source_name} / ${item.markdown_template_name}`,
+      value: item.id,
+    })),
+)
+
 function findAgentTaskTemplate(taskID: string) {
   const normalized = String(taskID || '').trim()
   if (!normalized) {
@@ -318,12 +355,21 @@ function findAgentTaskTemplate(taskID: string) {
 }
 
 function syncHookTargetName(item: HookFormItem) {
-  if (item.hook_type !== 'agent_task') {
+  if (item.hook_type === 'agent_task') {
+    const selected = findAgentTaskTemplate(item.target_id)
+    item.target_name = selected?.name || ''
+    return
+  }
+  if (item.hook_type === 'notification_hook') {
+    const selected = notificationHooks.value.find((candidate) => candidate.id === item.target_id)
+    item.target_name = selected?.name || ''
+    return
+  }
+  if (item.hook_type !== 'webhook_notification') {
     item.target_name = ''
     return
   }
-  const selected = findAgentTaskTemplate(item.target_id)
-  item.target_name = selected?.name || ''
+  item.target_name = item.webhook_url.trim()
 }
 
 function openHookTypePicker() {
@@ -453,7 +499,7 @@ const argocdInstallCommand = computed(() => {
   return [
     `argocd app create ${appKey}-${env}-${serviceName} \\`,
     `  --repo ${repoURL} \\`,
-    `  --path apps/${appKey}/helm \\`,
+    `  --path apps/helm \\`,
     `  --dest-server https://kubernetes.default.svc \\`,
     `  --dest-namespace ${namespace} \\`,
     `  --project default \\`,
@@ -600,7 +646,7 @@ function createGitOpsRuleFormItem(partial?: Partial<GitOpsRuleFormItem>): GitOps
     local_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     source_param_key: sourceKey,
     source_from: partial?.source_from || resolveGitOpsRuleSourceFrom(sourceKey),
-    file_path_template: String(partial?.file_path_template || '').trim(),
+    file_path_template: normalizeHelmValuesFilePathTemplate(String(partial?.file_path_template || '').trim()),
     document_kind: String(partial?.document_kind || '').trim(),
     document_name: String(partial?.document_name || '').trim(),
     target_path: String(partial?.target_path || '').trim(),
@@ -629,6 +675,25 @@ function resolveGitOpsRuleSourceFrom(paramKey: string): 'ci' | 'builtin' | 'cd_i
     (item) => selectedCIParamIDs.has(item.id) && String(item.param_key || '').trim().toLowerCase() === normalized,
   )
   return fromCI ? 'ci' : 'builtin'
+}
+
+function normalizeHelmValuesFilePathTemplate(value: string) {
+  const normalized = String(value || '').trim().replace(/\\/g, '/')
+  if (!normalized.startsWith('apps/')) {
+    return normalized
+  }
+  const rest = normalized.slice('apps/'.length)
+  const parts = rest.split('/')
+  if (parts.length < 3) {
+    return normalized
+  }
+  if (parts[0] === 'helm') {
+    return normalized
+  }
+  if (parts[1] === 'helm') {
+    return ['apps', 'helm', ...parts.slice(2)].join('/')
+  }
+  return normalized
 }
 
 function yamlCandidatesForRule(rule: GitOpsRuleFormItem) {
@@ -764,10 +829,10 @@ async function reloadCurrentGitOpsCandidates() {
     return
   }
   if (isHelmGitOps()) {
-    await loadGitOpsValuesCandidates(appID)
+    await loadGitOpsValuesCandidates(appID, false, true)
     return
   }
-  await loadGitOpsFieldCandidates(appID)
+  await loadGitOpsFieldCandidates(appID, false, true)
 }
 
 function resolveGitOpsSourceLabel(paramKey: string) {
@@ -895,6 +960,9 @@ function resetFormState() {
   resetScopeState('ci')
   resetScopeState('cd')
   bindingOptions.value = []
+  loadedTemplateBindings.value = []
+  scopeBindingWarnings.ci = ''
+  scopeBindingWarnings.cd = ''
   gitOpsFieldCandidates.value = []
   gitOpsValuesCandidates.value = []
   gitopsRules.value = []
@@ -907,8 +975,54 @@ function resetFormState() {
   pendingHookType.value = 'agent_task'
 }
 
+async function refreshScopeBindingWarning(scope: ReleasePipelineScope) {
+  scopeBindingWarnings[scope] = ''
+  if (!scopeStates[scope].enabled) {
+    return
+  }
+  const bindingID = scopeStates[scope].binding_id.trim()
+  if (!bindingID) {
+    return
+  }
+  const existsInOptions = bindingOptionsByScope.value[scope].some((item) => item.value === bindingID)
+  if (existsInOptions) {
+    bindingLookupCache.value[bindingID] = true
+    return
+  }
+  if (bindingLookupCache.value[bindingID] === false) {
+    const templateBinding = loadedTemplateBindings.value.find(
+      (item) => item.pipeline_scope === scope && item.enabled && item.binding_id === bindingID,
+    )
+    const pipelineID = templateBinding?.pipeline_id?.trim()
+    scopeBindingWarnings[scope] = pipelineID
+      ? `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定。`
+      : `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定。`
+    return
+  }
+  try {
+    await getPipelineBindingByID(bindingID)
+    bindingLookupCache.value[bindingID] = true
+    return
+  } catch {
+    bindingLookupCache.value[bindingID] = false
+    const templateBinding = loadedTemplateBindings.value.find(
+      (item) => item.pipeline_scope === scope && item.enabled && item.binding_id === bindingID,
+    )
+    const pipelineID = templateBinding?.pipeline_id?.trim()
+    if (pipelineID) {
+      scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定。`
+      return
+    }
+    scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定。`
+  }
+}
+
+async function refreshBindingWarnings() {
+  await Promise.all((['ci', 'cd'] as ReleasePipelineScope[]).map((scope) => refreshScopeBindingWarning(scope)))
+}
+
 function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGitOpsRulePayload {
-  let filePathTemplate = String(item.file_path_template || '').trim()
+  let filePathTemplate = normalizeHelmValuesFilePathTemplate(String(item.file_path_template || '').trim())
   let targetPath = String(item.target_path || '').trim()
   let documentKind = String(item.document_kind || '').trim()
   let documentName = String(item.document_name || '').trim()
@@ -918,7 +1032,7 @@ function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGi
   if (normalizedGitOpsType(gitOpsType.value) === 'helm' && targetPath.startsWith('{')) {
     try {
       const parsed = JSON.parse(targetPath)
-      filePathTemplate = String(parsed.file_path_template || filePathTemplate).trim()
+      filePathTemplate = normalizeHelmValuesFilePathTemplate(String(parsed.file_path_template || filePathTemplate).trim())
       targetPath = String(parsed.target_path || '').trim()
       documentKind = 'values'
       documentName = ''
@@ -970,7 +1084,10 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
       name: item.name.trim(),
       trigger_condition: item.trigger_condition,
       failure_policy: item.failure_policy,
-      target_id: item.hook_type === 'agent_task' ? item.target_id.trim() || undefined : undefined,
+      target_id:
+        item.hook_type === 'agent_task' || item.hook_type === 'notification_hook'
+          ? item.target_id.trim() || undefined
+          : undefined,
       webhook_method: item.hook_type === 'webhook_notification' ? item.webhook_method : undefined,
       webhook_url: item.hook_type === 'webhook_notification' ? item.webhook_url.trim() || undefined : undefined,
       webhook_body: item.hook_type === 'webhook_notification' ? item.webhook_body_template : undefined,
@@ -980,6 +1097,9 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
 }
 
 async function loadPlatformParamMap() {
+  if (platformParamDicts.value.length > 0) {
+    return
+  }
   try {
     const response = await listPlatformParamDicts({ page: 1, page_size: 200 })
     const next: Record<string, string> = {}
@@ -994,6 +1114,9 @@ async function loadPlatformParamMap() {
 }
 
 async function loadApprovalUserOptions() {
+  if (userOptions.value.length > 0) {
+    return
+  }
   try {
     const response = await listUserOptions()
     userOptions.value = response.data || []
@@ -1004,6 +1127,9 @@ async function loadApprovalUserOptions() {
 }
 
 async function loadAgentTaskTemplates() {
+  if (agentTaskTemplates.value.length > 0) {
+    return
+  }
   loadingAgentTaskTemplates.value = true
   try {
     const response = await listAllAgentTasks({ page: 1, page_size: 200 })
@@ -1016,16 +1142,37 @@ async function loadAgentTaskTemplates() {
   }
 }
 
-async function loadGitOpsFieldCandidates(applicationID: string, silent = false) {
+async function loadNotificationHooks() {
+  if (notificationHooks.value.length > 0) {
+    return
+  }
+  loadingNotificationHooks.value = true
+  try {
+    const response = await listNotificationHooks({ page: 1, page_size: 200, enabled: true })
+    notificationHooks.value = response.data
+  } catch (error) {
+    notificationHooks.value = []
+    message.error(extractHTTPErrorMessage(error, '通知 Hook 加载失败'))
+  } finally {
+    loadingNotificationHooks.value = false
+  }
+}
+
+async function loadGitOpsFieldCandidates(applicationID: string, silent = false, force = false) {
   const appID = String(applicationID || '').trim()
   if (!appID) {
     gitOpsFieldCandidates.value = []
     return
   }
+  if (!force && gitOpsFieldCandidateCache.value[appID]) {
+    gitOpsFieldCandidates.value = [...gitOpsFieldCandidateCache.value[appID]]
+    return
+  }
   loadingGitOpsFieldCandidates.value = true
   try {
     const response = await listGitOpsFieldCandidates(appID)
-    gitOpsFieldCandidates.value = response.data
+    gitOpsFieldCandidateCache.value[appID] = response.data
+    gitOpsFieldCandidates.value = [...response.data]
   } catch (error) {
     gitOpsFieldCandidates.value = []
     if (!silent) {
@@ -1036,16 +1183,21 @@ async function loadGitOpsFieldCandidates(applicationID: string, silent = false) 
   }
 }
 
-async function loadGitOpsValuesCandidates(applicationID: string, silent = false) {
+async function loadGitOpsValuesCandidates(applicationID: string, silent = false, force = false) {
   const appID = String(applicationID || '').trim()
   if (!appID) {
     gitOpsValuesCandidates.value = []
     return
   }
+  if (!force && gitOpsValuesCandidateCache.value[appID]) {
+    gitOpsValuesCandidates.value = [...gitOpsValuesCandidateCache.value[appID]]
+    return
+  }
   loadingGitOpsFieldCandidates.value = true
   try {
     const response = await listGitOpsValuesCandidates(appID)
-    gitOpsValuesCandidates.value = response.data
+    gitOpsValuesCandidateCache.value[appID] = response.data
+    gitOpsValuesCandidates.value = [...response.data]
   } catch (error) {
     gitOpsValuesCandidates.value = []
     if (!silent) {
@@ -1082,6 +1234,12 @@ async function loadTemplates() {
     total.value = response.total
     filters.page = response.page
     filters.pageSize = response.page_size
+    templateBindingWarnings.value = Object.fromEntries(
+      response.data
+        .map((item) => [item.id, templateBindingWarningCache.value[item.id] || ''] as const)
+        .filter(([, warning]) => Boolean(warning)),
+    )
+    void loadTemplateBindingWarnings(response.data)
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '发布模板加载失败'))
   } finally {
@@ -1089,12 +1247,86 @@ async function loadTemplates() {
   }
 }
 
-async function loadBindings(applicationID: string) {
+async function inspectTemplateBindingWarning(templateID: string): Promise<string> {
+  try {
+    const response = await getReleaseTemplateByID(templateID)
+    const bindings = response.data.bindings || []
+    for (const binding of bindings) {
+      const bindingID = String(binding.binding_id || '').trim()
+      if (!bindingID) {
+        continue
+      }
+      if (bindingLookupCache.value[bindingID] === true) {
+        continue
+      }
+      if (bindingLookupCache.value[bindingID] === false) {
+        const pipelineID = String(binding.pipeline_id || '').trim()
+        if (pipelineID) {
+          return `${binding.pipeline_scope.toUpperCase()} 绑定已失效，将回退到快照管线 ${pipelineID}`
+        }
+        return `${binding.pipeline_scope.toUpperCase()} 绑定已失效，请重新选择有效绑定`
+      }
+      try {
+        await getPipelineBindingByID(bindingID)
+        bindingLookupCache.value[bindingID] = true
+      } catch {
+        bindingLookupCache.value[bindingID] = false
+        const pipelineID = String(binding.pipeline_id || '').trim()
+        if (pipelineID) {
+          return `${binding.pipeline_scope.toUpperCase()} 绑定已失效，将回退到快照管线 ${pipelineID}`
+        }
+        return `${binding.pipeline_scope.toUpperCase()} 绑定已失效，请重新选择有效绑定`
+      }
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+async function loadTemplateBindingWarnings(items: ReleaseTemplate[]) {
+  const missingItems = items.filter((item) => typeof templateBindingWarningCache.value[item.id] === 'undefined')
+  if (missingItems.length === 0) {
+    templateBindingWarnings.value = Object.fromEntries(
+      items
+        .map((item) => [item.id, templateBindingWarningCache.value[item.id] || ''] as const)
+        .filter(([, warning]) => Boolean(warning)),
+    )
+    return
+  }
+
+  const nextWarnings = { ...templateBindingWarnings.value }
+  const concurrency = 4
+  for (let index = 0; index < missingItems.length; index += concurrency) {
+    const chunk = missingItems.slice(index, index + concurrency)
+    const warnings = await Promise.all(
+      chunk.map(async (item) => ({
+        id: item.id,
+        warning: await inspectTemplateBindingWarning(item.id),
+      })),
+    )
+    warnings.forEach(({ id, warning }) => {
+      templateBindingWarningCache.value[id] = warning
+      if (warning) {
+        nextWarnings[id] = warning
+      } else {
+        delete nextWarnings[id]
+      }
+    })
+    templateBindingWarnings.value = { ...nextWarnings }
+  }
+}
+
+async function loadBindings(applicationID: string, options?: { force?: boolean; silent?: boolean }) {
   const appID = String(applicationID || '').trim()
   if (!appID) {
     bindingOptions.value = []
     resetScopeState('ci')
     resetScopeState('cd')
+    return
+  }
+  if (!options?.force && bindingOptionsCache.value[appID]) {
+    bindingOptions.value = [...bindingOptionsCache.value[appID]]
     return
   }
   loadingBindings.value = true
@@ -1104,15 +1336,19 @@ async function loadBindings(applicationID: string) {
       page: 1,
       page_size: 200,
     })
-    bindingOptions.value = response.data.map((item) => ({
+    const nextOptions = response.data.map((item) => ({
       label: `${item.name || item.binding_type} [${item.binding_type}/${item.provider}]`,
       value: item.id,
       binding_type: item.binding_type,
       provider: item.provider,
     }))
+    bindingOptionsCache.value[appID] = nextOptions
+    bindingOptions.value = [...nextOptions]
   } catch (error) {
     bindingOptions.value = []
-    message.error(extractHTTPErrorMessage(error, '绑定下拉加载失败'))
+    if (!options?.silent) {
+      message.error(extractHTTPErrorMessage(error, '绑定下拉加载失败'))
+    }
   } finally {
     loadingBindings.value = false
   }
@@ -1148,13 +1384,19 @@ async function loadSelectableParams(scope: ReleasePipelineScope, preserveSelecti
 
   state.loading_params = true
   try {
-    const response = await listApplicationExecutorParamDefs(appID, {
-      binding_type: scope,
-      status: 'active',
-      page: 1,
-      page_size: 200,
-    })
-    state.selectable_params = response.data.filter((item) => String(item.param_key || '').trim().toLowerCase() !== '')
+    const cacheKey = `${appID}:${scope}`
+    let cached = selectableParamsCache.value[cacheKey]
+    if (!cached) {
+      const response = await listApplicationExecutorParamDefs(appID, {
+        binding_type: scope,
+        status: 'active',
+        page: 1,
+        page_size: 200,
+      })
+      cached = response.data.filter((item) => String(item.param_key || '').trim().toLowerCase() !== '')
+      selectableParamsCache.value[cacheKey] = cached
+    }
+    state.selectable_params = [...cached]
     const allowed = new Set(state.selectable_params.map((item) => item.id))
     state.selected_param_def_ids = state.selected_param_def_ids.filter((item) => allowed.has(item))
     syncScopeParamConfigs(scope)
@@ -1172,13 +1414,16 @@ async function handleApplicationChange(value: string | undefined) {
   formState.application_id = String(value || '')
   resetScopeState('ci')
   resetScopeState('cd')
+  loadedTemplateBindings.value = []
+  scopeBindingWarnings.ci = ''
+  scopeBindingWarnings.cd = ''
   gitopsRules.value = []
   gitOpsType.value = 'kustomize'
-  await loadBindings(formState.application_id)
-  await Promise.all([
-    loadGitOpsFieldCandidates(formState.application_id, true),
-    loadGitOpsValuesCandidates(formState.application_id, true),
-  ])
+  const tasks: Array<Promise<unknown>> = [loadBindings(formState.application_id)]
+  if (isCDUsingArgoCD()) {
+    tasks.push(loadGitOpsFieldCandidates(formState.application_id, true))
+  }
+  await Promise.all(tasks)
 }
 
 async function handleScopeBindingChange(scope: ReleasePipelineScope, value: string | undefined) {
@@ -1186,6 +1431,7 @@ async function handleScopeBindingChange(scope: ReleasePipelineScope, value: stri
   scopeStates[scope].selected_param_def_ids = []
   scopeParamConfigs[scope] = {}
   await loadSelectableParams(scope)
+  await refreshScopeBindingWarning(scope)
 }
 
 function handleCDModeChange(value: string | number) {
@@ -1200,6 +1446,7 @@ function handleCDModeChange(value: string | number) {
     scopeStates.cd.selectable_params = []
     scopeStates.cd.loading_params = false
     scopeParamConfigs.cd = {}
+    void reloadCurrentGitOpsCandidates()
     return
   }
   scopeStates.cd.selected_param_def_ids = []
@@ -1211,6 +1458,7 @@ async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: bo
   scopeStates[scope].enabled = checked
   if (!checked) {
     resetScopeState(scope)
+    scopeBindingWarnings[scope] = ''
     if (scope === 'cd') {
       gitopsRules.value = []
       gitOpsType.value = 'kustomize'
@@ -1218,7 +1466,13 @@ async function handleScopeEnabledChange(scope: ReleasePipelineScope, checked: bo
     }
     return
   }
+  if (scope === 'cd' && isCDUsingArgoCD()) {
+    void reloadCurrentGitOpsCandidates()
+    await refreshScopeBindingWarning(scope)
+    return
+  }
   await loadSelectableParams(scope)
+  await refreshScopeBindingWarning(scope)
 }
 
 function handleGitOpsTypeChange(value: ReleaseTemplateGitOpsType) {
@@ -1235,6 +1489,7 @@ function handleGitOpsTypeChange(value: ReleaseTemplateGitOpsType) {
       target_path: '',
     }),
   )
+  void reloadCurrentGitOpsCandidates()
 }
 
 function getRowSelection(scope: ReleasePipelineScope) {
@@ -1355,7 +1610,12 @@ function handlePageChange(page: number, pageSize: number) {
 function openCreateModal() {
   modalMode.value = 'create'
   resetFormState()
-  void loadAgentTaskTemplates()
+  void Promise.all([
+    loadPlatformParamMap(),
+    loadApprovalUserOptions(),
+    loadAgentTaskTemplates(),
+    loadNotificationHooks(),
+  ])
   modalVisible.value = true
 }
 
@@ -1379,8 +1639,21 @@ async function openEditModal(record: ReleaseTemplate) {
   modalVisible.value = true
   modalLoading.value = true
   try {
-    await loadAgentTaskTemplates()
-    const response = await getReleaseTemplateByID(record.id)
+    const detailPromise = getReleaseTemplateByID(record.id)
+    const preloadTasks: Array<Promise<unknown>> = []
+    if (!platformParamDicts.value.length) {
+      preloadTasks.push(loadPlatformParamMap())
+    }
+    if (!userOptions.value.length) {
+      preloadTasks.push(loadApprovalUserOptions())
+    }
+    if (!agentTaskTemplates.value.length) {
+      preloadTasks.push(loadAgentTaskTemplates())
+    }
+    if (!notificationHooks.value.length) {
+      preloadTasks.push(loadNotificationHooks())
+    }
+    const [response] = await Promise.all([detailPromise, ...preloadTasks])
     const { template, bindings, params, gitops_rules, hooks } = response.data
     formState.id = template.id
     formState.name = template.name
@@ -1392,12 +1665,18 @@ async function openEditModal(record: ReleaseTemplate) {
     formState.remark = template.remark
     gitOpsType.value = normalizedGitOpsType(template.gitops_type)
 
-    await Promise.all([
-      loadBindings(formState.application_id),
-      loadGitOpsFieldCandidates(formState.application_id, true),
-      loadGitOpsValuesCandidates(formState.application_id, true),
-    ])
+    loadedTemplateBindings.value = bindings
+    const loadTasks: Array<Promise<unknown>> = [loadBindings(formState.application_id, { silent: true })]
+    if (bindings.some((item) => item.pipeline_scope === 'cd' && item.enabled && item.provider === 'argocd')) {
+      if (gitOpsType.value === 'helm') {
+        loadTasks.push(loadGitOpsValuesCandidates(formState.application_id, true))
+      } else {
+        loadTasks.push(loadGitOpsFieldCandidates(formState.application_id, true))
+      }
+    }
+    await Promise.all(loadTasks)
     applyBindingsToForm(bindings)
+    void refreshBindingWarnings()
 
     scopeStates.ci.selected_param_def_ids = params
       .filter((item) => item.pipeline_scope === 'ci')
@@ -1426,10 +1705,14 @@ async function openEditModal(record: ReleaseTemplate) {
         })
       })
 
-    await Promise.all([
-      loadSelectableParams('ci', true),
-      loadSelectableParams('cd', true),
-    ])
+    const paramLoadTasks: Array<Promise<unknown>> = []
+    if (scopeStates.ci.enabled) {
+      paramLoadTasks.push(loadSelectableParams('ci', true))
+    }
+    if (scopeStates.cd.enabled && isCDUsingPipeline()) {
+      paramLoadTasks.push(loadSelectableParams('cd', true))
+    }
+    await Promise.all(paramLoadTasks)
 
     gitopsRules.value = (gitops_rules || []).map((item: ReleaseTemplateGitOpsRule) =>
       createGitOpsRuleFormItem({
@@ -1577,7 +1860,7 @@ async function handleDelete(record: ReleaseTemplate) {
 }
 
 onMounted(async () => {
-  await Promise.all([loadPlatformParamMap(), loadApplications(), loadAgentTaskTemplates(), loadApprovalUserOptions()])
+  await loadApplications()
   await loadTemplates()
 })
 </script>
@@ -1660,6 +1943,20 @@ onMounted(async () => {
         :scroll="{ x: 1380 }"
       >
         <template #bodyCell="{ column, record }">
+          <template v-if="column.key === 'name'">
+            <div class="template-name-cell">
+              <span class="template-name-text">{{ record.name }}</span>
+              <a-tag
+                v-if="templateBindingWarnings[record.id]"
+                class="dashboard-chip dashboard-chip-warning"
+              >
+                绑定异常
+              </a-tag>
+            </div>
+            <div v-if="templateBindingWarnings[record.id]" class="template-binding-warning-text">
+              {{ templateBindingWarnings[record.id] }}
+            </div>
+          </template>
           <template v-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
           </template>
@@ -1826,6 +2123,13 @@ onMounted(async () => {
                 show-icon
                 :message="`当前执行器：${selectedBinding('ci')?.provider}`"
               />
+              <a-alert
+                v-if="scopeBindingWarnings.ci"
+                class="scope-binding-alert"
+                type="warning"
+                show-icon
+                :message="scopeBindingWarnings.ci"
+              />
 
               <div class="scope-table-wrapper">
                 <a-table
@@ -1935,6 +2239,13 @@ onMounted(async () => {
                   @change="(value: string | undefined) => handleScopeBindingChange('cd', value)"
                 />
               </a-form-item>
+              <a-alert
+                v-if="isCDUsingPipeline() && scopeBindingWarnings.cd"
+                class="scope-binding-alert"
+                type="warning"
+                show-icon
+                :message="scopeBindingWarnings.cd"
+              />
 
               <a-collapse v-if="isCDUsingArgoCD()" v-model:activeKey="argocdInfoActiveKeys" class="argocd-info-collapse" ghost>
                 <a-collapse-panel key="argocd-info">
@@ -2099,7 +2410,7 @@ onMounted(async () => {
                 <a-empty
                   v-if="!loadingGitOpsFieldCandidates && ((isHelmGitOps() && platformValuesCandidates().length === 0) || (!isHelmGitOps() && gitOpsFieldCandidates.length === 0))"
                   :description="isHelmGitOps()
-                    ? '当前应用还没有扫描到平台专用的 Helm values 路径，请先确认 GitOps 目录下已准备好 platform.values-{env}.yaml。'
+                    ? '当前应用还没有扫描到平台专用的 Helm values 路径，请先确认 GitOps 目录下已准备好 apps/helm/platform.values-{env}.yaml。'
                     : '当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好。'"
                 />
 
@@ -2149,8 +2460,8 @@ onMounted(async () => {
                         </div>
                         <a-row v-if="isHelmGitOps()" :gutter="12" class="gitops-target-select-row">
                           <a-col :span="24">
-                            <a-form-item label="目标文件" class="gitops-inline-item">
-                              <a-input :value="pathBaseName(rule.file_path_template || valuesFileOptions()[0]?.value || 'platform.values-{env}.yaml')" readonly />
+                            <a-form-item label="目标文件模板" class="gitops-inline-item">
+                              <a-input :value="rule.file_path_template || valuesFileOptions()[0]?.value || 'apps/helm/platform.values-{env}.yaml'" readonly />
                             </a-form-item>
                           </a-col>
                           <a-col :span="24">
@@ -2214,7 +2525,7 @@ onMounted(async () => {
                           <a-descriptions-item :label="isHelmGitOps() ? '类型' : '资源'">
                             {{ formatGitOpsRuleTargetSummary(rule).title }}
                           </a-descriptions-item>
-                          <a-descriptions-item :label="isHelmGitOps() ? 'Values 文件模版' : '文件'">
+                          <a-descriptions-item :label="isHelmGitOps() ? 'Values 文件模板' : '文件'">
                             <span class="gitops-code-text">{{ formatGitOpsRuleTargetSummary(rule).file }}</span>
                           </a-descriptions-item>
                           <a-descriptions-item :label="isHelmGitOps() ? 'Values 路径' : '字段路径'">
@@ -2247,7 +2558,7 @@ onMounted(async () => {
           <template #title>发布后 Hook</template>
           <template #extra>
             <a-space>
-              <a-tag class="dashboard-chip dashboard-chip-running">规划中</a-tag>
+              <a-tag class="dashboard-chip dashboard-chip-running">发布后执行</a-tag>
               <a-button type="dashed" size="small" @click="openHookTypePicker">
                 <template #icon><PlusOutlined /></template>
                 新增 Hook
@@ -2259,7 +2570,7 @@ onMounted(async () => {
             class="scope-alert"
             type="info"
             show-icon
-            message="发布模板中的 Hook 会在主发布流程结束后串行执行。当前先完成模板页适配，待后端 Hook 模块落地后开放保存。"
+            message="发布模板中的 Hook 会在主发布流程结束后串行执行。通知 Hook 会自动使用发布过程中的标准平台 Key 和内置字段渲染消息。"
           />
 
           <div class="hook-template-summary-grid">
@@ -2273,7 +2584,7 @@ onMounted(async () => {
             <div>
               <div class="hook-template-capability-title">Hook 配置适配预览</div>
               <div class="hook-template-capability-subtitle">
-                点击新增 Hook，先选择类型，再补充表单字段。当前支持 Agent 任务和 Webhook 通知两类发布后 Hook。
+                点击新增 Hook，先选择类型，再补充表单字段。当前支持 Agent 任务、通知 Hook 和兼容型 Webhook 通知。
               </div>
             </div>
             <a-tag class="dashboard-chip dashboard-chip-neutral">详情页直接看进度</a-tag>
@@ -2289,7 +2600,8 @@ onMounted(async () => {
                     Hook {{ index + 1 }}：{{ item.name || '未命名 Hook' }}
                   </div>
                   <div class="hook-template-capability-card-meta">
-                    {{ hookTypeLabel(item.hook_type) }} · {{ item.hook_type === 'agent_task' ? '发布后 Agent 任务' : '发布后 Webhook 通知' }}
+                    {{ hookTypeLabel(item.hook_type) }} ·
+                    {{ item.hook_type === 'agent_task' ? '发布后 Agent 任务' : item.hook_type === 'notification_hook' ? '发布后通知 Hook' : '发布后 Webhook 通知' }}
                   </div>
                 </div>
                 <a-space>
@@ -2298,147 +2610,173 @@ onMounted(async () => {
                 </a-space>
               </div>
 
-              <a-row :gutter="12">
-                <a-col :span="24">
-                  <a-form-item label="Hook 名称" class="template-param-inline-item">
-                    <a-input
-                      v-model:value="item.name"
-                      allow-clear
-                      :placeholder="item.hook_type === 'agent_task' ? '例如：发布后 Agent 任务' : '例如：发布后 Webhook 通知'"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col :xs="24" :md="12">
-                  <a-form-item label="触发条件" class="template-param-inline-item">
-                    <a-segmented
-                      v-model:value="item.trigger_condition"
-                      :options="[
-                        { label: '仅成功后', value: 'on_success' },
-                        { label: '仅失败后', value: 'on_failed' },
-                        { label: '始终触发', value: 'always' },
-                      ]"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col :xs="24" :md="12">
-                  <a-form-item label="失败策略" class="template-param-inline-item">
-                    <a-segmented
-                      v-model:value="item.failure_policy"
-                      :options="[
-                        { label: '阻断发布单', value: 'block_release' },
-                        { label: '仅告警', value: 'warn_only' },
-                      ]"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="24">
-                  <a-form-item :label="item.hook_type === 'agent_task' ? '目标 Agent 任务' : 'Webhook URL'" class="template-param-inline-item">
-                    <a-select
-                      v-if="item.hook_type === 'agent_task'"
-                      v-model:value="item.target_id" @change="syncHookTargetName(item)"
-                      allow-clear
-                      show-search
-                      option-filter-prop="label"
-                      :loading="loadingAgentTaskTemplates"
-                      :options="agentTaskTemplateOptions"
-                      placeholder="请选择真实 Agent 任务模板"
-                    />
-                    <a-input
-                      v-else
-                      v-model:value="item.webhook_url"
-                      allow-clear
-                      placeholder="例如：https://notify.example.com/release/hook"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col v-if="item.hook_type === 'agent_task' && !agentTaskTemplateOptions.length" :span="24">
-                  <div class="hook-template-capability-note">
-                    当前还没有可引用的未分配 Agent 任务模板，请先到 Agent 任务管理中创建任务模板。
-                  </div>
-                </a-col>
-                <a-col v-if="item.hook_type === 'agent_task' && findAgentTaskTemplate(item.target_id)" :span="24">
-                  <a-descriptions :column="1" size="small" bordered class="hook-template-description">
-                    <a-descriptions-item label="已选任务">
-                      {{ findAgentTaskTemplate(item.target_id)?.name }}
-                    </a-descriptions-item>
-                    <a-descriptions-item label="任务模式">
-                      {{ findAgentTaskTemplate(item.target_id)?.task_mode === 'resident' ? '常驻任务' : '临时任务' }}
-                    </a-descriptions-item>
-                    <a-descriptions-item label="任务类型">
-                      {{ agentTaskTypeLabel(String(findAgentTaskTemplate(item.target_id)?.task_type || '')) }}
-                    </a-descriptions-item>
-                    <a-descriptions-item label="脚本">
-                      {{ findAgentTaskTemplate(item.target_id)?.script_name || findAgentTaskTemplate(item.target_id)?.script_path || '未绑定脚本' }}
-                    </a-descriptions-item>
-                  </a-descriptions>
-                </a-col>
-                <a-col v-if="item.hook_type === 'webhook_notification'" :xs="24" :md="8">
-                  <a-form-item label="请求方法" class="template-param-inline-item">
-                    <a-select
-                      v-model:value="item.webhook_method"
-                      :options="[
-                        { label: 'POST', value: 'POST' },
-                        { label: 'PUT', value: 'PUT' },
-                        { label: 'PATCH', value: 'PATCH' },
-                      ]"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col v-if="item.hook_type === 'webhook_notification'" :xs="24" :md="16">
-                  <a-form-item label="Body 模板" class="template-param-inline-item">
-                    <a-textarea
-                      v-model:value="item.webhook_body_template"
-                      :auto-size="{ minRows: 4, maxRows: 8 }"
-                      placeholder="请输入 Webhook body 模板，支持 {env}、{order_no} 等变量"
-                    />
-                  </a-form-item>
-                </a-col>
-                <a-col :span="24">
-                  <a-form-item label="补充说明" class="template-param-inline-item">
-                    <a-textarea
-                      v-model:value="item.note"
-                      :auto-size="{ minRows: 2, maxRows: 4 }"
-                      placeholder="例如：用于联调校验、通知回调或特殊环境后置动作"
-                    />
-                  </a-form-item>
-                </a-col>
-              </a-row>
+              <div class="hook-template-form-stack">
+                <a-form-item label="Hook 名称" class="template-param-inline-item">
+                  <a-input
+                    v-model:value="item.name"
+                    allow-clear
+                    :placeholder="item.hook_type === 'agent_task'
+                      ? '例如：发布后 Agent 任务'
+                      : item.hook_type === 'notification_hook'
+                        ? '例如：发布后通知 Hook'
+                        : '例如：发布后 Webhook 通知'"
+                  />
+                </a-form-item>
 
-              <div class="hook-template-variable-row">
-                <div class="hook-template-variable-title">变量来源</div>
-                <div class="hook-template-variable-tags">
-                  <a-tag v-for="source in hookVariableSourceTags" :key="`${item.local_id}-${source}`" class="dashboard-chip dashboard-chip-neutral">
-                    {{ source }}
-                  </a-tag>
+                <a-form-item label="触发条件" class="template-param-inline-item">
+                  <a-segmented
+                    v-model:value="item.trigger_condition"
+                    :options="[
+                      { label: '仅成功后', value: 'on_success' },
+                      { label: '仅失败后', value: 'on_failed' },
+                      { label: '始终触发', value: 'always' },
+                    ]"
+                  />
+                </a-form-item>
+
+                <a-form-item label="失败策略" class="template-param-inline-item">
+                  <a-segmented
+                    v-model:value="item.failure_policy"
+                    :options="[
+                      { label: '阻断发布单', value: 'block_release' },
+                      { label: '仅告警', value: 'warn_only' },
+                    ]"
+                  />
+                </a-form-item>
+
+                <a-form-item :label="item.hook_type === 'agent_task' ? '目标 Agent 任务' : item.hook_type === 'notification_hook' ? '目标通知 Hook' : 'Webhook URL'" class="template-param-inline-item">
+                  <a-select
+                    v-if="item.hook_type === 'agent_task'"
+                    v-model:value="item.target_id"
+                    allow-clear
+                    show-search
+                    option-filter-prop="label"
+                    :loading="loadingAgentTaskTemplates"
+                    :options="agentTaskTemplateOptions"
+                    placeholder="请选择真实 Agent 任务模板"
+                    @change="syncHookTargetName(item)"
+                  />
+                  <a-select
+                    v-else-if="item.hook_type === 'notification_hook'"
+                    v-model:value="item.target_id"
+                    allow-clear
+                    show-search
+                    option-filter-prop="label"
+                    :loading="loadingNotificationHooks"
+                    :options="notificationHookOptions"
+                    placeholder="请选择通知 Hook"
+                    @change="syncHookTargetName(item)"
+                  />
+                  <a-input
+                    v-else
+                    v-model:value="item.webhook_url"
+                    allow-clear
+                    placeholder="例如：https://notify.example.com/release/hook"
+                  />
+                </a-form-item>
+
+                <div v-if="item.hook_type === 'agent_task' && !agentTaskTemplateOptions.length" class="hook-template-capability-note">
+                  当前还没有可引用的未分配 Agent 任务模板，请先到 Agent 任务管理中创建任务模板。
                 </div>
-              </div>
+                <div v-if="item.hook_type === 'notification_hook' && !notificationHookOptions.length" class="hook-template-capability-note">
+                  当前还没有可引用的通知 Hook，请先到系统管理 / 通知模块中创建通知源、Markdown 模板和通知 Hook。
+                </div>
 
-              <a-descriptions :column="1" size="small" bordered class="hook-template-description">
-                <a-descriptions-item label="当前摘要">
-                  {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }}
-                </a-descriptions-item>
-                <a-descriptions-item label="详情展示">
-                  发布单详情直接展示 Hook 执行进度、变量和日志
-                </a-descriptions-item>
-              </a-descriptions>
+                <a-descriptions v-if="item.hook_type === 'agent_task' && findAgentTaskTemplate(item.target_id)" :column="1" size="small" bordered class="hook-template-description">
+                  <a-descriptions-item label="已选任务">
+                    {{ findAgentTaskTemplate(item.target_id)?.name }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="任务模式">
+                    {{ findAgentTaskTemplate(item.target_id)?.task_mode === 'resident' ? '常驻任务' : '临时任务' }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="任务类型">
+                    {{ agentTaskTypeLabel(String(findAgentTaskTemplate(item.target_id)?.task_type || '')) }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="脚本">
+                    {{ findAgentTaskTemplate(item.target_id)?.script_name || findAgentTaskTemplate(item.target_id)?.script_path || '未绑定脚本' }}
+                  </a-descriptions-item>
+                </a-descriptions>
+
+                <a-descriptions v-if="item.hook_type === 'notification_hook' && notificationHooks.find((candidate) => candidate.id === item.target_id)" :column="1" size="small" bordered class="hook-template-description">
+                  <a-descriptions-item label="已选通知 Hook">
+                    {{ notificationHooks.find((candidate) => candidate.id === item.target_id)?.name }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="通知源">
+                    {{ notificationHooks.find((candidate) => candidate.id === item.target_id)?.source_name }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="Markdown 模板">
+                    {{ notificationHooks.find((candidate) => candidate.id === item.target_id)?.markdown_template_name }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="变量来源">
+                    使用发布过程中的标准平台 Key 与内置字段渲染通知内容
+                  </a-descriptions-item>
+                </a-descriptions>
+
+                <a-form-item v-if="item.hook_type === 'webhook_notification'" label="请求方法" class="template-param-inline-item">
+                  <a-select
+                    v-model:value="item.webhook_method"
+                    :options="[
+                      { label: 'POST', value: 'POST' },
+                      { label: 'PUT', value: 'PUT' },
+                      { label: 'PATCH', value: 'PATCH' },
+                    ]"
+                  />
+                </a-form-item>
+
+                <a-form-item v-if="item.hook_type === 'webhook_notification'" label="Body 模板" class="template-param-inline-item">
+                  <a-textarea
+                    v-model:value="item.webhook_body_template"
+                    :auto-size="{ minRows: 4, maxRows: 8 }"
+                    placeholder="请输入 Webhook body 模板，支持 {env}、{order_no} 等变量"
+                  />
+                </a-form-item>
+
+                <a-form-item label="补充说明" class="template-param-inline-item">
+                  <a-textarea
+                    v-model:value="item.note"
+                    :auto-size="{ minRows: 2, maxRows: 4 }"
+                    placeholder="例如：用于发版成功通知、回滚告警或特殊环境后置动作"
+                  />
+                </a-form-item>
+
+                <div class="hook-template-variable-row">
+                  <div class="hook-template-variable-title">变量来源</div>
+                  <div class="hook-template-variable-tags">
+                    <a-tag v-for="source in hookVariableSourceTags" :key="`${item.local_id}-${source}`" class="dashboard-chip dashboard-chip-neutral">
+                      {{ source }}
+                    </a-tag>
+                  </div>
+                </div>
+
+                <a-descriptions :column="1" size="small" bordered class="hook-template-description">
+                  <a-descriptions-item label="当前摘要">
+                    {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="详情展示">
+                    发布单详情直接展示 Hook 执行进度、变量和日志
+                  </a-descriptions-item>
+                </a-descriptions>
+              </div>
             </div>
           </div>
         </a-card>
         <a-modal
           :open="hookTypePickerVisible"
           title="新增 Hook"
-          width="520"
+          :width="420"
+          wrap-class-name="hook-type-picker-modal-wrap"
           ok-text="添加"
           cancel-text="取消"
           @ok="confirmAddHook"
           @cancel="hookTypePickerVisible = false"
         >
-          <a-form layout="vertical">
+          <a-form layout="vertical" class="hook-type-picker-form">
             <a-form-item label="Hook 类型">
               <a-segmented
                 v-model:value="pendingHookType"
                 :options="[
                   { label: 'Agent 任务', value: 'agent_task' },
+                  { label: '通知 Hook', value: 'notification_hook' },
                   { label: 'Webhook 通知', value: 'webhook_notification' },
                 ]"
               />
@@ -2448,7 +2786,9 @@ onMounted(async () => {
               show-icon
               :message="pendingHookType === 'agent_task'
                 ? '新增后会补充 Agent 任务名称、触发条件、失败策略等字段。'
-                : '新增后会补充 Webhook URL、请求方法、Body 模板等字段。'"
+                : pendingHookType === 'notification_hook'
+                  ? '新增后会选择通知 Hook，通知 Hook 由通知源和 Markdown 模板组成。'
+                  : '新增后会补充 Webhook URL、请求方法、Body 模板等字段。'"
             />
           </a-form>
         </a-modal>
@@ -2502,6 +2842,23 @@ onMounted(async () => {
 .template-editor-modal-wrap :deep(.ant-modal-footer) {
   border-top: 1px solid rgba(226, 232, 240, 0.92);
   background: transparent;
+}
+
+.hook-type-picker-modal-wrap :deep(.ant-modal) {
+  width: min(420px, calc(100vw - 32px)) !important;
+}
+
+.hook-type-picker-modal-wrap :deep(.ant-modal-content) {
+  border-radius: 18px;
+}
+
+.hook-type-picker-modal-wrap :deep(.ant-modal-body) {
+  padding-top: 14px;
+}
+
+.hook-type-picker-form {
+  width: min(100%, 360px);
+  margin-right: auto;
 }
 
 .scope-card-base {
@@ -2864,6 +3221,13 @@ onMounted(async () => {
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.97) 100%);
 }
 
+.hook-template-form-stack {
+  width: min(100%, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .hook-template-capability-card-head {
   display: flex;
   align-items: flex-start;
@@ -2885,7 +3249,7 @@ onMounted(async () => {
 }
 
 .hook-template-variable-row {
-  margin: 12px 0;
+  margin: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -3032,6 +3396,24 @@ onMounted(async () => {
 .param-executor {
   font-size: 12px;
   color: var(--color-text-soft);
+}
+
+.template-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-name-text {
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.template-binding-warning-text {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-warning-strong, #b45309);
+  line-height: 1.5;
 }
 
 @media (max-width: 992px) {

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -588,7 +589,7 @@ func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOp
 		SourceFrom:       string(item.SourceFrom),
 		LocatorParamKey:  item.LocatorParamKey,
 		LocatorParamName: item.LocatorParamName,
-		FilePathTemplate: item.FilePathTemplate,
+		FilePathTemplate: normalizeReleaseTemplateGitOpsFilePathTemplate(item.FilePathTemplate),
 		DocumentKind:     item.DocumentKind,
 		DocumentName:     item.DocumentName,
 		TargetPath:       item.TargetPath,
@@ -597,6 +598,24 @@ func toReleaseTemplateGitOpsRuleResponse(item releasedomain.ReleaseTemplateGitOp
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}
+}
+
+func normalizeReleaseTemplateGitOpsFilePathTemplate(value string) string {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+	if value == "" || !strings.HasPrefix(value, "apps/") {
+		return value
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "apps/"), "/")
+	if len(parts) < 3 {
+		return value
+	}
+	if strings.EqualFold(parts[0], "helm") {
+		return value
+	}
+	if strings.EqualFold(parts[1], "helm") {
+		return filepath.ToSlash(filepath.Join("apps", "helm", filepath.Join(parts[2:]...)))
+	}
+	return value
 }
 
 func toReleaseTemplateHookResponse(item releasedomain.ReleaseTemplateHook) ReleaseTemplateHookResponse {

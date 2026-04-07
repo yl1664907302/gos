@@ -14,6 +14,7 @@ import (
 	argocddomain "gos/internal/domain/argocdapp"
 	pipelineparamdomain "gos/internal/domain/executorparam"
 	gitopsdomain "gos/internal/domain/gitops"
+	notificationdomain "gos/internal/domain/notification"
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	domain "gos/internal/domain/release"
@@ -31,6 +32,7 @@ type ReleaseOrderManager struct {
 	agentRepo       agentdomain.Repository
 	argocdRepo      argocddomain.Repository
 	gitopsRepo      gitopsdomain.Repository
+	notificationRepo notificationdomain.Repository
 	argocdFactory   ArgoCDClientFactory
 	gitopsFactory   GitOpsServiceFactory
 	gitops          GitOpsReleaseService
@@ -140,6 +142,7 @@ func NewReleaseOrderManager(
 	jenkins JenkinsReleaseExecutor,
 	agentRepo agentdomain.Repository,
 	argocdRepo argocddomain.Repository,
+	notificationRepo notificationdomain.Repository,
 	argocdFactory ArgoCDClientFactory,
 	gitopsRepo gitopsdomain.Repository,
 	gitopsFactory GitOpsServiceFactory,
@@ -153,12 +156,13 @@ func NewReleaseOrderManager(
 		platformRepo:    platformRepo,
 		releaseSettings: releaseSettings,
 		jenkins:         jenkins,
-		agentRepo:       agentRepo,
-		argocdRepo:      argocdRepo,
-		gitopsRepo:      gitopsRepo,
-		argocdFactory:   argocdFactory,
-		gitopsFactory:   gitopsFactory,
-		gitops:          gitops,
+		agentRepo:        agentRepo,
+		argocdRepo:       argocdRepo,
+		gitopsRepo:       gitopsRepo,
+		notificationRepo: notificationRepo,
+		argocdFactory:    argocdFactory,
+		gitopsFactory:    gitopsFactory,
+		gitops:           gitops,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -2043,18 +2047,28 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			continue
 		}
 
-		binding, err := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
-		if err != nil {
-			logx.Error("release_order", "execution_start_failed", err,
-				logx.F("order_id", order.ID),
-				logx.F("execution_id", execution.ID),
-				logx.F("binding_id", execution.BindingID),
-			)
-			return err
-		}
 		pipelineID := strings.TrimSpace(execution.PipelineID)
-		if pipelineID == "" {
-			pipelineID = strings.TrimSpace(binding.PipelineID)
+		if strings.TrimSpace(execution.BindingID) != "" {
+			binding, err := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
+			if err != nil {
+				if !errors.Is(err, pipelinedomain.ErrBindingNotFound) || pipelineID == "" {
+					logx.Error("release_order", "execution_start_failed", err,
+						logx.F("order_id", order.ID),
+						logx.F("execution_id", execution.ID),
+						logx.F("binding_id", execution.BindingID),
+					)
+					return err
+				}
+				logx.Warn("release_order", "execution_binding_missing_fallback_pipeline",
+					logx.F("order_id", order.ID),
+					logx.F("order_no", order.OrderNo),
+					logx.F("execution_id", execution.ID),
+					logx.F("binding_id", execution.BindingID),
+					logx.F("pipeline_id", pipelineID),
+				)
+			} else if pipelineID == "" {
+				pipelineID = strings.TrimSpace(binding.PipelineID)
+			}
 		}
 		if pipelineID == "" {
 			err := fmt.Errorf("%w: pipeline_id is required", ErrInvalidInput)
@@ -3036,6 +3050,15 @@ func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook) string {
 			target = "未命名 Agent 任务"
 		}
 		return fmt.Sprintf("Agent 任务：%s", target)
+	case domain.TemplateHookTypeNotificationHook:
+		target := strings.TrimSpace(item.TargetName)
+		if target == "" {
+			target = strings.TrimSpace(item.TargetID)
+		}
+		if target == "" {
+			target = "未命名通知 Hook"
+		}
+		return fmt.Sprintf("通知 Hook：%s", target)
 	case domain.TemplateHookTypeWebhookNotification:
 		method := strings.ToUpper(strings.TrimSpace(item.WebhookMethod))
 		if method == "" {

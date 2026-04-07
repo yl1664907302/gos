@@ -3,9 +3,14 @@ package usecase
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -13,6 +18,7 @@ import (
 	"time"
 
 	agentdomain "gos/internal/domain/agent"
+	notificationdomain "gos/internal/domain/notification"
 	domain "gos/internal/domain/release"
 )
 
@@ -231,6 +237,8 @@ func (uc *ReleaseOrderManager) dispatchTemplateHookStep(
 	switch hook.HookType {
 	case domain.TemplateHookTypeAgentTask:
 		return uc.dispatchAgentTaskHookStep(ctx, order, executions, hook, step)
+	case domain.TemplateHookTypeNotificationHook:
+		return uc.dispatchNotificationHookStep(ctx, order, executions, hook, step)
 	case domain.TemplateHookTypeWebhookNotification:
 		return uc.dispatchWebhookHookStep(ctx, order, executions, hook, step)
 	default:
@@ -356,6 +364,144 @@ func (uc *ReleaseOrderManager) dispatchWebhookHookStep(
 	return true, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, message)
 }
 
+func (uc *ReleaseOrderManager) dispatchNotificationHookStep(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	hook domain.ReleaseTemplateHook,
+	step domain.ReleaseOrderStep,
+) (bool, error) {
+	if uc.notificationRepo == nil {
+		return false, fmt.Errorf("%w: notification repository is not configured", ErrInvalidInput)
+	}
+
+	notificationHook, err := uc.notificationRepo.GetHookByID(ctx, strings.TrimSpace(hook.TargetID))
+	if err != nil {
+		return false, err
+	}
+	if !notificationHook.Enabled {
+		return false, fmt.Errorf("%w: notification hook is disabled", ErrInvalidInput)
+	}
+	source, err := uc.notificationRepo.GetSourceByID(ctx, notificationHook.SourceID)
+	if err != nil {
+		return false, err
+	}
+	if !source.Enabled {
+		return false, fmt.Errorf("%w: notification source is disabled", ErrInvalidInput)
+	}
+	template, err := uc.notificationRepo.GetMarkdownTemplateByID(ctx, notificationHook.MarkdownTemplateID)
+	if err != nil {
+		return false, err
+	}
+	if !template.Enabled {
+		return false, fmt.Errorf("%w: notification markdown template is disabled", ErrInvalidInput)
+	}
+
+	variables, err := uc.buildHookTaskVariables(ctx, order, executions)
+	if err != nil {
+		return false, err
+	}
+	title, body := renderNotificationMarkdownTemplate(variables, template)
+	if strings.TrimSpace(title) == "" && strings.TrimSpace(body) == "" {
+		return false, fmt.Errorf("%w: notification markdown content is empty", ErrInvalidInput)
+	}
+	req, err := buildNotificationHookRequest(ctx, source, title, body)
+	if err != nil {
+		return false, err
+	}
+	resp, err := sendTemplateWebhook(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	message := fmt.Sprintf("通知 Hook：%s · %s", firstNonEmpty(strings.TrimSpace(notificationHook.Name), strings.TrimSpace(hook.Name), strings.TrimSpace(notificationHook.ID)), source.Name)
+	if len(bytes.TrimSpace(respBody)) > 0 {
+		message += "，响应：" + strings.TrimSpace(string(respBody))
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		summary := strings.TrimSpace(string(respBody))
+		if summary == "" {
+			return false, fmt.Errorf("%w: notification hook returned %d", ErrInvalidInput, resp.StatusCode)
+		}
+		return false, fmt.Errorf("%w: notification hook returned %d: %s", ErrInvalidInput, resp.StatusCode, summary)
+	}
+	if step.Status == domain.StepStatusPending {
+		now := uc.now()
+		if err := uc.markStep(ctx, order.ID, step.StepCode, domain.StepStatusRunning, message, &now, nil); err != nil {
+			return false, err
+		}
+	}
+	return true, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, message)
+}
+
+func buildNotificationHookRequest(ctx context.Context, source notificationdomain.Source, title string, body string) (*http.Request, error) {
+	webhookURL := strings.TrimSpace(source.WebhookURL)
+	if webhookURL == "" {
+		return nil, fmt.Errorf("%w: notification source webhook_url is required", ErrInvalidInput)
+	}
+	if source.SourceType == notificationdomain.SourceTypeDingTalk {
+		signedURL, err := buildDingTalkWebhookURL(webhookURL, source.VerificationParam)
+		if err != nil {
+			return nil, err
+		}
+		webhookURL = signedURL
+	}
+	payload := make(map[string]any)
+	switch source.SourceType {
+	case notificationdomain.SourceTypeDingTalk:
+		payload["msgtype"] = "markdown"
+		payload["markdown"] = map[string]string{
+			"title": strings.TrimSpace(firstNonEmpty(title, "GOS Release Notification")),
+			"text":  strings.TrimSpace(firstNonEmpty(body, title)),
+		}
+	case notificationdomain.SourceTypeWeCom:
+		content := strings.TrimSpace(body)
+		if content == "" {
+			content = strings.TrimSpace(title)
+		} else if strings.TrimSpace(title) != "" {
+			content = fmt.Sprintf("## %s\n\n%s", strings.TrimSpace(title), content)
+		}
+		payload["msgtype"] = "markdown"
+		payload["markdown"] = map[string]string{
+			"content": content,
+		}
+	default:
+		return nil, fmt.Errorf("%w: unsupported notification source type %s", ErrInvalidInput, source.SourceType)
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewBuffer(payloadBytes))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return req, nil
+}
+
+func buildDingTalkWebhookURL(webhookURL string, verificationParam string) (string, error) {
+	secret := strings.TrimSpace(verificationParam)
+	if secret == "" {
+		return webhookURL, nil
+	}
+	parsedURL, err := url.Parse(webhookURL)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid dingtalk webhook_url", ErrInvalidInput)
+	}
+	timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	stringToSign := timestamp + "\n" + secret
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(stringToSign))
+	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	query := parsedURL.Query()
+	query.Set("timestamp", timestamp)
+	query.Set("sign", signature)
+	parsedURL.RawQuery = query.Encode()
+	return parsedURL.String(), nil
+}
+
 func sendTemplateWebhook(req *http.Request) (*http.Response, error) {
 	webhookClient := &http.Client{Timeout: templateWebhookHTTPTimeout}
 	return webhookClient.Do(req)
@@ -370,6 +516,8 @@ func (uc *ReleaseOrderManager) syncRunningHookStep(
 	switch hook.HookType {
 	case domain.TemplateHookTypeAgentTask:
 		return uc.syncRunningAgentTaskHookStep(ctx, order, hook, step)
+	case domain.TemplateHookTypeNotificationHook:
+		return false, true, false, nil
 	case domain.TemplateHookTypeWebhookNotification:
 		return false, true, false, nil
 	default:
@@ -512,6 +660,24 @@ func (uc *ReleaseOrderManager) buildHookTaskVariables(
 	values["order_no"] = strings.TrimSpace(order.OrderNo)
 	values["operation_type"] = strings.TrimSpace(string(order.OperationType))
 	values["source_order_no"] = strings.TrimSpace(order.SourceOrderNo)
+	mainStatus, _, mainDone := evaluateMainReleaseStatus(executions)
+	if mainDone {
+		values["release_status"] = strings.TrimSpace(string(mainStatus))
+	}
+	for _, item := range orderParams {
+		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
+		if key == "" {
+			continue
+		}
+		if _, exists := values[key]; exists {
+			continue
+		}
+		value := strings.TrimSpace(item.ParamValue)
+		if value == "" {
+			continue
+		}
+		values[key] = value
+	}
 	return values, nil
 }
 

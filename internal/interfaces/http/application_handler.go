@@ -57,42 +57,45 @@ func (h *ApplicationHandler) RegisterRoutes(router gin.IRouter) {
 }
 
 type CreateApplicationRequest struct {
-	Name         string `json:"name"`
-	Key          string `json:"key"`
-	RepoURL      string `json:"repo_url"`
-	Description  string `json:"description"`
-	OwnerUserID  string `json:"owner_user_id"`
-	Owner        string `json:"owner"`
-	Status       string `json:"status"`
-	ArtifactType string `json:"artifact_type"`
-	Language     string `json:"language"`
+	Name                 string                       `json:"name"`
+	Key                  string                       `json:"key"`
+	RepoURL              string                       `json:"repo_url"`
+	Description          string                       `json:"description"`
+	OwnerUserID          string                       `json:"owner_user_id"`
+	Owner                string                       `json:"owner"`
+	Status               string                       `json:"status"`
+	ArtifactType         string                       `json:"artifact_type"`
+	Language             string                       `json:"language"`
+	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
 }
 
 type UpdateApplicationRequest struct {
-	Name         string `json:"name"`
-	Key          string `json:"key"`
-	RepoURL      string `json:"repo_url"`
-	Description  string `json:"description"`
-	OwnerUserID  string `json:"owner_user_id"`
-	Owner        string `json:"owner"`
-	Status       string `json:"status"`
-	ArtifactType string `json:"artifact_type"`
-	Language     string `json:"language"`
+	Name                 string                       `json:"name"`
+	Key                  string                       `json:"key"`
+	RepoURL              string                       `json:"repo_url"`
+	Description          string                       `json:"description"`
+	OwnerUserID          string                       `json:"owner_user_id"`
+	Owner                string                       `json:"owner"`
+	Status               string                       `json:"status"`
+	ArtifactType         string                       `json:"artifact_type"`
+	Language             string                       `json:"language"`
+	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
 }
 
 type ApplicationResponse struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Key          string    `json:"key"`
-	RepoURL      string    `json:"repo_url"`
-	Description  string    `json:"description"`
-	OwnerUserID  string    `json:"owner_user_id"`
-	Owner        string    `json:"owner"`
-	Status       string    `json:"status"`
-	ArtifactType string    `json:"artifact_type"`
-	Language     string    `json:"language"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                   string                       `json:"id"`
+	Name                 string                       `json:"name"`
+	Key                  string                       `json:"key"`
+	RepoURL              string                       `json:"repo_url"`
+	Description          string                       `json:"description"`
+	OwnerUserID          string                       `json:"owner_user_id"`
+	Owner                string                       `json:"owner"`
+	Status               string                       `json:"status"`
+	ArtifactType         string                       `json:"artifact_type"`
+	Language             string                       `json:"language"`
+	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
+	CreatedAt            time.Time                    `json:"created_at"`
+	UpdatedAt            time.Time                    `json:"updated_at"`
 }
 
 type ApplicationDataResponse struct {
@@ -144,15 +147,16 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 	}
 
 	app, err := h.creator.Execute(c.Request.Context(), usecase.CreateInput{
-		Name:         req.Name,
-		Key:          req.Key,
-		RepoURL:      req.RepoURL,
-		Description:  req.Description,
-		OwnerUserID:  ownerUserID,
-		Owner:        ownerName,
-		Status:       domain.Status(strings.TrimSpace(req.Status)),
-		ArtifactType: req.ArtifactType,
-		Language:     req.Language,
+		Name:                 req.Name,
+		Key:                  req.Key,
+		RepoURL:              req.RepoURL,
+		Description:          req.Description,
+		OwnerUserID:          ownerUserID,
+		Owner:                ownerName,
+		Status:               domain.Status(strings.TrimSpace(req.Status)),
+		ArtifactType:         req.ArtifactType,
+		Language:             req.Language,
+		GitOpsBranchMappings: req.GitOpsBranchMappings,
 	})
 	if err != nil {
 		writeHTTPError(c, err)
@@ -405,15 +409,16 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 	}
 
 	app, err := h.updater.Execute(c.Request.Context(), c.Param("id"), domain.UpdateInput{
-		Name:         req.Name,
-		Key:          req.Key,
-		RepoURL:      req.RepoURL,
-		Description:  req.Description,
-		OwnerUserID:  ownerUserID,
-		Owner:        ownerName,
-		Status:       domain.Status(strings.TrimSpace(req.Status)),
-		ArtifactType: req.ArtifactType,
-		Language:     req.Language,
+		Name:                 req.Name,
+		Key:                  req.Key,
+		RepoURL:              req.RepoURL,
+		Description:          req.Description,
+		OwnerUserID:          ownerUserID,
+		Owner:                ownerName,
+		Status:               domain.Status(strings.TrimSpace(req.Status)),
+		ArtifactType:         req.ArtifactType,
+		Language:             req.Language,
+		GitOpsBranchMappings: req.GitOpsBranchMappings,
 	})
 	if err != nil {
 		writeHTTPError(c, err)
@@ -446,18 +451,19 @@ func (h *ApplicationHandler) Delete(c *gin.Context) {
 
 func toResponse(app domain.Application) ApplicationResponse {
 	return ApplicationResponse{
-		ID:           app.ID,
-		Name:         app.Name,
-		Key:          app.Key,
-		RepoURL:      app.RepoURL,
-		Description:  app.Description,
-		OwnerUserID:  app.OwnerUserID,
-		Owner:        app.Owner,
-		Status:       string(app.Status),
-		ArtifactType: app.ArtifactType,
-		Language:     app.Language(),
-		CreatedAt:    app.CreatedAt,
-		UpdatedAt:    app.UpdatedAt,
+		ID:                   app.ID,
+		Name:                 app.Name,
+		Key:                  app.Key,
+		RepoURL:              app.RepoURL,
+		Description:          app.Description,
+		OwnerUserID:          app.OwnerUserID,
+		Owner:                app.Owner,
+		Status:               string(app.Status),
+		ArtifactType:         app.ArtifactType,
+		Language:             app.Language(),
+		GitOpsBranchMappings: app.GitOpsBranchMappings,
+		CreatedAt:            app.CreatedAt,
+		UpdatedAt:            app.UpdatedAt,
 	}
 }
 

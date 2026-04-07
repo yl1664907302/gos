@@ -83,6 +83,10 @@ func main() {
 	if err := bootstrap.InitSchema(gitopsRepo); err != nil {
 		log.Fatalf("init gitops schema: %v", err)
 	}
+	notificationRepo := sqlrepo.NewNotificationRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(notificationRepo); err != nil {
+		log.Fatalf("init notification schema: %v", err)
+	}
 	if err := ensureDefaultGitOpsInstance(context.Background(), gitopsRepo, cfg); err != nil {
 		log.Fatalf("ensure default gitops instance: %v", err)
 	}
@@ -195,6 +199,10 @@ func main() {
 		usecase.NewPlatformParamDictManager(platformParamRepo, executorParamRepo),
 		authSessionManager,
 	)
+	notificationHandler := httpapi.NewNotificationHandler(
+		usecase.NewNotificationManager(notificationRepo, platformParamRepo),
+		authSessionManager,
+	)
 	executorParamHandler := httpapi.NewExecutorParamHandler(
 		usecase.NewExecutorParamDefManager(executorParamRepo, repo, pipelineRepo, platformParamRepo),
 		syncExecutorParamDefs,
@@ -211,12 +219,13 @@ func main() {
 		jenkinsClient,
 		agentRepo,
 		argocdAppRepo,
+		notificationRepo,
 		argocdClientFactory,
 		gitopsRepo,
 		gitopsServiceFactory,
 		gitopsService,
 	)
-	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, agentRepo, gitopsInstanceManager)
+	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, agentRepo, notificationRepo, gitopsInstanceManager)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
 	releaseOrderHandler := httpapi.NewReleaseOrderHandler(
 		releaseOrderManager,
@@ -306,6 +315,7 @@ func main() {
 		argocdHandler,
 		gitopsHandler,
 		platformParamHandler,
+		notificationHandler,
 		executorParamHandler,
 		releaseOrderHandler,
 		releaseTemplateHandler,

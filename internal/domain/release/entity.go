@@ -608,12 +608,13 @@ type TemplateHookType string
 
 const (
 	TemplateHookTypeAgentTask           TemplateHookType = "agent_task"
+	TemplateHookTypeNotificationHook    TemplateHookType = "notification_hook"
 	TemplateHookTypeWebhookNotification TemplateHookType = "webhook_notification"
 )
 
 func (s TemplateHookType) Valid() bool {
 	switch s {
-	case TemplateHookTypeAgentTask, TemplateHookTypeWebhookNotification:
+	case TemplateHookTypeAgentTask, TemplateHookTypeNotificationHook, TemplateHookTypeWebhookNotification:
 		return true
 	default:
 		return false

@@ -48,6 +48,8 @@ const detailItems = computed(() => {
   ]
 })
 
+const gitopsBranchMappings = computed(() => application.value?.gitops_branch_mappings ?? [])
+
 function formatTime(value: string) {
   if (!value) {
     return '-'
@@ -170,6 +172,22 @@ onMounted(() => {
         </a-descriptions-item>
       </a-descriptions>
     </a-card>
+
+    <a-card title="GitOps 分支环境映射" :bordered="true" class="detail-card" :loading="loading">
+      <div v-if="!gitopsBranchMappings.length" class="mapping-empty">
+        当前未配置映射，平台默认按 `app_key-env` 规则选分支。
+      </div>
+      <a-table
+        v-else
+        :data-source="gitopsBranchMappings"
+        :pagination="false"
+        row-key="env_code"
+        size="small"
+      >
+        <a-table-column title="环境" data-index="env_code" key="env_code" />
+        <a-table-column title="Git 分支" data-index="branch" key="branch" />
+      </a-table>
+    </a-card>
   </div>
 </template>
 
@@ -205,5 +223,9 @@ onMounted(() => {
 
 .detail-card {
   border-radius: var(--radius-xl);
+}
+
+.mapping-empty {
+  color: var(--text-color-secondary);
 }
 </style>

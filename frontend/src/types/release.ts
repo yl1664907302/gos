@@ -457,7 +457,7 @@ export interface ReleaseTemplateGitOpsRulePayload {
   value_template?: string;
 }
 
-export type ReleaseTemplateHookType = "agent_task" | "webhook_notification";
+export type ReleaseTemplateHookType = "agent_task" | "notification_hook" | "webhook_notification";
 export type ReleaseTemplateHookTriggerCondition = "on_success" | "on_failed" | "always";
 export type ReleaseTemplateHookFailurePolicy = "block_release" | "warn_only";
 

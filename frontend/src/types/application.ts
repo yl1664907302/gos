@@ -1,5 +1,10 @@
 export type ApplicationStatus = 'active' | 'inactive'
 
+export interface GitOpsBranchMapping {
+  env_code: string
+  branch: string
+}
+
 export interface Application {
   id: string
   name: string
@@ -11,6 +16,7 @@ export interface Application {
   status: ApplicationStatus
   artifact_type: string
   language: string
+  gitops_branch_mappings: GitOpsBranchMapping[]
   created_at: string
   updated_at: string
 }
@@ -24,6 +30,7 @@ export interface ApplicationPayload {
   status: ApplicationStatus
   artifact_type: string
   language: string
+  gitops_branch_mappings: GitOpsBranchMapping[]
 }
 
 export interface ApplicationListParams {

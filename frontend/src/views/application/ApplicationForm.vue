@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { DeleteOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 import { reactive, ref, watch } from 'vue'
-import type { ApplicationPayload } from '../../types/application'
+import type { ApplicationPayload, GitOpsBranchMapping } from '../../types/application'
 
 interface OwnerOption {
   label: string
@@ -17,6 +18,7 @@ interface ApplicationFormModel {
   status: ApplicationPayload['status']
   artifact_type: string
   language: string
+  gitops_branch_mappings: GitOpsBranchMapping[]
 }
 
 const props = withDefaults(
@@ -65,6 +67,7 @@ const model = reactive<ApplicationFormModel>({
   status: 'active',
   artifact_type: '',
   language: '',
+  gitops_branch_mappings: [],
 })
 
 const rules: Record<string, Rule[]> = {
@@ -87,6 +90,12 @@ watch(
     model.status = values.status ?? 'active'
     model.artifact_type = values.artifact_type ?? ''
     model.language = values.language ?? ''
+    model.gitops_branch_mappings = Array.isArray(values.gitops_branch_mappings)
+      ? values.gitops_branch_mappings.map((item) => ({
+          env_code: item.env_code ?? '',
+          branch: item.branch ?? '',
+        }))
+      : []
   },
   { immediate: true, deep: true },
 )
@@ -102,6 +111,17 @@ async function handleSubmit() {
 
 function handleCancel() {
   emit('cancel')
+}
+
+function addGitOpsBranchMapping() {
+  model.gitops_branch_mappings.push({
+    env_code: '',
+    branch: '',
+  })
+}
+
+function removeGitOpsBranchMapping(index: number) {
+  model.gitops_branch_mappings.splice(index, 1)
 }
 </script>
 
@@ -176,6 +196,40 @@ function handleCancel() {
       <a-textarea v-model:value="model.description" :rows="4" placeholder="请输入应用描述" />
     </a-form-item>
 
+    <a-form-item label="GitOps 分支环境映射">
+      <div class="mapping-panel">
+        <div class="mapping-header">
+          <div class="mapping-copy">
+            <div class="mapping-title">按应用配置 GitOps 分支映射</div>
+            <div class="mapping-help">
+              未配置映射时，平台默认使用 <code>app_key-env</code>，例如
+              <code>java-nantong-test-prod</code>
+            </div>
+          </div>
+          <a-button type="dashed" @click="addGitOpsBranchMapping">
+            <template #icon>
+              <PlusOutlined />
+            </template>
+            新增映射
+          </a-button>
+        </div>
+        <div v-if="!model.gitops_branch_mappings.length" class="mapping-empty">
+          当前未配置映射，将按默认规则使用 `app_key-env` 分支。
+        </div>
+        <div v-else class="mapping-list">
+          <div v-for="(item, index) in model.gitops_branch_mappings" :key="index" class="mapping-row">
+            <a-input v-model:value="item.env_code" placeholder="环境，例如：prod" />
+            <a-input v-model:value="item.branch" placeholder="分支，例如：java-nantong-test-prod" />
+            <a-button danger type="text" @click="removeGitOpsBranchMapping(index)">
+              <template #icon>
+                <DeleteOutlined />
+              </template>
+            </a-button>
+          </div>
+        </div>
+      </div>
+    </a-form-item>
+
     <a-space class="action-area">
       <a-button type="primary" :loading="loading" @click="handleSubmit">{{ submitText }}</a-button>
       <a-button @click="handleCancel">取消</a-button>
@@ -196,6 +250,63 @@ function handleCancel() {
   justify-content: flex-end;
 }
 
+.mapping-help code,
+.mapping-empty code {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #22304d;
+  font-size: 12px;
+}
+
+.mapping-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: #fafbfc;
+}
+
+.mapping-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.mapping-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mapping-title {
+  font-weight: 600;
+  color: var(--heading-color);
+}
+
+.mapping-help,
+.mapping-empty {
+  color: var(--text-color-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.mapping-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
 @media (max-width: 1024px) {
   .application-form {
     padding: 20px;
@@ -205,6 +316,14 @@ function handleCancel() {
 @media (max-width: 768px) {
   .application-form {
     padding: 16px;
+  }
+
+  .mapping-header {
+    flex-direction: column;
+  }
+
+  .mapping-row {
+    grid-template-columns: 1fr;
   }
 }
 </style>

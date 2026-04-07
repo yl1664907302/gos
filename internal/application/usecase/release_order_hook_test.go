@@ -4,10 +4,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	notificationdomain "gos/internal/domain/notification"
 	domain "gos/internal/domain/release"
 )
 
@@ -144,5 +146,33 @@ func TestSendTemplateWebhookTimeout(t *testing.T) {
 	}
 	if elapsed := time.Since(startedAt); elapsed >= 180*time.Millisecond {
 		t.Fatalf("sendTemplateWebhook elapsed = %s, want timeout before server responds", elapsed)
+	}
+}
+
+func TestBuildNotificationHookRequestAddsDingTalkSignature(t *testing.T) {
+	t.Parallel()
+
+	req, err := buildNotificationHookRequest(context.Background(), notificationdomain.Source{
+		SourceType:        notificationdomain.SourceTypeDingTalk,
+		WebhookURL:        "https://oapi.dingtalk.com/robot/send?access_token=test-token",
+		VerificationParam: "ding-secret",
+	}, "title", "body")
+	if err != nil {
+		t.Fatalf("buildNotificationHookRequest failed: %v", err)
+	}
+
+	parsedURL, err := url.Parse(req.URL.String())
+	if err != nil {
+		t.Fatalf("url.Parse failed: %v", err)
+	}
+	query := parsedURL.Query()
+	if query.Get("access_token") != "test-token" {
+		t.Fatalf("access_token = %q, want %q", query.Get("access_token"), "test-token")
+	}
+	if query.Get("timestamp") == "" {
+		t.Fatal("timestamp = empty, want signed timestamp")
+	}
+	if query.Get("sign") == "" {
+		t.Fatal("sign = empty, want signed signature")
 	}
 }

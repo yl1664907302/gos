@@ -252,6 +252,7 @@ func (r *UserRepository) ensureBuiltinPermissions(ctx context.Context, now time.
 		{ID: "perm-release-cancel", Code: "release.cancel", Name: "取消发布单", Module: "release", Action: "cancel", Description: "取消发布操作"},
 		{ID: "perm-system-user-manage", Code: "system.user.manage", Name: "管理用户", Module: "system", Action: "user_manage", Description: "用户管理"},
 		{ID: "perm-system-permission-manage", Code: "system.permission.manage", Name: "管理权限", Module: "system", Action: "permission_manage", Description: "授权管理"},
+		{ID: "perm-system-notification-manage", Code: "system.notification.manage", Name: "管理通知", Module: "system", Action: "notification_manage", Description: "通知源、Markdown 模板与通知 Hook 管理"},
 	}
 
 	const upsert = `

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	argocddomain "gos/internal/domain/argocdapp"
+	pipelinedomain "gos/internal/domain/pipeline"
 	domain "gos/internal/domain/release"
 )
 
@@ -137,6 +138,14 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 
 	pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
 	if pendingExecution != nil {
+		if referenceItem, ok, err := uc.buildExecutionReferencePrecheckItem(ctx, *pendingExecution); err != nil {
+			return ReleaseOrderPrecheckOutput{}, err
+		} else if ok {
+			if referenceItem.Status == ReleaseOrderPrecheckItemStatusBlocked {
+				output.Executable = false
+			}
+			output.Items = append(output.Items, referenceItem)
+		}
 		guard, err := uc.evaluateDispatchGuard(ctx, order, *pendingExecution, params)
 		if err != nil {
 			return ReleaseOrderPrecheckOutput{}, err
@@ -190,6 +199,57 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 	}
 
 	return output, nil
+}
+
+func (uc *ReleaseOrderManager) buildExecutionReferencePrecheckItem(
+	ctx context.Context,
+	execution domain.ReleaseOrderExecution,
+) (ReleaseOrderPrecheckItem, bool, error) {
+	if strings.TrimSpace(execution.BindingID) == "" {
+		return ReleaseOrderPrecheckItem{}, false, nil
+	}
+	item := ReleaseOrderPrecheckItem{
+		Key:     "execution_reference",
+		Name:    "模板绑定",
+		Status:  ReleaseOrderPrecheckItemStatusPass,
+		Message: "模板绑定引用正常",
+	}
+
+	binding, err := uc.pipelineRepo.GetBindingByID(ctx, execution.BindingID)
+	if err == nil {
+		if binding.Status == pipelinedomain.StatusInactive {
+			if strings.TrimSpace(execution.PipelineID) != "" {
+				item.Status = ReleaseOrderPrecheckItemStatusWarn
+				item.Message = fmt.Sprintf("模板引用的绑定 %s 已失效，将回退到快照管线 %s 继续执行，建议尽快更新模板绑定", firstNonEmpty(binding.Name, execution.BindingName, execution.BindingID), execution.PipelineID)
+			} else {
+				item.Status = ReleaseOrderPrecheckItemStatusBlocked
+				item.Message = fmt.Sprintf("模板引用的绑定 %s 已失效，且未保存可回退的管线 ID，请先更新模板绑定", firstNonEmpty(binding.Name, execution.BindingName, execution.BindingID))
+			}
+		}
+		return item, true, nil
+	}
+	if !errors.Is(err, pipelinedomain.ErrBindingNotFound) {
+		return ReleaseOrderPrecheckItem{}, false, err
+	}
+	if strings.TrimSpace(execution.PipelineID) != "" {
+		pipeline, pipelineErr := uc.pipelineRepo.GetPipelineByID(ctx, execution.PipelineID)
+		if pipelineErr == nil {
+			if activeErr := ensureActivePipelineRecord(pipeline, "快照管线"); activeErr == nil {
+				item.Status = ReleaseOrderPrecheckItemStatusWarn
+				item.Message = fmt.Sprintf("模板引用的绑定 %s 已失效，将回退到快照管线 %s 继续执行，建议尽快更新模板绑定", firstNonEmpty(execution.BindingName, execution.BindingID), execution.PipelineID)
+				return item, true, nil
+			}
+			item.Status = ReleaseOrderPrecheckItemStatusBlocked
+			item.Message = fmt.Sprintf("模板引用的绑定 %s 已失效，且快照管线 %s 不可用，请先更新模板绑定", firstNonEmpty(execution.BindingName, execution.BindingID), execution.PipelineID)
+			return item, true, nil
+		}
+		if !errors.Is(pipelineErr, pipelinedomain.ErrPipelineNotFound) {
+			return ReleaseOrderPrecheckItem{}, false, pipelineErr
+		}
+	}
+	item.Status = ReleaseOrderPrecheckItemStatusBlocked
+	item.Message = fmt.Sprintf("模板引用的绑定 %s 已失效，且未找到可回退的快照管线，请先更新模板绑定", firstNonEmpty(execution.BindingName, execution.BindingID))
+	return item, true, nil
 }
 
 func (uc *ReleaseOrderManager) evaluateDispatchGuard(

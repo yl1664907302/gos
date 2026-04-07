@@ -3,6 +3,7 @@ package sqlrepo
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	status VARCHAR(32) NOT NULL,
 	artifact_type VARCHAR(64) NOT NULL,
 	language VARCHAR(64) NOT NULL,
+	gitops_branch_mappings JSON NULL,
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
 	UNIQUE KEY uq_application_key (app_key)
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	status TEXT NOT NULL,
 	artifact_type TEXT NOT NULL,
 	language TEXT NOT NULL,
+	gitops_branch_mappings TEXT NOT NULL DEFAULT '[]',
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );`
@@ -75,12 +78,24 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN owner_user_id VARCHAR(64) NOT NULL DEFAULT '' AFTER description;`,
+			); err != nil {
+				return err
+			}
+		}
+		exists, err = r.mysqlColumnExists(ctx, "applications", "gitops_branch_mappings")
+		if err != nil {
+			return err
+		}
 		if exists {
 			return nil
 		}
 		_, err = r.db.ExecContext(
 			ctx,
-			`ALTER TABLE applications ADD COLUMN owner_user_id VARCHAR(64) NOT NULL DEFAULT '' AFTER description;`,
+			`ALTER TABLE applications ADD COLUMN gitops_branch_mappings JSON NULL AFTER language;`,
 		)
 		return err
 	case "sqlite":
@@ -88,12 +103,20 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, ok := columns["owner_user_id"]; ok {
+		if _, ok := columns["owner_user_id"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["gitops_branch_mappings"]; ok {
 			return nil
 		}
 		_, err = r.db.ExecContext(
 			ctx,
-			`ALTER TABLE applications ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT '';`,
+			`ALTER TABLE applications ADD COLUMN gitops_branch_mappings TEXT NOT NULL DEFAULT '[]';`,
 		)
 		return err
 	default:
@@ -104,10 +127,15 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 func (r *ApplicationRepository) Create(ctx context.Context, app domain.Application) error {
 	const q = `
 INSERT INTO applications (
-	id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
-	_, err := r.db.ExecContext(
+	mappingsJSON, err := marshalGitOpsBranchMappings(app.GitOpsBranchMappings)
+	if err != nil {
+		return err
+	}
+
+	_, err = r.db.ExecContext(
 		ctx,
 		q,
 		app.ID,
@@ -120,6 +148,7 @@ INSERT INTO applications (
 		string(app.Status),
 		app.ArtifactType,
 		app.Language(),
+		mappingsJSON,
 		app.CreatedAt.UTC().UnixNano(),
 		app.UpdatedAt.UTC().UnixNano(),
 	)
@@ -134,7 +163,7 @@ INSERT INTO applications (
 
 func (r *ApplicationRepository) GetByID(ctx context.Context, id string) (domain.Application, error) {
 	const q = `
-SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
+SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
 FROM applications
 WHERE id = ?;`
 
@@ -187,7 +216,7 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 	}
 
 	builder.WriteString(`
-SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, created_at, updated_at
+SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
 FROM applications`)
 	if len(where) > 0 {
 		builder.WriteString(" WHERE ")
@@ -221,8 +250,13 @@ FROM applications`)
 func (r *ApplicationRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.Application, error) {
 	const q = `
 UPDATE applications
-SET name = ?, app_key = ?, repo_url = ?, description = ?, owner_user_id = ?, owner = ?, status = ?, artifact_type = ?, language = ?, updated_at = ?
+SET name = ?, app_key = ?, repo_url = ?, description = ?, owner_user_id = ?, owner = ?, status = ?, artifact_type = ?, language = ?, gitops_branch_mappings = ?, updated_at = ?
 WHERE id = ?;`
+
+	mappingsJSON, err := marshalGitOpsBranchMappings(input.GitOpsBranchMappings)
+	if err != nil {
+		return domain.Application{}, err
+	}
 
 	res, err := r.db.ExecContext(
 		ctx,
@@ -236,6 +270,7 @@ WHERE id = ?;`
 		string(input.Status),
 		input.ArtifactType,
 		input.Language,
+		mappingsJSON,
 		updatedAt.UTC().UnixNano(),
 		id,
 	)
@@ -280,11 +315,12 @@ type scanner interface {
 
 func scanApplication(s scanner) (domain.Application, error) {
 	var (
-		app       domain.Application
-		statusRaw string
-		langRaw   string
-		createdAt int64
-		updatedAt int64
+		app         domain.Application
+		statusRaw   string
+		langRaw     string
+		mappingsRaw sql.NullString
+		createdAt   int64
+		updatedAt   int64
 	)
 
 	if err := s.Scan(
@@ -298,6 +334,7 @@ func scanApplication(s scanner) (domain.Application, error) {
 		&statusRaw,
 		&app.ArtifactType,
 		&langRaw,
+		&mappingsRaw,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -306,9 +343,54 @@ func scanApplication(s scanner) (domain.Application, error) {
 
 	app.Status = domain.Status(statusRaw)
 	app.SetLanguage(langRaw)
+	app.GitOpsBranchMappings = unmarshalGitOpsBranchMappings(mappingsRaw.String)
 	app.CreatedAt = time.Unix(0, createdAt).UTC()
 	app.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return app, nil
+}
+
+func marshalGitOpsBranchMappings(values []domain.GitOpsBranchMapping) (string, error) {
+	if len(values) == 0 {
+		return "[]", nil
+	}
+	payload, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func unmarshalGitOpsBranchMappings(raw string) []domain.GitOpsBranchMapping {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	items := make([]domain.GitOpsBranchMapping, 0)
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil
+	}
+	result := make([]domain.GitOpsBranchMapping, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		envCode := strings.TrimSpace(item.EnvCode)
+		branch := strings.TrimSpace(item.Branch)
+		if envCode == "" || branch == "" {
+			continue
+		}
+		key := strings.ToLower(envCode)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, domain.GitOpsBranchMapping{
+			EnvCode: envCode,
+			Branch:  branch,
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (r *ApplicationRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {

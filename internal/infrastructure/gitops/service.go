@@ -1334,6 +1334,7 @@ func scanValuesCandidates(path string, appKey string) ([]gitopsdomain.ValuesCand
 		filePathTemplate = "apps/" + filePathTemplate[idx+len("apps/"):]
 	}
 	filePathTemplate = normalizeValuesFilePathTemplate(filePathTemplate)
+	filePathTemplate = normalizeHoistedHelmValuesFilePathTemplate(filePathTemplate)
 
 	result := make([]gitopsdomain.ValuesCandidate, 0)
 	collectValuesScalarCandidates(node, nil, filePathTemplate, &result)
@@ -1360,6 +1361,29 @@ func normalizeValuesFilePathTemplate(value string) string {
 		{".prod.", ".{env}."},
 	} {
 		value = strings.ReplaceAll(value, item.old, item.new)
+	}
+	return value
+}
+
+func normalizeHoistedHelmValuesFilePathTemplate(value string) string {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	const prefix = "apps/"
+	if !strings.HasPrefix(value, prefix) {
+		return value
+	}
+	rest := strings.TrimPrefix(value, prefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) < 3 {
+		return value
+	}
+	if strings.EqualFold(parts[0], "helm") {
+		return value
+	}
+	if strings.EqualFold(parts[1], "helm") {
+		return filepath.ToSlash(filepath.Join("apps", "helm", filepath.Join(parts[2:]...)))
 	}
 	return value
 }

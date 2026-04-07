@@ -26,6 +26,9 @@ const activeMenuKey = computed(() => {
   if (route.path.startsWith('/system/settings')) {
     return ['system-settings']
   }
+  if (route.path.startsWith('/system/notifications')) {
+    return ['system-notifications']
+  }
   if (route.path.includes('/pipeline-bindings')) {
     return ['pipeline-bindings']
   }
@@ -136,6 +139,7 @@ const canViewAgent = computed(
 const canManageReleaseTemplate = computed(() => authStore.hasPermission('release.template.manage'))
 const canManageUser = computed(() => authStore.hasPermission('system.user.manage'))
 const canManagePermission = computed(() => authStore.hasPermission('system.permission.manage'))
+const canManageNotification = computed(() => authStore.hasPermission('system.notification.manage'))
 
 const showApplicationMenu = computed(() => true)
 const showComponentMenu = computed(
@@ -147,7 +151,7 @@ const showComponentMenu = computed(
     canViewAgent.value,
 )
 const showReleaseMenu = computed(() => true)
-const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value)
+const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value || canManageNotification.value)
 
 function goToApplications() {
   void router.push('/applications')
@@ -218,6 +222,10 @@ function goToSystemUsers() {
 
 function goToSystemPermissions() {
   void router.push('/system/permissions')
+}
+
+function goToSystemNotifications() {
+  void router.push('/system/notifications')
 }
 
 function goToSystemSettings() {
@@ -329,6 +337,9 @@ async function handleLogout() {
           </a-menu-item>
           <a-menu-item v-if="canManagePermission" key="system-permissions" @click="goToSystemPermissions">
             权限授权
+          </a-menu-item>
+          <a-menu-item v-if="canManageNotification" key="system-notifications" @click="goToSystemNotifications">
+            通知模块
           </a-menu-item>
           <a-menu-item v-if="canManagePermission" key="system-settings" @click="goToSystemSettings">
             系统设置

@@ -24,13 +24,14 @@ type ListFilter struct {
 }
 
 type UpdateInput struct {
-	Name         string
-	Key          string
-	RepoURL      string
-	Description  string
-	OwnerUserID  string
-	Owner        string
-	Status       Status
-	ArtifactType string
-	Language     string
+	Name                 string
+	Key                  string
+	RepoURL              string
+	Description          string
+	OwnerUserID          string
+	Owner                string
+	Status               Status
+	ArtifactType         string
+	Language             string
+	GitOpsBranchMappings []GitOpsBranchMapping
 }

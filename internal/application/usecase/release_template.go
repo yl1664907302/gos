@@ -14,6 +14,7 @@ import (
 	argocddomain "gos/internal/domain/argocdapp"
 	pipelineparamdomain "gos/internal/domain/executorparam"
 	gitopsdomain "gos/internal/domain/gitops"
+	notificationdomain "gos/internal/domain/notification"
 	pipelinedomain "gos/internal/domain/pipeline"
 	platformparamdomain "gos/internal/domain/platformparam"
 	releasedomain "gos/internal/domain/release"
@@ -39,6 +40,7 @@ type ReleaseTemplateManager struct {
 	platformRepo platformparamdomain.Repository
 	argocdRepo   argocddomain.Repository
 	agentRepo    agentdomain.Repository
+	notificationRepo notificationdomain.Repository
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader
 	now          func() time.Time
 }
@@ -148,17 +150,19 @@ func NewReleaseTemplateManager(
 	platformRepo platformparamdomain.Repository,
 	argocdRepo argocddomain.Repository,
 	agentRepo agentdomain.Repository,
+	notificationRepo notificationdomain.Repository,
 	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader,
 ) *ReleaseTemplateManager {
 	return &ReleaseTemplateManager{
-		repo:         repo,
-		appRepo:      appRepo,
-		pipelineRepo: pipelineRepo,
-		paramRepo:    paramRepo,
-		platformRepo: platformRepo,
-		argocdRepo:   argocdRepo,
-		agentRepo:    agentRepo,
-		gitopsReader: gitopsReader,
+		repo:             repo,
+		appRepo:          appRepo,
+		pipelineRepo:     pipelineRepo,
+		paramRepo:        paramRepo,
+		platformRepo:     platformRepo,
+		argocdRepo:       argocdRepo,
+		agentRepo:        agentRepo,
+		notificationRepo: notificationRepo,
+		gitopsReader:     gitopsReader,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -898,6 +902,8 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			switch hookType {
 			case releasedomain.TemplateHookTypeAgentTask:
 				name = "发布后 Agent 任务"
+			case releasedomain.TemplateHookTypeNotificationHook:
+				name = "发布后通知 Hook"
 			case releasedomain.TemplateHookTypeWebhookNotification:
 				name = "发布后 Webhook 通知"
 			}
@@ -949,6 +955,20 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			}
 			item.TargetID = task.ID
 			item.TargetName = firstNonEmpty(strings.TrimSpace(task.Name), task.ID)
+		case releasedomain.TemplateHookTypeNotificationHook:
+			hookID := strings.TrimSpace(input.TargetID)
+			if hookID == "" {
+				return nil, fmt.Errorf("%w: notification hook requires target hook", ErrInvalidInput)
+			}
+			if uc.notificationRepo == nil {
+				return nil, fmt.Errorf("%w: notification repository is not configured", ErrInvalidInput)
+			}
+			notificationHook, err := uc.notificationRepo.GetHookByID(ctx, hookID)
+			if err != nil {
+				return nil, err
+			}
+			item.TargetID = notificationHook.ID
+			item.TargetName = firstNonEmpty(strings.TrimSpace(notificationHook.Name), notificationHook.ID)
 		case releasedomain.TemplateHookTypeWebhookNotification:
 			webhookURL := strings.TrimSpace(input.WebhookURL)
 			if webhookURL == "" {
@@ -1140,6 +1160,7 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 				filePathTemplate = firstNonEmpty(filepathSlash(selection.FilePathTemplate), filePathTemplate)
 				targetPath = strings.TrimSpace(selection.TargetPath)
 			}
+			filePathTemplate = normalizeHelmValuesFilePathTemplate(filePathTemplate)
 		}
 		if filePathTemplate == "" || targetPath == "" {
 			switch gitopsType {
@@ -1359,6 +1380,24 @@ func replaceLocatorToken(value string, token string, placeholder string) string 
 
 func filepathSlash(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
+}
+
+func normalizeHelmValuesFilePathTemplate(value string) string {
+	value = filepathSlash(value)
+	if value == "" || !strings.HasPrefix(value, "apps/") {
+		return value
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "apps/"), "/")
+	if len(parts) < 3 {
+		return value
+	}
+	if strings.EqualFold(parts[0], "helm") {
+		return value
+	}
+	if strings.EqualFold(parts[1], "helm") {
+		return filepathSlash(filepath.Join("apps", "helm", filepath.Join(parts[2:]...)))
+	}
+	return value
 }
 
 func summarizeTemplateBindings(bindings []releasedomain.ReleaseTemplateBinding) (string, string) {

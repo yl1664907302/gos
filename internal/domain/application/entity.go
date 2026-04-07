@@ -4,6 +4,11 @@ import (
 	"time"
 )
 
+type GitOpsBranchMapping struct {
+	EnvCode string `json:"env_code"`
+	Branch  string `json:"branch"`
+}
+
 type Status string
 
 const (
@@ -21,18 +26,19 @@ func (s Status) Valid() bool {
 }
 
 type Application struct {
-	ID           string
-	Name         string
-	Key          string
-	RepoURL      string
-	Description  string
-	OwnerUserID  string
-	Owner        string
-	Status       Status
-	ArtifactType string
-	language     string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                   string
+	Name                 string
+	Key                  string
+	RepoURL              string
+	Description          string
+	OwnerUserID          string
+	Owner                string
+	Status               Status
+	ArtifactType         string
+	GitOpsBranchMappings []GitOpsBranchMapping
+	language             string
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 func (a Application) Language() string {

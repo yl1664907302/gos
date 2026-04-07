@@ -68,3 +68,19 @@ func TestBuildCommitMessageSupportsDynamicPlatformKeys(t *testing.T) {
 		t.Fatalf("unexpected dynamic commit message: got %q want %q", got, want)
 	}
 }
+
+func TestNormalizeHoistedHelmValuesFilePathTemplate(t *testing.T) {
+	got := normalizeHoistedHelmValuesFilePathTemplate("apps/java-nantong-test/helm/platform.values-{env}.yaml")
+	want := "apps/helm/platform.values-{env}.yaml"
+	if got != want {
+		t.Fatalf("unexpected hoisted helm values path: got %q want %q", got, want)
+	}
+}
+
+func TestNormalizeHoistedHelmValuesFilePathTemplateKeepsSharedPath(t *testing.T) {
+	got := normalizeHoistedHelmValuesFilePathTemplate("apps/helm/platform.values-{env}.yaml")
+	want := "apps/helm/platform.values-{env}.yaml"
+	if got != want {
+		t.Fatalf("unexpected shared helm values path: got %q want %q", got, want)
+	}
+}

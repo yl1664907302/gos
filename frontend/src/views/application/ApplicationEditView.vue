@@ -60,6 +60,7 @@ async function loadDetail() {
       status: app.status,
       artifact_type: app.artifact_type,
       language: app.language,
+      gitops_branch_mappings: app.gitops_branch_mappings || [],
     }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '加载应用失败'))

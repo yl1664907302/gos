@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
 
+	appdomain "gos/internal/domain/application"
 	argocddomain "gos/internal/domain/argocdapp"
 	gitopsdomain "gos/internal/domain/gitops"
 	pipelinedomain "gos/internal/domain/pipeline"
@@ -1083,6 +1085,9 @@ func buildArgoCDSourcePathCandidates(ref string, environment string, gitopsType 
 		if strings.HasSuffix(ref, "/helm") {
 			candidates = append(candidates, ref)
 		} else {
+			if parent := normalizeArgoCDSourcePath(path.Dir(ref)); parent != "." && parent != "" {
+				candidates = append(candidates, normalizeArgoCDSourcePath(parent+"/helm"))
+			}
 			candidates = append(candidates, normalizeArgoCDSourcePath(ref+"/helm"))
 		}
 	default:
@@ -1121,14 +1126,14 @@ func normalizeArgoCDSourcePath(value string) string {
 }
 
 func (uc *ReleaseOrderManager) resolveGitOpsTargetBranch(
-	_ context.Context,
+	ctx context.Context,
 	order domain.ReleaseOrder,
 	orderParams []domain.ReleaseOrderParam,
 	argocdInstance argocddomain.Instance,
 	app ArgoCDApplicationSnapshot,
 ) string {
 	environment := uc.resolveArgoCDEnvironment(order, orderParams)
-	return uc.resolveGitOpsBranchByEnv(environment, argocdInstance, strings.TrimSpace(app.GetTargetRevision()))
+	return uc.resolveGitOpsBranchByApplication(ctx, order.ApplicationID, environment, argocdInstance, strings.TrimSpace(app.GetTargetRevision()))
 }
 
 func (uc *ReleaseOrderManager) resolveGitOpsBranchByEnv(
@@ -1145,4 +1150,41 @@ func (uc *ReleaseOrderManager) resolveGitOpsBranchByEnv(
 		return revision
 	}
 	return firstNonEmpty(revision, "master")
+}
+
+func (uc *ReleaseOrderManager) resolveGitOpsBranchByApplication(
+	ctx context.Context,
+	applicationID string,
+	environment string,
+	argocdInstance argocddomain.Instance,
+	fallback string,
+) string {
+	environment = strings.TrimSpace(environment)
+	if uc != nil && uc.appRepo != nil && strings.TrimSpace(applicationID) != "" {
+		if app, err := uc.appRepo.GetByID(ctx, strings.TrimSpace(applicationID)); err == nil {
+			if branch := resolveGitOpsBranchFromMappings(app.GitOpsBranchMappings, environment); branch != "" {
+				return branch
+			}
+			if appKey := strings.TrimSpace(app.Key); appKey != "" && environment != "" {
+				return fmt.Sprintf("%s-%s", appKey, environment)
+			}
+		}
+	}
+	return uc.resolveGitOpsBranchByEnv(environment, argocdInstance, fallback)
+}
+
+func resolveGitOpsBranchFromMappings(items []appdomain.GitOpsBranchMapping, environment string) string {
+	envCode := strings.ToLower(strings.TrimSpace(environment))
+	if envCode == "" {
+		return ""
+	}
+	for _, item := range items {
+		if strings.ToLower(strings.TrimSpace(item.EnvCode)) != envCode {
+			continue
+		}
+		if branch := strings.TrimSpace(item.Branch); branch != "" {
+			return branch
+		}
+	}
+	return ""
 }

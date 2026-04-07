@@ -561,10 +561,12 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
     ];
   }
 
-  const submitTone: ApprovalFlowNode["tone"] =
-    status === "pending_approval" ? "active" : ["approving", "approved", "queued", "deploying", "deploy_success", "deploy_failed", "rejected", "cancelled"].includes(status) ? "done" : "pending";
   const reviewTone: ApprovalFlowNode["tone"] =
-    status === "approving" ? "active" : ["approved", "queued", "deploying", "deploy_success", "deploy_failed", "rejected", "cancelled"].includes(status) ? "done" : "pending";
+    ["pending_approval", "approving"].includes(status)
+      ? "active"
+      : ["approved", "queued", "deploying", "deploy_success", "deploy_failed", "rejected", "cancelled"].includes(status)
+        ? "done"
+        : "pending";
   const resultTone: ApprovalFlowNode["tone"] =
     status === "rejected" ? "rejected" : ["approved", "queued", "deploying", "deploy_success", "deploy_failed", "cancelled"].includes(status) ? "done" : "pending";
   const executeTone: ApprovalFlowNode["tone"] =
@@ -582,15 +584,14 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
       tone: "done",
     },
     {
-      key: "submit",
-      title: "提交审批",
-      caption: `审批方式：${record.approval_mode === "all" ? "会签" : "或签"}`,
-      tone: submitTone,
-    },
-    {
       key: "review",
       title: "审批处理",
-      caption: `审批人：${approverNames}`,
+      caption:
+        status === "pending_approval"
+          ? `等待审批人处理 · ${record.approval_mode === "all" ? "会签" : "或签"} · 审批人：${approverNames}`
+          : status === "approving"
+            ? `审批进行中 · ${record.approval_mode === "all" ? "会签" : "或签"} · 审批人：${approverNames}`
+            : `审批人：${approverNames}`,
       tone: reviewTone,
     },
     {

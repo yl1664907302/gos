@@ -22,10 +22,12 @@ import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
 import ReleaseOrderDetailView from '../views/release/ReleaseOrderDetailView.vue'
 import ReleaseOrderListView from '../views/release/ReleaseOrderListView.vue'
 import ReleaseApprovalWorkbenchView from '../views/release/ReleaseApprovalWorkbenchView.vue'
-import ReleaseTemplateView from '../views/release/ReleaseTemplateView.vue'
+import SystemNotificationView from '../views/system/SystemNotificationView.vue'
 import SystemPermissionView from '../views/system/SystemPermissionView.vue'
 import SystemSettingsView from '../views/system/SystemSettingsView.vue'
 import SystemUserView from '../views/system/SystemUserView.vue'
+
+const ReleaseTemplateView = () => import('../views/release/ReleaseTemplateView.vue')
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -205,6 +207,12 @@ export const router = createRouter({
           name: 'system-permissions',
           component: SystemPermissionView,
           meta: { title: '权限授权', permission: 'system.permission.manage' },
+        },
+        {
+          path: '/system/notifications',
+          name: 'system-notifications',
+          component: SystemNotificationView,
+          meta: { title: '通知模块', permission: 'system.notification.manage' },
         },
         {
           path: '/system/settings',

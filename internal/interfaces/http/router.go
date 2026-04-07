@@ -22,6 +22,7 @@ func NewRouter(
 	argocdHandler *ArgoCDHandler,
 	gitopsHandler *GitOpsHandler,
 	platformParamHandler *PlatformParamHandler,
+	notificationHandler *NotificationHandler,
 	executorParamHandler *ExecutorParamHandler,
 	releaseOrderHandler *ReleaseOrderHandler,
 	releaseTemplateHandler *ReleaseTemplateHandler,
@@ -42,6 +43,7 @@ func NewRouter(
 	registerArgoCDRoutes(router, argocdHandler)
 	registerGitOpsRoutes(router, gitopsHandler)
 	registerPlatformParamRoutes(router, platformParamHandler)
+	registerNotificationRoutes(router, notificationHandler)
 	registerExecutorParamRoutes(router, executorParamHandler)
 	registerReleaseOrderRoutes(router, releaseOrderHandler)
 	registerReleaseTemplateRoutes(router, releaseTemplateHandler)
@@ -105,6 +107,13 @@ func registerGitOpsRoutes(router gin.IRouter, gitopsHandler *GitOpsHandler) {
 
 func registerPlatformParamRoutes(router gin.IRouter, platformParamHandler *PlatformParamHandler) {
 	platformParamHandler.RegisterRoutes(router)
+}
+
+func registerNotificationRoutes(router gin.IRouter, notificationHandler *NotificationHandler) {
+	if notificationHandler == nil {
+		return
+	}
+	notificationHandler.RegisterRoutes(router)
 }
 
 func registerExecutorParamRoutes(router gin.IRouter, executorParamHandler *ExecutorParamHandler) {

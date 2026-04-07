@@ -44,17 +44,18 @@ func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (do
 
 	now := uc.now()
 	app := domain.Application{
-		ID:           generateID("app"),
-		Name:         strings.TrimSpace(input.Name),
-		Key:          strings.TrimSpace(input.Key),
-		RepoURL:      strings.TrimSpace(input.RepoURL),
-		Description:  strings.TrimSpace(input.Description),
-		OwnerUserID:  strings.TrimSpace(input.OwnerUserID),
-		Owner:        strings.TrimSpace(input.Owner),
-		Status:       status,
-		ArtifactType: strings.TrimSpace(input.ArtifactType),
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                   generateID("app"),
+		Name:                 strings.TrimSpace(input.Name),
+		Key:                  strings.TrimSpace(input.Key),
+		RepoURL:              strings.TrimSpace(input.RepoURL),
+		Description:          strings.TrimSpace(input.Description),
+		OwnerUserID:          strings.TrimSpace(input.OwnerUserID),
+		Owner:                strings.TrimSpace(input.Owner),
+		Status:               status,
+		ArtifactType:         strings.TrimSpace(input.ArtifactType),
+		GitOpsBranchMappings: normalizeGitOpsBranchMappings(input.GitOpsBranchMappings),
+		CreatedAt:            now,
+		UpdatedAt:            now,
 	}
 	app.SetLanguage(strings.TrimSpace(input.Language))
 

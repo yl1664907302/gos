@@ -699,7 +699,7 @@ const hookProgressItems = computed(() => {
   );
 });
 
-type HookProgressType = "agent_task" | "webhook_notification" | "generic";
+type HookProgressType = "agent_task" | "notification_hook" | "webhook_notification" | "generic";
 
 function inferHookProgressType(item: ReleaseOrderStep): HookProgressType {
   const haystack = [
@@ -716,6 +716,9 @@ function inferHookProgressType(item: ReleaseOrderStep): HookProgressType {
   if (haystack.includes("webhook")) {
     return "webhook_notification";
   }
+  if (haystack.includes("notification_hook") || haystack.includes("通知 hook") || haystack.includes("通知hook") || haystack.includes("notification")) {
+    return "notification_hook";
+  }
   if (haystack.includes("agent")) {
     return "agent_task";
   }
@@ -726,6 +729,8 @@ function hookProgressTypeText(type: HookProgressType) {
   switch (type) {
     case "agent_task":
       return "Agent 任务";
+    case "notification_hook":
+      return "通知 Hook";
     case "webhook_notification":
       return "Webhook 通知";
     default:
