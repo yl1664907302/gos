@@ -32,6 +32,7 @@ type ReleaseOrderPrecheckOutput struct {
 	OrderNo          string                     `json:"order_no"`
 	Executable       bool                       `json:"executable"`
 	WaitingForLock   bool                       `json:"waiting_for_lock"`
+	AheadCount       int                        `json:"ahead_count"`
 	LockEnabled      bool                       `json:"lock_enabled"`
 	LockScope        string                     `json:"lock_scope"`
 	ConflictStrategy string                     `json:"conflict_strategy"`
@@ -48,6 +49,7 @@ type releaseDispatchGuard struct {
 	ConflictLock   *domain.ReleaseExecutionLock
 	ConflictOrder  *domain.ReleaseOrder
 	WaitingForLock bool
+	AheadCount     int
 	Message        string
 }
 
@@ -162,10 +164,11 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 			output.ConflictOrderNo = strings.TrimSpace(guard.ConflictOrder.OrderNo)
 			output.ConflictMessage = strings.TrimSpace(guard.Message)
 		}
+		output.AheadCount = guard.AheadCount
 		if guard.Settings.Enabled || guard.ConflictLock != nil || guard.ConflictOrder != nil {
 			itemName := "并发发布"
 			if !guard.Settings.Enabled && guard.ConflictOrder != nil {
-				itemName = "执行互斥"
+				itemName = "执行顺序"
 			}
 			item := ReleaseOrderPrecheckItem{
 				Key:     "concurrency_lock",
@@ -270,17 +273,15 @@ func (uc *ReleaseOrderManager) evaluateDispatchGuard(
 	}
 	if err == nil {
 		guard.ConflictOrder = &conflictOrder
-		if order.IsConcurrent &&
-			strings.TrimSpace(order.ConcurrentBatchNo) != "" &&
-			conflictOrder.IsConcurrent &&
-			strings.TrimSpace(conflictOrder.ConcurrentBatchNo) == strings.TrimSpace(order.ConcurrentBatchNo) &&
-			strings.TrimSpace(conflictOrder.ApplicationID) == strings.TrimSpace(order.ApplicationID) &&
-			strings.TrimSpace(conflictOrder.EnvCode) == strings.TrimSpace(order.EnvCode) {
-			guard.WaitingForLock = true
-			guard.Message = fmt.Sprintf("当前批次的同应用同环境发布单 %s 正在执行，已进入顺序等待队列", firstNonEmpty(conflictOrder.OrderNo, conflictOrder.ID))
-			return guard, nil
+		aheadCount, countErr := uc.repo.CountActiveOrdersByApplicationEnv(ctx, order.ApplicationID, order.EnvCode, order.ID)
+		if countErr != nil {
+			return releaseDispatchGuard{}, countErr
 		}
-		guard.Message = fmt.Sprintf("同应用同环境已有发布单 %s 正在执行，请稍后再试", firstNonEmpty(conflictOrder.OrderNo, conflictOrder.ID))
+		if aheadCount <= 0 {
+			aheadCount = 1
+		}
+		guard.AheadCount = aheadCount
+		guard.Message = fmt.Sprintf("当前应用在环境 %s 前面还有 %d 单，请等待先前执行单结束后再点击发布", firstNonEmpty(strings.TrimSpace(order.EnvCode), "-"), aheadCount)
 		return guard, nil
 	}
 

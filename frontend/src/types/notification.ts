@@ -12,7 +12,7 @@ export interface NotificationSource {
   name: string
   source_type: NotificationSourceType
   webhook_url: string
-  verification_param: string
+  has_verification_param: boolean
   enabled: boolean
   remark: string
   created_by: string

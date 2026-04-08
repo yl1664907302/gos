@@ -47,11 +47,10 @@ func (s ReleaseConcurrencyConflictStrategy) Valid() bool {
 }
 
 type ReleaseConcurrencySettingsOutput struct {
-	Enabled            bool                               `json:"enabled"`
-	LockScope          ReleaseConcurrencyLockScope        `json:"lock_scope"`
-	ConflictStrategy   ReleaseConcurrencyConflictStrategy `json:"conflict_strategy"`
-	LockTimeoutSec     int                                `json:"lock_timeout_sec"`
-	AllowAdminOverride bool                               `json:"allow_admin_override"`
+	Enabled          bool                               `json:"enabled"`
+	LockScope        ReleaseConcurrencyLockScope        `json:"lock_scope"`
+	ConflictStrategy ReleaseConcurrencyConflictStrategy `json:"conflict_strategy"`
+	LockTimeoutSec   int                                `json:"lock_timeout_sec"`
 }
 
 type ReleaseConcurrencySettingsInput = ReleaseConcurrencySettingsOutput
@@ -158,10 +157,9 @@ func normalizeConcurrencySettings(input ReleaseConcurrencySettingsInput) Release
 	}
 
 	return ReleaseConcurrencySettingsOutput{
-		Enabled:            input.Enabled,
-		LockScope:          scope,
-		ConflictStrategy:   strategy,
-		LockTimeoutSec:     timeout,
-		AllowAdminOverride: input.AllowAdminOverride,
+		Enabled:          input.Enabled,
+		LockScope:        scope,
+		ConflictStrategy: strategy,
+		LockTimeoutSec:   timeout,
 	}
 }

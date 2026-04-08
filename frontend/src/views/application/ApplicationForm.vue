@@ -2,9 +2,14 @@
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import type { FormInstance, Rule } from 'ant-design-vue/es/form'
 import { reactive, ref, watch } from 'vue'
-import type { ApplicationPayload, GitOpsBranchMapping } from '../../types/application'
+import type { ApplicationPayload, GitOpsBranchMapping, ReleaseBranchOption } from '../../types/application'
 
 interface OwnerOption {
+  label: string
+  value: string
+}
+
+interface ProjectOption {
   label: string
   value: string
 }
@@ -12,6 +17,7 @@ interface OwnerOption {
 interface ApplicationFormModel {
   name: string
   key: string
+  project_id: string
   repo_url: string
   description: string
   owner_user_id: string
@@ -19,20 +25,25 @@ interface ApplicationFormModel {
   artifact_type: string
   language: string
   gitops_branch_mappings: GitOpsBranchMapping[]
+  release_branches: ReleaseBranchOption[]
 }
 
 const props = withDefaults(
   defineProps<{
     initialValues?: Partial<ApplicationPayload>
     ownerOptions?: OwnerOption[]
+    projectOptions?: ProjectOption[]
     ownerLoading?: boolean
+    projectLoading?: boolean
     loading?: boolean
     submitText?: string
   }>(),
   {
     initialValues: () => ({}),
     ownerOptions: () => [],
+    projectOptions: () => [],
     ownerLoading: false,
+    projectLoading: false,
     loading: false,
     submitText: '保存',
   },
@@ -61,6 +72,7 @@ const languageOptions = [
 const model = reactive<ApplicationFormModel>({
   name: '',
   key: '',
+  project_id: '',
   repo_url: '',
   description: '',
   owner_user_id: '',
@@ -68,11 +80,13 @@ const model = reactive<ApplicationFormModel>({
   artifact_type: '',
   language: '',
   gitops_branch_mappings: [],
+  release_branches: [],
 })
 
 const rules: Record<string, Rule[]> = {
   name: [{ required: true, message: '请输入应用名称', trigger: 'blur' }],
   key: [{ required: true, message: '请输入应用 Key', trigger: 'blur' }],
+  project_id: [{ required: true, message: '请选择归属项目', trigger: 'change' }],
   owner_user_id: [{ required: true, message: '请选择负责人', trigger: 'change' }],
   status: [{ required: true, message: '请选择状态', trigger: 'change' }],
   artifact_type: [{ required: true, message: '请选择制品类型', trigger: 'change' }],
@@ -84,6 +98,7 @@ watch(
   (values) => {
     model.name = values.name ?? ''
     model.key = values.key ?? ''
+    model.project_id = values.project_id ?? ''
     model.repo_url = values.repo_url ?? ''
     model.description = values.description ?? ''
     model.owner_user_id = values.owner_user_id ?? ''
@@ -93,6 +108,12 @@ watch(
     model.gitops_branch_mappings = Array.isArray(values.gitops_branch_mappings)
       ? values.gitops_branch_mappings.map((item) => ({
           env_code: item.env_code ?? '',
+          branch: item.branch ?? '',
+        }))
+      : []
+    model.release_branches = Array.isArray(values.release_branches)
+      ? values.release_branches.map((item) => ({
+          name: item.name ?? '',
           branch: item.branch ?? '',
         }))
       : []
@@ -123,6 +144,17 @@ function addGitOpsBranchMapping() {
 function removeGitOpsBranchMapping(index: number) {
   model.gitops_branch_mappings.splice(index, 1)
 }
+
+function addReleaseBranch() {
+  model.release_branches.push({
+    name: '',
+    branch: '',
+  })
+}
+
+function removeReleaseBranch(index: number) {
+  model.release_branches.splice(index, 1)
+}
 </script>
 
 <template>
@@ -149,6 +181,19 @@ function removeGitOpsBranchMapping(index: number) {
 
     <a-row :gutter="16">
       <a-col :xs="24" :md="12">
+        <a-form-item label="归属项目" name="project_id">
+          <a-select
+            v-model:value="model.project_id"
+            show-search
+            allow-clear
+            option-filter-prop="label"
+            :options="projectOptions"
+            :loading="projectLoading"
+            placeholder="请选择归属项目"
+          />
+        </a-form-item>
+      </a-col>
+      <a-col :xs="24" :md="12">
         <a-form-item label="负责人" name="owner_user_id">
           <a-select
             v-model:value="model.owner_user_id"
@@ -161,6 +206,9 @@ function removeGitOpsBranchMapping(index: number) {
           />
         </a-form-item>
       </a-col>
+    </a-row>
+
+    <a-row :gutter="16">
       <a-col :xs="24" :md="12">
         <a-form-item label="状态" name="status">
           <a-select v-model:value="model.status" placeholder="请选择状态">
@@ -194,6 +242,39 @@ function removeGitOpsBranchMapping(index: number) {
 
     <a-form-item label="应用描述" name="description">
       <a-textarea v-model:value="model.description" :rows="4" placeholder="请输入应用描述" />
+    </a-form-item>
+
+    <a-form-item label="发布分支">
+      <div class="mapping-panel">
+        <div class="mapping-header">
+          <div class="mapping-copy">
+            <div class="mapping-title">维护应用可选发布分支</div>
+            <div class="mapping-help">
+              这里维护的分支会作为发布基础字段中的下拉选项，可直接映射给发布模板中的 CI / CD 管线字段。
+            </div>
+          </div>
+          <a-button type="dashed" @click="addReleaseBranch">
+            <template #icon>
+              <PlusOutlined />
+            </template>
+            新增分支
+          </a-button>
+        </div>
+        <div v-if="!model.release_branches.length" class="mapping-empty">
+          当前未配置发布分支，发布时将无法从发布基础字段里直接下拉选择分支。
+        </div>
+        <div v-else class="mapping-list">
+          <div v-for="(item, index) in model.release_branches" :key="`release-branch-${index}`" class="mapping-row">
+            <a-input v-model:value="item.name" placeholder="显示名称，例如：开发分支" />
+            <a-input v-model:value="item.branch" placeholder="分支，例如：release/dev" />
+            <a-button danger type="text" @click="removeReleaseBranch(index)">
+              <template #icon>
+                <DeleteOutlined />
+              </template>
+            </a-button>
+          </div>
+        </div>
+      </div>
     </a-form-item>
 
     <a-form-item label="GitOps 分支环境映射">

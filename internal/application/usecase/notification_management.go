@@ -37,17 +37,17 @@ type NotificationManager struct {
 }
 
 type NotificationSourceOutput struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	SourceType        string    `json:"source_type"`
-	WebhookURL        string    `json:"webhook_url"`
-	VerificationParam string    `json:"verification_param"`
-	Enabled           bool      `json:"enabled"`
-	Remark            string    `json:"remark"`
-	CreatedBy         string    `json:"created_by"`
-	UpdatedBy         string    `json:"updated_by"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	SourceType           string    `json:"source_type"`
+	WebhookURL           string    `json:"webhook_url"`
+	HasVerificationParam bool      `json:"has_verification_param"`
+	Enabled              bool      `json:"enabled"`
+	Remark               string    `json:"remark"`
+	CreatedBy            string    `json:"created_by"`
+	UpdatedBy            string    `json:"updated_by"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type NotificationSourceListOutput struct {
@@ -211,6 +211,9 @@ func (uc *NotificationManager) CreateSource(ctx context.Context, input CreateNot
 	if uc == nil || uc.repo == nil {
 		return NotificationSourceOutput{}, fmt.Errorf("%w: notification manager is not configured", ErrInvalidInput)
 	}
+	if notificationdomain.SourceType(strings.ToLower(strings.TrimSpace(input.SourceType))) == notificationdomain.SourceTypeWeCom {
+		return NotificationSourceOutput{}, fmt.Errorf("%w: 企业微信通知源暂未开放创建", ErrInvalidInput)
+	}
 	item, err := uc.normalizeSourceInput(input.Name, input.SourceType, input.WebhookURL, input.VerificationParam, input.Enabled, input.Remark)
 	if err != nil {
 		return NotificationSourceOutput{}, err
@@ -240,6 +243,10 @@ func (uc *NotificationManager) UpdateSource(ctx context.Context, id string, inpu
 	if err != nil {
 		return NotificationSourceOutput{}, err
 	}
+	requestedType := notificationdomain.SourceType(strings.ToLower(strings.TrimSpace(input.SourceType)))
+	if requestedType == notificationdomain.SourceTypeWeCom && current.SourceType != notificationdomain.SourceTypeWeCom {
+		return NotificationSourceOutput{}, fmt.Errorf("%w: 企业微信通知源暂未开放创建", ErrInvalidInput)
+	}
 	item, err := uc.normalizeSourceInput(input.Name, input.SourceType, input.WebhookURL, input.VerificationParam, input.Enabled, input.Remark)
 	if err != nil {
 		return NotificationSourceOutput{}, err
@@ -247,6 +254,11 @@ func (uc *NotificationManager) UpdateSource(ctx context.Context, id string, inpu
 	item.ID = current.ID
 	item.CreatedBy = current.CreatedBy
 	item.CreatedAt = current.CreatedAt
+	if item.SourceType != notificationdomain.SourceTypeDingTalk {
+		item.VerificationParam = ""
+	} else if strings.TrimSpace(input.VerificationParam) == "" {
+		item.VerificationParam = current.VerificationParam
+	}
 	item.UpdatedBy = strings.TrimSpace(input.UpdatedBy)
 	item.UpdatedAt = uc.now()
 	updated, err := uc.repo.UpdateSource(ctx, item)
@@ -453,6 +465,9 @@ func (uc *NotificationManager) normalizeSourceInput(name, sourceType, webhookURL
 		return notificationdomain.Source{}, fmt.Errorf("%w: webhook_url is required", ErrInvalidInput)
 	}
 	verificationParam = strings.TrimSpace(verificationParam)
+	if typeValue != notificationdomain.SourceTypeDingTalk {
+		verificationParam = ""
+	}
 	return notificationdomain.Source{
 		Name:              name,
 		SourceType:        typeValue,
@@ -669,17 +684,17 @@ func notificationConditionMatched(actual string, operator notificationdomain.Con
 
 func toNotificationSourceOutput(item notificationdomain.Source) NotificationSourceOutput {
 	return NotificationSourceOutput{
-		ID:                item.ID,
-		Name:              item.Name,
-		SourceType:        string(item.SourceType),
-		WebhookURL:        item.WebhookURL,
-		VerificationParam: item.VerificationParam,
-		Enabled:           item.Enabled,
-		Remark:            item.Remark,
-		CreatedBy:         item.CreatedBy,
-		UpdatedBy:         item.UpdatedBy,
-		CreatedAt:         item.CreatedAt,
-		UpdatedAt:         item.UpdatedAt,
+		ID:                   item.ID,
+		Name:                 item.Name,
+		SourceType:           string(item.SourceType),
+		WebhookURL:           item.WebhookURL,
+		HasVerificationParam: strings.TrimSpace(item.VerificationParam) != "",
+		Enabled:              item.Enabled,
+		Remark:               item.Remark,
+		CreatedBy:            item.CreatedBy,
+		UpdatedBy:            item.UpdatedBy,
+		CreatedAt:            item.CreatedAt,
+		UpdatedAt:            item.UpdatedAt,
 	}
 }
 

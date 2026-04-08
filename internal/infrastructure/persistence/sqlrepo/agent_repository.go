@@ -275,6 +275,10 @@ func (r *AgentRepository) migrateSchema(ctx context.Context) error {
 }
 
 func (r *AgentRepository) CreateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const q = `
 INSERT INTO agent_instance (
 	id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
@@ -282,13 +286,13 @@ INSERT INTO agent_instance (
 	current_task_id, current_task_name, current_task_type, current_task_started_at,
 	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
-	_, err := r.db.ExecContext(ctx, q,
+	_, err = r.db.ExecContext(ctx, q,
 		item.ID,
 		strings.TrimSpace(item.AgentCode),
 		strings.TrimSpace(item.Name),
 		strings.TrimSpace(item.EnvironmentCode),
 		strings.TrimSpace(item.WorkDir),
-		strings.TrimSpace(item.Token),
+		encryptedToken,
 		marshalStringSlice(item.Tags),
 		strings.TrimSpace(item.Hostname),
 		strings.TrimSpace(item.HostIP),
@@ -318,6 +322,10 @@ INSERT INTO agent_instance (
 }
 
 func (r *AgentRepository) UpdateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const q = `
 UPDATE agent_instance
 SET agent_code = ?, name = ?, environment_code = ?, work_dir = ?, token_ciphertext = ?, tags_json = ?,
@@ -330,7 +338,7 @@ WHERE id = ?;`
 		strings.TrimSpace(item.Name),
 		strings.TrimSpace(item.EnvironmentCode),
 		strings.TrimSpace(item.WorkDir),
-		strings.TrimSpace(item.Token),
+		encryptedToken,
 		marshalStringSlice(item.Tags),
 		strings.TrimSpace(item.Hostname),
 		strings.TrimSpace(item.HostIP),
@@ -1086,6 +1094,7 @@ WHERE id = ?;`
 
 func scanAgentInstance(scanner interface{ Scan(dest ...any) error }) (domain.Instance, error) {
 	var item domain.Instance
+	var encryptedToken string
 	var tagsJSON string
 	var status string
 	var lastTaskStatus string
@@ -1100,7 +1109,7 @@ func scanAgentInstance(scanner interface{ Scan(dest ...any) error }) (domain.Ins
 		&item.Name,
 		&item.EnvironmentCode,
 		&item.WorkDir,
-		&item.Token,
+		&encryptedToken,
 		&tagsJSON,
 		&item.Hostname,
 		&item.HostIP,
@@ -1122,6 +1131,11 @@ func scanAgentInstance(scanner interface{ Scan(dest ...any) error }) (domain.Ins
 	); err != nil {
 		return domain.Instance{}, err
 	}
+	token, err := decryptStoredSecret(encryptedToken)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	item.Token = token
 	item.Status = domain.Status(strings.TrimSpace(status))
 	item.LastTaskStatus = domain.LastTaskStatus(strings.TrimSpace(lastTaskStatus))
 	item.Tags = unmarshalStringSlice(tagsJSON)

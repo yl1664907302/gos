@@ -6,7 +6,7 @@ import type { Rule } from 'ant-design-vue/es/form'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listApplications } from '../../api/application'
-import { listApplicationExecutorParamDefs } from '../../api/pipeline'
+import { getExecutorParamDefByID, listApplicationExecutorParamDefs } from '../../api/pipeline'
 import { createReleaseOrder, getReleaseTemplateByID, listAllReleaseTemplates } from '../../api/release'
 import { getReleaseSettings } from '../../api/system'
 import { useAuthStore } from '../../stores/auth'
@@ -36,6 +36,7 @@ interface CreateFormState {
   application_id: string
   template_id: string
   env_code: string
+  git_ref: string
   remark: string
 }
 
@@ -80,11 +81,6 @@ const scopeStates = reactive<Record<ReleasePipelineScope, ScopeRuntimeState>>({
   },
 })
 
-const collapsedScopes = reactive<Record<ReleasePipelineScope, boolean>>({
-  ci: true,
-  cd: true,
-})
-
 const preferredTemplateID = ref('')
 const preferredBindingID = ref('')
 
@@ -92,6 +88,7 @@ const formState = reactive<CreateFormState>({
   application_id: '',
   template_id: '',
   env_code: '',
+  git_ref: '',
   remark: '',
 })
 
@@ -143,6 +140,13 @@ const selectedApplicationRecord = computed(() =>
   applicationRecords.value.find((item) => item.id === formState.application_id.trim()) || null,
 )
 
+const releaseBranchOptions = computed<SelectOption[]>(() =>
+  (selectedApplicationRecord.value?.release_branches || []).map((item) => ({
+    label: item.name ? `${item.name} · ${item.branch}` : item.branch,
+    value: item.branch,
+  })),
+)
+
 const bindingMapByScope = computed<Record<ReleasePipelineScope, ReleaseTemplateBinding | null>>(() => ({
   ci: templateBindings.value.find((item) => item.pipeline_scope === 'ci' && item.enabled) || null,
   cd: templateBindings.value.find((item) => item.pipeline_scope === 'cd' && item.enabled) || null,
@@ -186,6 +190,7 @@ function resetParamValues() {
 
 function resetTemplateState() {
   formState.template_id = ''
+  formState.git_ref = ''
   templateWarning.value = ''
   selectedTemplate.value = null
   templateBindings.value = []
@@ -198,8 +203,6 @@ function resetTemplateState() {
   scopeStates.cd.error = ''
   scopeStates.cd.param_defs = []
   scopeStates.cd.loading = false
-  collapsedScopes.ci = true
-  collapsedScopes.cd = true
   resetParamValues()
 }
 
@@ -234,6 +237,9 @@ async function loadApplicationOptions() {
 
     if (!authStore.isAdmin && applicationOptions.value.length === 0) {
       message.warning('当前账号未配置应用发布权限，请联系管理员授权')
+    }
+    if (!formState.git_ref && selectedApplicationRecord.value?.release_branches?.length === 1) {
+      formState.git_ref = String(selectedApplicationRecord.value.release_branches[0]?.branch || '').trim()
     }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
@@ -351,16 +357,31 @@ async function loadScopeParamDefs(scope: ReleasePipelineScope) {
   try {
     const response = await listApplicationExecutorParamDefs(formState.application_id, {
       binding_type: scope,
+      binding_id: binding.binding_id,
       status: 'active',
       page: 1,
       page_size: 200,
     })
-    const allowedIDs = new Set(
-      templateParams.value
-        .filter((item) => item.pipeline_scope === scope)
-        .map((item) => item.executor_param_def_id),
-    )
-    scopeStates[scope].param_defs = response.data.filter((item) => allowedIDs.has(item.id))
+    const scopedTemplateParams = templateParams.value.filter((item) => item.pipeline_scope === scope)
+    const allowedIDs = new Set(scopedTemplateParams.map((item) => item.executor_param_def_id))
+    let resolvedParamDefs = response.data.filter((item) => allowedIDs.has(item.id))
+
+    // 某些模板在应用级参数列表里会拿不到绑定对应的定义，逐条回退查询避免页面一直空白。
+    if (resolvedParamDefs.length === 0 && scopedTemplateParams.length > 0) {
+      const fallbackDefs = await Promise.all(
+        scopedTemplateParams.map(async (item) => {
+          try {
+            const detail = await getExecutorParamDefByID(item.executor_param_def_id)
+            return detail.data
+          } catch {
+            return null
+          }
+        }),
+      )
+      resolvedParamDefs = fallbackDefs.filter((item): item is ExecutorParamDef => Boolean(item))
+    }
+
+    scopeStates[scope].param_defs = resolvedParamDefs
 
     const valueMap = templateParamMetaByScope.value[scope]
     scopeStates[scope].param_defs.forEach((item) => {
@@ -401,8 +422,6 @@ async function loadSelectedTemplateDetail() {
     selectedTemplate.value = response.data.template
     templateBindings.value = response.data.bindings
     templateParams.value = response.data.params
-    collapsedScopes.ci = true
-    collapsedScopes.cd = true
     resetParamValues()
     await Promise.all([
       loadScopeParamDefs('ci'),
@@ -421,14 +440,14 @@ async function loadSelectedTemplateDetail() {
   }
 }
 
-function toggleScopeCollapsed(scope: ReleasePipelineScope) {
-  collapsedScopes[scope] = !collapsedScopes[scope]
-}
-
 async function handleApplicationChange(value: string | undefined) {
   formState.application_id = String(value || '')
   preferredTemplateID.value = ''
   preferredBindingID.value = ''
+  formState.git_ref = ''
+  if (releaseBranchOptions.value.length === 1 && releaseBranchOptions.value[0]) {
+    formState.git_ref = releaseBranchOptions.value[0].value
+  }
   await loadTemplateOptions()
 }
 
@@ -463,37 +482,50 @@ function isTemplateParamEditable(scope: ReleasePipelineScope, item: ExecutorPara
   return resolveTemplateParamValueSource(meta) === 'release_input'
 }
 
-function resolveTemplateParamBuiltinPreview(paramKey: string) {
+function resolveTemplateParamBuiltinPreview(paramKey: string, visited = new Set<string>()) {
   const normalizedKey = String(paramKey || '').trim().toLowerCase()
   if (!normalizedKey) {
     return ''
   }
+  if (visited.has(`builtin:${normalizedKey}`)) {
+    return ''
+  }
+  const nextVisited = new Set(visited)
+  nextVisited.add(`builtin:${normalizedKey}`)
+
   switch (normalizedKey) {
     case 'env':
     case 'env_code':
       return formState.env_code.trim()
     case 'project_name':
-      return resolveTemplateParamPreviewByParamKey('ci', 'project_name')
+      return resolveTemplateParamPreviewByParamKey('ci', 'project_name', nextVisited)
     case 'branch':
     case 'git_ref':
-      return resolveTemplateParamPreviewByParamKey('ci', 'branch') || resolveTemplateParamPreviewByParamKey('ci', 'git_ref')
+      return formState.git_ref.trim()
     case 'image_version':
     case 'image_tag':
-      return resolveTemplateParamPreviewByParamKey('ci', 'image_version') || resolveTemplateParamPreviewByParamKey('ci', 'image_tag')
+      return resolveTemplateParamPreviewByParamKey('ci', 'image_version', nextVisited) || resolveTemplateParamPreviewByParamKey('ci', 'image_tag', nextVisited)
     case 'app_key':
       return String(selectedApplicationRecord.value?.key || '').trim()
     case 'app_name':
       return String(selectedApplicationRecord.value?.name || '').trim()
     default:
-      return resolveTemplateParamPreviewByParamKey('ci', normalizedKey) || resolveTemplateParamPreviewByParamKey('cd', normalizedKey)
+      return resolveTemplateParamPreviewByParamKey('ci', normalizedKey, nextVisited) || resolveTemplateParamPreviewByParamKey('cd', normalizedKey, nextVisited)
   }
 }
 
-function resolveTemplateParamPreviewByParamKey(scope: ReleasePipelineScope, paramKey: string) {
+function resolveTemplateParamPreviewByParamKey(scope: ReleasePipelineScope, paramKey: string, visited = new Set<string>()) {
   const normalizedKey = String(paramKey || '').trim().toLowerCase()
   if (!normalizedKey) {
     return ''
   }
+  const visitKey = `${scope}:${normalizedKey}`
+  if (visited.has(visitKey)) {
+    return ''
+  }
+  const nextVisited = new Set(visited)
+  nextVisited.add(visitKey)
+
   const target = scopeTemplateParamDefs(scope).find(
     (item) => String(item.param_key || '').trim().toLowerCase() === normalizedKey,
   )
@@ -509,10 +541,10 @@ function resolveTemplateParamPreviewByParamKey(scope: ReleasePipelineScope, para
     return String(meta.fixed_value || '').trim()
   }
   if (valueSource === 'ci_param') {
-    return resolveTemplateParamPreviewByParamKey('ci', meta.source_param_key)
+    return resolveTemplateParamPreviewByParamKey('ci', meta.source_param_key, nextVisited)
   }
   if (valueSource === 'builtin') {
-    return resolveTemplateParamBuiltinPreview(meta.source_param_key)
+    return resolveTemplateParamBuiltinPreview(meta.source_param_key, nextVisited)
   }
   return String(paramValues[target.id] || '').trim()
 }
@@ -545,7 +577,7 @@ function resolveTemplateParamDisplayPlaceholder(scope: ReleasePipelineScope, ite
     case 'ci_param':
       return `沿用 CI 标准字段：${meta.source_param_name || meta.source_param_key || '-'}`
     case 'builtin':
-      return `内置字段：${meta.source_param_name || meta.source_param_key || '-'}`
+      return `发布基础字段：${meta.source_param_name || meta.source_param_key || '-'}`
     default:
       return '必填，请输入发布值'
   }
@@ -774,6 +806,16 @@ async function handleSubmit() {
     return
   }
 
+  const requiresBuiltinBranch = templateParams.value.some((item) => {
+    const source = String(item.value_source || '').trim().toLowerCase()
+    const key = String(item.source_param_key || '').trim().toLowerCase()
+    return source === 'builtin' && (key === 'branch' || key === 'git_ref')
+  })
+  if (requiresBuiltinBranch && !formState.git_ref.trim()) {
+    message.error('当前模板已使用发布基础字段中的分支，请先选择发布分支')
+    return
+  }
+
   let paramsPayload: CreateReleaseOrderParamPayload[]
   try {
     paramsPayload = buildParamsPayload()
@@ -788,6 +830,7 @@ async function handleSubmit() {
       application_id: formState.application_id.trim(),
       template_id: formState.template_id.trim(),
       env_code: formState.env_code.trim(),
+      git_ref: formState.git_ref.trim() || undefined,
       trigger_type: 'manual',
       triggered_by: currentUserDisplayName.value !== '-' ? currentUserDisplayName.value : undefined,
       remark: formState.remark.trim() || undefined,
@@ -808,7 +851,7 @@ function scopeHint(scope: ReleasePipelineScope) {
     return ''
   }
   if (binding.provider === 'argocd') {
-    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会优先沿用 CI 中已取到的内置字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。环境统一来自基础参数“环境”。`
+    return `${scope.toUpperCase()} 当前使用 ArgoCD。发布执行时，平台会优先沿用 CI 中已映射的发布基础字段更新 GitOps 配置并触发同步；其中 image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。环境统一来自基础参数“环境”。`
   }
   if (binding.provider !== 'jenkins') {
     return `${scope.toUpperCase()} 当前使用 ${binding.provider}，当前版本暂不开放额外参数表单。`
@@ -909,6 +952,25 @@ onMounted(async () => {
               <a-input v-model:value="formState.remark" placeholder="本次发布说明" allow-clear />
             </a-form-item>
           </a-col>
+          <a-col :xs="24" :md="12">
+            <a-form-item label="发布分支">
+              <a-select
+                v-if="releaseBranchOptions.length"
+                v-model:value="formState.git_ref"
+                :options="releaseBranchOptions"
+                show-search
+                allow-clear
+                option-filter-prop="label"
+                placeholder="请选择发布分支"
+              />
+              <a-input
+                v-else
+                v-model:value="formState.git_ref"
+                placeholder="请输入发布分支（可选）"
+                allow-clear
+              />
+            </a-form-item>
+          </a-col>
         </a-row>
 
         <a-alert
@@ -928,30 +990,27 @@ onMounted(async () => {
         />
       </a-card>
 
-      <template v-for="item in scopeCardList" :key="item.scope">
+      <template v-for="item in scopeCardList" :key="`${formState.template_id}-${item.scope}-${item.binding?.binding_id || item.binding?.provider || 'none'}`">
         <a-card class="form-card scope-card" :bordered="true">
           <template #title>{{ item.title }}</template>
           <template #extra>
             <a-space>
               <a-tag class="dashboard-chip dashboard-chip-running">{{ item.binding?.provider || '-' }}</a-tag>
               <a-tag class="dashboard-chip dashboard-chip-neutral">{{ item.binding?.binding_name || '-' }}</a-tag>
-              <a-button type="text" size="small" class="scope-toggle-btn" @click="toggleScopeCollapsed(item.scope)">
-                {{ collapsedScopes[item.scope] ? '展开' : '折叠' }}
-              </a-button>
             </a-space>
           </template>
 
-          <div v-show="!collapsedScopes[item.scope]" class="scope-card-body">
+          <div class="scope-card-body">
             <a-alert class="scope-alert scope-alert-info" type="info" show-icon :message="scopeHint(item.scope)" />
             <a-alert v-if="item.error" class="scope-alert scope-alert-error" type="error" show-icon :message="item.error" />
 
-            <a-spin :spinning="item.loading" tip="正在加载额外参数...">
+            <a-spin :spinning="item.loading && item.params.length === 0" tip="正在加载额外参数...">
               <a-empty
                 v-if="!item.loading && item.params.length === 0"
                   :description="item.binding?.provider === 'jenkins'
                   ? '当前执行单元未配置额外参数'
                   : item.binding?.provider === 'argocd'
-                    ? '当前执行单元会沿用 CI 中映射并勾选的内置字段自动完成 GitOps 配置更新；其中 image_version 在 Jenkins CI 下默认取 BUILD_NUMBER'
+                    ? '当前执行单元会沿用 CI 中映射并勾选的发布基础字段自动完成 GitOps 配置更新；其中 image_version 在 Jenkins CI 下默认取 BUILD_NUMBER'
                     : '当前执行单元暂无可填写的参数表单'"
               />
               <div v-else class="scope-param-form">

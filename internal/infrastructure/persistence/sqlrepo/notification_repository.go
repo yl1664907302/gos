@@ -163,11 +163,15 @@ func (r *NotificationRepository) migrateSchema(ctx context.Context) error {
 }
 
 func (r *NotificationRepository) CreateSource(ctx context.Context, item domain.Source) (domain.Source, error) {
-	_, err := r.db.ExecContext(ctx, `
+	encryptedVerificationParam, err := encryptStoredSecret(item.VerificationParam)
+	if err != nil {
+		return domain.Source{}, err
+	}
+	_, err = r.db.ExecContext(ctx, `
 INSERT INTO notification_source (
 	id, name, source_type, webhook_url, verification_param, enabled, remark, created_by, updated_by, created_at, updated_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-		item.ID, item.Name, string(item.SourceType), item.WebhookURL, item.VerificationParam, notificationBoolToInt(item.Enabled), item.Remark, item.CreatedBy, item.UpdatedBy, item.CreatedAt.UTC().UnixNano(), item.UpdatedAt.UTC().UnixNano(),
+		item.ID, item.Name, string(item.SourceType), item.WebhookURL, encryptedVerificationParam, notificationBoolToInt(item.Enabled), item.Remark, item.CreatedBy, item.UpdatedBy, item.CreatedAt.UTC().UnixNano(), item.UpdatedAt.UTC().UnixNano(),
 	)
 	if err != nil {
 		return domain.Source{}, err
@@ -176,11 +180,15 @@ INSERT INTO notification_source (
 }
 
 func (r *NotificationRepository) UpdateSource(ctx context.Context, item domain.Source) (domain.Source, error) {
+	encryptedVerificationParam, err := encryptStoredSecret(item.VerificationParam)
+	if err != nil {
+		return domain.Source{}, err
+	}
 	result, err := r.db.ExecContext(ctx, `
 UPDATE notification_source
 SET name = ?, source_type = ?, webhook_url = ?, verification_param = ?, enabled = ?, remark = ?, updated_by = ?, updated_at = ?
 WHERE id = ?;`,
-		item.Name, string(item.SourceType), item.WebhookURL, item.VerificationParam, notificationBoolToInt(item.Enabled), item.Remark, item.UpdatedBy, item.UpdatedAt.UTC().UnixNano(), item.ID,
+		item.Name, string(item.SourceType), item.WebhookURL, encryptedVerificationParam, notificationBoolToInt(item.Enabled), item.Remark, item.UpdatedBy, item.UpdatedAt.UTC().UnixNano(), item.ID,
 	)
 	if err != nil {
 		return domain.Source{}, err
@@ -488,12 +496,18 @@ func (r *NotificationRepository) DeleteHook(ctx context.Context, id string) erro
 func scanNotificationSource(scanner interface{ Scan(dest ...any) error }) (domain.Source, error) {
 	var item domain.Source
 	var sourceType string
+	var encryptedVerificationParam string
 	var enabled int
 	var createdAt, updatedAt int64
-	if err := scanner.Scan(&item.ID, &item.Name, &sourceType, &item.WebhookURL, &item.VerificationParam, &enabled, &item.Remark, &item.CreatedBy, &item.UpdatedBy, &createdAt, &updatedAt); err != nil {
+	if err := scanner.Scan(&item.ID, &item.Name, &sourceType, &item.WebhookURL, &encryptedVerificationParam, &enabled, &item.Remark, &item.CreatedBy, &item.UpdatedBy, &createdAt, &updatedAt); err != nil {
+		return domain.Source{}, err
+	}
+	verificationParam, err := decryptStoredSecret(encryptedVerificationParam)
+	if err != nil {
 		return domain.Source{}, err
 	}
 	item.SourceType = domain.SourceType(sourceType)
+	item.VerificationParam = verificationParam
 	item.Enabled = enabled > 0
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()

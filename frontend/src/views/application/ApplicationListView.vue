@@ -17,10 +17,12 @@ import dayjs from 'dayjs'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { deleteApplication, listApplications } from '../../api/application'
+import { listProjects } from '../../api/project'
 import { listReleaseOrders, listAllReleaseTemplates } from '../../api/release'
 import { useApplicationListStore } from '../../stores/application-list'
 import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
+import type { Project } from '../../types/project'
 import type { ReleaseOperationType, ReleaseOrder, ReleaseOrderBusinessStatus } from '../../types/release'
 import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
@@ -79,6 +81,7 @@ const listStore = useApplicationListStore()
 const authStore = useAuthStore()
 
 const loading = ref(false)
+const loadingProjects = ref(false)
 const deletingId = ref('')
 const dataSource = ref<Application[]>([])
 const total = ref(0)
@@ -87,9 +90,11 @@ const loadingRecentReleases = ref(false)
 const templateApplicationIDs = ref<Set<string>>(new Set())
 const templateNamesByApplication = ref<Map<string, string[]>>(new Map())
 const recentReleaseOrders = ref<ReleaseOrder[]>([])
+const projectOptions = ref<{ label: string; value: string }[]>([])
 const introVisible = ref(false)
 const collapsedApplicationMap = ref<Record<string, boolean>>({})
 const collapseSeeded = ref(false)
+const viewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1440)
 let autoRefreshTimer: ReturnType<typeof window.setInterval> | null = null
 
 const canManageApplication = computed(() => authStore.hasPermission('application.manage'))
@@ -101,6 +106,7 @@ const initialWorkbenchLoading = computed(() => workbenchLoading.value && dataSou
 const filters = computed(() => ({
   key: listStore.key.trim() || undefined,
   name: listStore.name.trim() || undefined,
+  project_id: listStore.project_id.trim() || undefined,
   status: listStore.status || undefined,
   page: listStore.page,
   page_size: listStore.pageSize,
@@ -147,6 +153,22 @@ const workbenchCards = computed<WorkbenchCard[]>(() =>
     }
   }),
 )
+
+const workbenchColumnCount = computed(() => {
+  if (viewportWidth.value <= 768) {
+    return 1
+  }
+  return 3
+})
+
+const workbenchColumns = computed<WorkbenchCard[][]>(() => {
+  const columnCount = Math.max(1, workbenchColumnCount.value)
+  const columns: WorkbenchCard[][] = Array.from({ length: columnCount }, () => [])
+  workbenchCards.value.forEach((card, index) => {
+    columns[index % columnCount].push(card)
+  })
+  return columns
+})
 
 const overviewMetrics = computed(() => {
   const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
@@ -301,6 +323,29 @@ async function loadApplications(options: { silent?: boolean; preserveCollapse?: 
   }
 }
 
+async function loadProjectOptions() {
+  loadingProjects.value = true
+  try {
+    const response = await listProjects({ page: 1, page_size: 200, status: 'active' })
+    const projects = response.data || []
+    projectOptions.value = projects.map((item: Project) => ({
+      label: `${item.name} (${item.key})`,
+      value: item.id,
+    }))
+    const current = String(listStore.project_id || '').trim()
+    const hasCurrent = current && projectOptions.value.some((item) => item.value === current)
+    if (!hasCurrent) {
+      listStore.project_id = projectOptions.value[0]?.value || ''
+      listStore.setPage(1, listStore.pageSize)
+    }
+  } catch (error) {
+    projectOptions.value = []
+    message.error(extractHTTPErrorMessage(error, '项目列表加载失败'))
+  } finally {
+    loadingProjects.value = false
+  }
+}
+
 async function loadTemplateAvailability(options: { silent?: boolean } = {}) {
   if (!options.silent) {
     loadingTemplateAvailability.value = true
@@ -399,6 +444,7 @@ function handleSearch() {
 
 function handleReset() {
   listStore.resetFilters()
+  listStore.project_id = projectOptions.value[0]?.value || ''
   void (async () => {
     await loadApplications()
     await loadRecentReleases()
@@ -504,6 +550,10 @@ function stopAutoRefresh() {
     window.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
   }
+}
+
+function handleResize() {
+  viewportWidth.value = window.innerWidth
 }
 
 async function handleDelete(id: string) {
@@ -624,13 +674,6 @@ function formatTime(value: string | null | undefined) {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
 
-function formatCompactTime(value: string | null | undefined) {
-  if (!value) {
-    return '暂无记录'
-  }
-  return dayjs(value).format('MM-DD HH:mm')
-}
-
 function templateSummary(names: string[]) {
   if (names.length === 0) {
     return '未配置可用模板'
@@ -641,23 +684,18 @@ function templateSummary(names: string[]) {
   return `${names[0]} 等 ${names.length} 个模板`
 }
 
-function compactReleaseRef(order: ReleaseOrder) {
-  const value = String(order.image_tag || order.git_ref || '-').trim() || '-'
-  if (value.length <= 18) {
-    return value
-  }
-  return `${value.slice(0, 15)}...`
-}
-
 onMounted(() => {
   void (async () => {
+    await loadProjectOptions()
     await loadApplications()
     await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
   })()
+  window.addEventListener('resize', handleResize)
   startAutoRefresh()
 })
 
 onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
   stopAutoRefresh()
 })
 </script>
@@ -737,6 +775,18 @@ onUnmounted(() => {
     <a-card class="filter-card" :bordered="true">
       <div class="advanced-search-panel">
         <a-form layout="inline" class="filter-form">
+          <a-form-item label="项目">
+            <a-select
+              v-model:value="listStore.project_id"
+              class="filter-status-select"
+              allow-clear
+              show-search
+              option-filter-prop="label"
+              placeholder="请选择项目"
+              :loading="loadingProjects"
+              :options="projectOptions"
+            />
+          </a-form-item>
           <a-form-item label="Key">
             <a-input v-model:value="listStore.key" allow-clear placeholder="按 app_key 查询" />
           </a-form-item>
@@ -775,191 +825,163 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div v-else-if="workbenchCards.length > 0" class="application-workbench-grid">
-      <a-card
-        v-for="card in workbenchCards"
-        :key="card.application.id"
-        class="application-workbench-card"
-        :class="{ 'application-workbench-card-collapsed': isCardCollapsed(card.application.id) }"
-        :bordered="true"
-      >
-        <div class="workbench-card-header">
-          <div class="workbench-card-header-copy">
-            <div class="workbench-card-title-row">
-              <button class="workbench-app-title" type="button" @click="toDetail(card.application.id)">
-                {{ card.application.name }}
-              </button>
-              <span class="workbench-app-key">{{ card.application.key }}</span>
+    <div v-else-if="workbenchCards.length > 0" class="application-workbench-columns" :class="`application-workbench-columns-${workbenchColumnCount}`">
+      <div v-for="(column, columnIndex) in workbenchColumns" :key="`column-${columnIndex}`" class="application-workbench-column">
+        <a-card
+          v-for="card in column"
+          :key="card.application.id"
+          class="application-workbench-card"
+          :class="{ 'application-workbench-card-collapsed': isCardCollapsed(card.application.id) }"
+          :bordered="true"
+        >
+          <div class="workbench-card-header">
+            <div class="workbench-card-header-copy">
+              <div class="workbench-card-title-row">
+                <button class="workbench-app-title" type="button" @click="toDetail(card.application.id)">
+                  {{ card.application.name }}
+                </button>
+                <span class="workbench-app-key">{{ card.application.key }}</span>
+              </div>
+              <div class="workbench-app-project">
+                {{ card.application.project_name ? `归属项目：${card.application.project_name}` : '归属项目：未配置' }}
+              </div>
+              <p class="workbench-app-description">
+                {{ card.application.description || '暂无应用描述' }}
+              </p>
             </div>
-            <p class="workbench-app-description">
-              {{ card.application.description || '暂无应用描述' }}
-            </p>
-          </div>
-          <div class="workbench-card-header-actions">
-            <span class="workbench-app-state" :class="applicationStatusClass(card.application.status)">
-              {{ applicationStatusText(card.application.status) }}
-            </span>
-            <a-button class="workbench-card-collapse" @click="toggleCardCollapsed(card.application.id)">
-              <template #icon>
-                <component :is="isCardCollapsed(card.application.id) ? DownOutlined : UpOutlined" />
-              </template>
-              {{ isCardCollapsed(card.application.id) ? '展开' : '折叠' }}
-            </a-button>
-          </div>
-        </div>
-
-        <div v-show="isCardCollapsed(card.application.id)" class="workbench-card-collapsed-summary">
-          <span class="workbench-collapsed-item workbench-collapsed-item-block">
-            最近发布：{{ card.latestOrder?.order_no || '暂无最近发布' }}
-          </span>
-          <div class="workbench-collapsed-tail">
-            <div class="workbench-collapsed-meta">
-              <span class="workbench-collapsed-item">
-                环境数：{{ card.envSnapshots.length }}
+            <div class="workbench-card-header-actions">
+              <span class="workbench-app-state" :class="applicationStatusClass(card.application.status)">
+                {{ applicationStatusText(card.application.status) }}
               </span>
-              <span class="workbench-collapsed-item">
-                {{ card.runningCount > 0 ? `执行中 ${card.runningCount} 次` : '当前无运行中发布' }}
-              </span>
-            </div>
-            <div class="workbench-collapsed-action">
-              <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
+              <a-button class="workbench-card-collapse" @click="toggleCardCollapsed(card.application.id)">
+                <template #icon>
+                  <component :is="isCardCollapsed(card.application.id) ? DownOutlined : UpOutlined" />
+                </template>
+                {{ isCardCollapsed(card.application.id) ? '展开' : '折叠' }}
+              </a-button>
             </div>
           </div>
-        </div>
 
-        <div v-show="!isCardCollapsed(card.application.id)" class="workbench-card-expanded">
-        <div class="workbench-meta-row">
-          <span class="workbench-meta-chip">负责人：{{ card.application.owner || '-' }}</span>
-          <span class="workbench-meta-chip">语言：{{ card.application.language || '-' }}</span>
-          <span class="workbench-meta-chip">制品：{{ card.application.artifact_type || '-' }}</span>
-        </div>
-
-        <div class="workbench-template-strip" :class="{ 'workbench-template-strip-muted': !card.releaseReady }">
-          <div class="workbench-strip-label">当前模板</div>
-          <div class="workbench-strip-value">{{ templateSummary(card.templateNames) }}</div>
-          <span
-            class="dashboard-chip"
-            :class="card.releaseReady ? 'dashboard-chip-running' : 'dashboard-chip-neutral'"
-          >
-            {{ card.releaseReady ? '可直接发布' : '待配置模板' }}
-          </span>
-        </div>
-
-        <div class="latest-release-panel">
-          <div class="section-header-row">
-            <div class="section-title">最近发布</div>
-            <span v-if="loadingRecentReleases" class="section-loading-chip">
-              <SyncOutlined spin />
-              正在同步
+          <div v-show="isCardCollapsed(card.application.id)" class="workbench-card-collapsed-summary">
+            <span class="workbench-collapsed-item workbench-collapsed-item-block">
+              最近发布：{{ card.latestOrder?.order_no || '暂无最近发布' }}
             </span>
-          </div>
-          <template v-if="card.latestOrder">
-            <div class="latest-release-main">
-              <button class="latest-release-order" type="button" @click="toReleaseOrderDetail(card.latestOrder.id)">
-                {{ card.latestOrder.order_no }}
-              </button>
-              <div class="latest-release-tags">
-                <span class="dashboard-chip" :class="operationTypeClass(card.latestOrder.operation_type)">
-                  {{ operationTypeText(card.latestOrder.operation_type) }}
-                </span>
-                <span class="dashboard-chip release-status-chip" :class="releaseStatusClass(releaseBusinessStatus(card.latestOrder))">
-                  <SyncOutlined v-if="releaseBusinessStatus(card.latestOrder) === 'deploying'" spin class="running-spin-icon" />
-                  {{ releaseStatusText(releaseBusinessStatus(card.latestOrder)) }}
+            <div class="workbench-collapsed-tail">
+              <div class="workbench-collapsed-meta">
+                <span class="workbench-collapsed-item">
+                  {{ card.runningCount > 0 ? `执行中 ${card.runningCount} 次` : '当前无运行中发布' }}
                 </span>
               </div>
+              <div class="workbench-collapsed-action">
+                <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
+              </div>
             </div>
-            <div class="latest-release-meta">
-              <span>{{ card.latestOrder.env_code || '未标注环境' }}</span>
-              <span>{{ formatTime(card.latestOrder.updated_at || card.latestOrder.created_at) }}</span>
-              <span>{{ card.runningCount > 0 ? `运行中 ${card.runningCount} 次` : '当前无运行中发布' }}</span>
-            </div>
-          </template>
-          <div v-else-if="loadingRecentReleases" class="inline-loading-state">
-            <SyncOutlined spin class="inline-loading-icon" />
-            <span>最近发布正在加载，请稍等片刻。</span>
           </div>
-          <a-empty v-else description="暂无最近发布" :image="false" class="workbench-empty-state" />
-        </div>
 
-        <div class="workbench-actions">
-          <a-space wrap>
-            <a-button @click="toDetail(card.application.id)">详情</a-button>
-            <a-button @click="toReleaseRecords(card.application.id)">发布记录</a-button>
-            <a-button @click="toTemplates(card.application.id)">模板</a-button>
-          </a-space>
-        </div>
+          <div v-show="!isCardCollapsed(card.application.id)" class="workbench-card-expanded">
+            <div class="workbench-meta-row">
+              <span class="workbench-meta-chip">
+                项目：{{ card.application.project_name || '-' }}
+              </span>
+              <span class="workbench-meta-chip">负责人：{{ card.application.owner || '-' }}</span>
+              <span class="workbench-meta-chip">语言：{{ card.application.language || '-' }}</span>
+              <span class="workbench-meta-chip">制品：{{ card.application.artifact_type || '-' }}</span>
+            </div>
 
-        <div class="workbench-footer-row">
-          <div class="workbench-env-inline">
-            <div class="section-header-row compact">
-              <span class="workbench-footer-label">环境状态</span>
-              <span v-if="loadingRecentReleases" class="section-loading-chip compact">
-                <SyncOutlined spin />
-                同步中
+            <div class="workbench-template-strip" :class="{ 'workbench-template-strip-muted': !card.releaseReady }">
+              <div class="workbench-strip-label">当前模板</div>
+              <div class="workbench-strip-value">{{ templateSummary(card.templateNames) }}</div>
+              <span
+                class="dashboard-chip"
+                :class="card.releaseReady ? 'dashboard-chip-running' : 'dashboard-chip-neutral'"
+              >
+                {{ card.releaseReady ? '可直接发布' : '待配置模板' }}
               </span>
             </div>
-            <div v-if="card.envSnapshots.length > 0" class="env-inline-list">
-              <button
-                v-for="snapshot in card.envSnapshots"
-                :key="`${card.application.id}-${snapshot.envCode}`"
-                type="button"
-                class="env-inline-chip"
-                :class="releaseStatusClass(releaseBusinessStatus(snapshot.order))"
-                :title="`${snapshot.envCode} · ${snapshot.order.image_tag || snapshot.order.git_ref || '-'} · ${releaseStatusText(releaseBusinessStatus(snapshot.order))} · ${formatCompactTime(snapshot.order.updated_at || snapshot.order.created_at)}`"
-                @click="toReleaseOrderDetail(snapshot.order.id)"
-              >
-                <span class="env-inline-env">{{ snapshot.envCode }}</span>
-                <span class="env-inline-ref">{{ compactReleaseRef(snapshot.order) }}</span>
-                <span class="env-inline-state">
-                  <SyncOutlined v-if="releaseBusinessStatus(snapshot.order) === 'deploying'" spin class="running-spin-icon" />
-                  {{ releaseStatusText(releaseBusinessStatus(snapshot.order)) }}
-                </span>
-              </button>
-            </div>
-            <div v-else-if="loadingRecentReleases" class="inline-loading-state compact">
-              <SyncOutlined spin class="inline-loading-icon" />
-              <span>环境状态正在加载</span>
-            </div>
-            <span v-else class="workbench-footer-empty">暂无发布记录</span>
-          </div>
 
-          <div class="workbench-footer-actions">
-            <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
-            <a-popover
-              v-if="canViewPipeline || canManageApplication"
-              trigger="click"
-              placement="topRight"
-              overlay-class-name="workbench-manage-popover"
-            >
-              <template #content>
-                <div class="workbench-manage-actions">
-                  <a-button v-if="canViewPipeline" block @click="toBindings(card.application.id)">管线绑定</a-button>
-                  <a-button v-if="canManageApplication" block @click="toEdit(card.application.id)">编辑</a-button>
-                  <a-popconfirm
-                    v-if="canManageApplication"
-                    title="确认删除当前应用吗？"
-                    ok-text="删除"
-                    cancel-text="取消"
-                    @confirm="handleDelete(card.application.id)"
-                  >
-                    <template #icon>
-                      <ExclamationCircleOutlined class="danger-icon" />
-                    </template>
-                    <a-button block danger :loading="deletingId === card.application.id">删除</a-button>
-                  </a-popconfirm>
+            <div class="latest-release-panel">
+              <div class="section-header-row">
+                <div class="section-title">最近发布</div>
+                <span v-if="loadingRecentReleases" class="section-loading-chip">
+                  <SyncOutlined spin />
+                  正在同步
+                </span>
+              </div>
+              <template v-if="card.latestOrder">
+                <div class="latest-release-main">
+                  <button class="latest-release-order" type="button" @click="toReleaseOrderDetail(card.latestOrder.id)">
+                    {{ card.latestOrder.order_no }}
+                  </button>
+                  <div class="latest-release-tags">
+                    <span class="dashboard-chip" :class="operationTypeClass(card.latestOrder.operation_type)">
+                      {{ operationTypeText(card.latestOrder.operation_type) }}
+                    </span>
+                    <span class="dashboard-chip release-status-chip" :class="releaseStatusClass(releaseBusinessStatus(card.latestOrder))">
+                      <SyncOutlined v-if="releaseBusinessStatus(card.latestOrder) === 'deploying'" spin class="running-spin-icon" />
+                      {{ releaseStatusText(releaseBusinessStatus(card.latestOrder)) }}
+                    </span>
+                  </div>
+                </div>
+                <div class="latest-release-meta">
+                  <span>{{ card.latestOrder.env_code || '未标注环境' }}</span>
+                  <span>{{ formatTime(card.latestOrder.updated_at || card.latestOrder.created_at) }}</span>
+                  <span>{{ card.runningCount > 0 ? `运行中 ${card.runningCount} 次` : '当前无运行中发布' }}</span>
                 </div>
               </template>
-              <a-button class="workbench-manage-trigger">
-                更多操作
-                <template #icon>
-                  <MoreOutlined />
-                </template>
-              </a-button>
-            </a-popover>
+              <div v-else-if="loadingRecentReleases" class="inline-loading-state">
+                <SyncOutlined spin class="inline-loading-icon" />
+                <span>最近发布正在加载，请稍等片刻。</span>
+              </div>
+              <a-empty v-else description="暂无最近发布" :image="false" class="workbench-empty-state" />
+            </div>
+
+            <div class="workbench-actions">
+              <a-space wrap>
+                <a-button @click="toDetail(card.application.id)">详情</a-button>
+                <a-button @click="toReleaseRecords(card.application.id)">发布记录</a-button>
+                <a-button @click="toTemplates(card.application.id)">模板</a-button>
+              </a-space>
+            </div>
+
+            <div class="workbench-footer-row">
+              <div class="workbench-footer-actions">
+                <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
+                <a-popover
+                  v-if="canViewPipeline || canManageApplication"
+                  trigger="click"
+                  placement="topRight"
+                  overlay-class-name="workbench-manage-popover"
+                >
+                  <template #content>
+                    <div class="workbench-manage-actions">
+                      <a-button v-if="canViewPipeline" block @click="toBindings(card.application.id)">管线绑定</a-button>
+                      <a-button v-if="canManageApplication" block @click="toEdit(card.application.id)">编辑</a-button>
+                      <a-popconfirm
+                        v-if="canManageApplication"
+                        title="确认删除当前应用吗？"
+                        ok-text="删除"
+                        cancel-text="取消"
+                        @confirm="handleDelete(card.application.id)"
+                      >
+                        <template #icon>
+                          <ExclamationCircleOutlined class="danger-icon" />
+                        </template>
+                        <a-button block danger :loading="deletingId === card.application.id">删除</a-button>
+                      </a-popconfirm>
+                    </div>
+                  </template>
+                  <a-button class="workbench-manage-trigger">
+                    更多操作
+                    <template #icon>
+                      <MoreOutlined />
+                    </template>
+                  </a-button>
+                </a-popover>
+              </div>
+            </div>
           </div>
-        </div>
-        </div>
-      </a-card>
+        </a-card>
+      </div>
     </div>
 
     <a-card v-else class="table-card" :bordered="true">
@@ -1301,16 +1323,30 @@ onUnmounted(() => {
   }
 }
 
-.application-workbench-grid {
+.application-workbench-columns {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
   gap: 20px;
   align-items: start;
 }
 
+.application-workbench-columns-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.application-workbench-columns-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.application-workbench-column {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
 .workbench-skeleton-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
 }
 
@@ -1344,6 +1380,7 @@ onUnmounted(() => {
 }
 
 .application-workbench-card {
+  min-width: 0;
   align-self: start;
   border-radius: 22px;
   border: 1px solid rgba(148, 163, 184, 0.16);
@@ -1353,7 +1390,15 @@ onUnmounted(() => {
     0 18px 38px rgba(15, 23, 42, 0.05);
 }
 
+:deep(.application-workbench-card .ant-card-body) {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: 24px;
+}
+
 .application-workbench-card-collapsed {
+  min-height: 250px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(250, 251, 253, 0.98));
 }
 
@@ -1411,11 +1456,22 @@ onUnmounted(() => {
   font-weight: 700;
 }
 
+.workbench-app-project {
+  color: var(--color-text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .workbench-app-description {
   margin: 0;
   color: var(--color-text-soft);
   font-size: 14px;
   line-height: 1.8;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-height: calc(1.8em * 2);
 }
 
 .workbench-app-state {
@@ -1434,7 +1490,8 @@ onUnmounted(() => {
 }
 
 .workbench-card-collapsed-summary {
-  margin-top: 18px;
+  margin-top: auto;
+  padding-top: 18px;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -1664,16 +1721,8 @@ onUnmounted(() => {
   border-top: 1px dashed rgba(148, 163, 184, 0.24);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 14px;
-}
-
-.workbench-env-inline {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: 1;
 }
 
 .workbench-footer-actions {
@@ -1683,68 +1732,8 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.workbench-footer-label {
-  color: var(--color-dashboard-800);
-  font-size: 12px;
-  font-weight: 800;
-  white-space: nowrap;
-}
-
-.env-inline-list {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.env-inline-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 100%;
-  padding: 8px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  color: var(--color-text-main);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.92);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-}
-
-.env-inline-chip:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.08);
-}
-
-.env-inline-env {
-  text-transform: uppercase;
-  font-weight: 800;
-}
-
-.env-inline-ref {
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-text-soft);
-}
-
-.env-inline-state {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--color-dashboard-800);
-}
-
 .env-status-running .running-spin-icon {
   color: #1d4ed8;
-}
-
-.workbench-footer-empty {
-  color: var(--color-text-muted);
-  font-size: 12px;
 }
 
 .inline-loading-state {
@@ -1883,7 +1872,7 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
   .overview-metrics-grid,
-  .application-workbench-grid,
+  .application-workbench-columns,
   .workbench-skeleton-grid {
     grid-template-columns: 1fr;
   }
@@ -1900,8 +1889,7 @@ onUnmounted(() => {
   }
 
   .workbench-actions,
-  .workbench-footer-row,
-  .workbench-env-inline {
+  .workbench-footer-row {
     align-items: flex-start;
     flex-direction: column;
   }

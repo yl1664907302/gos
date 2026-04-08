@@ -161,7 +161,7 @@ func (uc *AgentManager) Get(ctx context.Context, id string) (AgentOutput, error)
 	if err != nil {
 		return AgentOutput{}, err
 	}
-	output := uc.toOutput(item, true)
+	output := uc.toOutput(item, false)
 	uc.enrichCurrentTask(ctx, &output)
 	uc.enrichCurrentResidentTask(ctx, &output)
 	return output, nil
@@ -205,6 +205,7 @@ func (uc *AgentManager) Update(ctx context.Context, id string, input UpdateAgent
 	item.ID = current.ID
 	item.CreatedAt = current.CreatedAt
 	item.UpdatedAt = uc.now()
+	item.Token = current.Token
 	item.Hostname = current.Hostname
 	item.HostIP = current.HostIP
 	item.AgentVersion = current.AgentVersion

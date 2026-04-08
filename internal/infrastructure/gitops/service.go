@@ -86,6 +86,7 @@ type BindingTarget struct {
 }
 
 const defaultCommitMessageTemplate = "chore(release): {app_key}/{project_name}/{env} -> {image_version} ({branch})"
+const configCandidateScanBranch = "master"
 
 var commitTemplateTokenPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
 var repoBranchLocks sync.Map
@@ -310,7 +311,15 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 		return []gitopsdomain.FieldCandidate{}, nil
 	}
 
-	resolvedAppDir, err := s.resolveAppDirectory(strings.TrimSpace(status.LocalRoot), appKey)
+	scanRoot := strings.TrimSpace(status.LocalRoot)
+	cleanup := func() {}
+	scanRoot, cleanup, err = s.prepareConfigCandidateScanRoot(ctx, scanRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	resolvedAppDir, err := s.resolveAppDirectory(scanRoot, appKey)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +327,7 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 		return []gitopsdomain.FieldCandidate{}, nil
 	}
 
-	overlayRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", resolvedAppDir, "overlays")
+	overlayRoot := filepath.Join(scanRoot, "apps", resolvedAppDir, "overlays")
 	envEntries, err := os.ReadDir(overlayRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -401,15 +410,29 @@ func (s *Service) ListValuesCandidates(ctx context.Context, appKey string) ([]gi
 		return []gitopsdomain.ValuesCandidate{}, nil
 	}
 
-	resolvedAppDir, err := s.resolveAppDirectory(strings.TrimSpace(status.LocalRoot), appKey)
+	scanRoot := strings.TrimSpace(status.LocalRoot)
+	cleanup := func() {}
+	scanRoot, cleanup, err = s.prepareConfigCandidateScanRoot(ctx, scanRoot)
 	if err != nil {
 		return nil, err
 	}
-	if resolvedAppDir == "" {
-		return []gitopsdomain.ValuesCandidate{}, nil
+	defer cleanup()
+
+	resolvedAppDir := ""
+	appRoot := filepath.Join(scanRoot, "apps", "helm")
+	if info, statErr := os.Stat(appRoot); statErr == nil && info.IsDir() {
+		resolvedAppDir = "helm"
+	} else {
+		resolvedAppDir, err = s.resolveAppDirectory(scanRoot, appKey)
+		if err != nil {
+			return nil, err
+		}
+		if resolvedAppDir == "" {
+			return []gitopsdomain.ValuesCandidate{}, nil
+		}
+		appRoot = filepath.Join(scanRoot, "apps", resolvedAppDir)
 	}
 
-	appRoot := filepath.Join(strings.TrimSpace(status.LocalRoot), "apps", resolvedAppDir)
 	result := make([]gitopsdomain.ValuesCandidate, 0)
 	seen := make(map[string]struct{})
 	walkErr := filepath.Walk(appRoot, func(path string, info os.FileInfo, walkErr error) error {
@@ -1203,6 +1226,40 @@ func normalizeAppDirectoryKey(value string) string {
 		value = strings.TrimSuffix(value, strings.ToLower(suffix))
 	}
 	return strings.TrimSpace(value)
+}
+
+func (s *Service) prepareConfigCandidateScanRoot(ctx context.Context, localRoot string) (string, func(), error) {
+	localRoot = strings.TrimSpace(localRoot)
+	if localRoot == "" {
+		return "", func() {}, nil
+	}
+	if !s.branchExists(ctx, localRoot, configCandidateScanBranch) {
+		return "", nil, fmt.Errorf("gitops config candidate scan branch %s not found", configCandidateScanBranch)
+	}
+
+	tempDir, err := os.MkdirTemp("", "gos-gitops-config-scan-*")
+	if err != nil {
+		return "", nil, err
+	}
+	if _, err := s.runGit(ctx, localRoot, "worktree", "add", "--detach", tempDir, configCandidateScanBranch); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", nil, err
+	}
+
+	cleanup := func() {
+		_, _ = s.runGit(context.Background(), localRoot, "worktree", "remove", "--force", tempDir)
+		_ = os.RemoveAll(tempDir)
+	}
+	return tempDir, cleanup, nil
+}
+
+func (s *Service) branchExists(ctx context.Context, workspacePath string, branch string) bool {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false
+	}
+	_, err := s.runGit(ctx, workspacePath, "rev-parse", "--verify", branch+"^{commit}")
+	return err == nil
 }
 
 func secureJoin(root string, parts ...string) (string, error) {

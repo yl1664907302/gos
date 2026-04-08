@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	id VARCHAR(64) PRIMARY KEY,
 	name VARCHAR(128) NOT NULL,
 	app_key VARCHAR(128) NOT NULL,
+	project_id VARCHAR(64) NOT NULL DEFAULT '',
 	repo_url TEXT NOT NULL,
 	description TEXT NOT NULL,
 	owner_user_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	artifact_type VARCHAR(64) NOT NULL,
 	language VARCHAR(64) NOT NULL,
 	gitops_branch_mappings JSON NULL,
+	release_branches JSON NULL,
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
 	UNIQUE KEY uq_application_key (app_key)
@@ -50,6 +52,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
 	app_key TEXT NOT NULL UNIQUE,
+	project_id TEXT NOT NULL DEFAULT '',
 	repo_url TEXT NOT NULL,
 	description TEXT NOT NULL,
 	owner_user_id TEXT NOT NULL DEFAULT '',
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS applications (
 	artifact_type TEXT NOT NULL,
 	language TEXT NOT NULL,
 	gitops_branch_mappings TEXT NOT NULL DEFAULT '[]',
+	release_branches TEXT NOT NULL DEFAULT '[]',
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );`
@@ -86,7 +90,31 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		exists, err = r.mysqlColumnExists(ctx, "applications", "project_id")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN project_id VARCHAR(64) NOT NULL DEFAULT '' AFTER app_key;`,
+			); err != nil {
+				return err
+			}
+		}
 		exists, err = r.mysqlColumnExists(ctx, "applications", "gitops_branch_mappings")
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN gitops_branch_mappings JSON NULL AFTER language;`,
+			); err != nil {
+				return err
+			}
+		}
+		exists, err = r.mysqlColumnExists(ctx, "applications", "release_branches")
 		if err != nil {
 			return err
 		}
@@ -95,7 +123,7 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 		}
 		_, err = r.db.ExecContext(
 			ctx,
-			`ALTER TABLE applications ADD COLUMN gitops_branch_mappings JSON NULL AFTER language;`,
+			`ALTER TABLE applications ADD COLUMN release_branches JSON NULL AFTER gitops_branch_mappings;`,
 		)
 		return err
 	case "sqlite":
@@ -111,12 +139,28 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
-		if _, ok := columns["gitops_branch_mappings"]; ok {
+		if _, ok := columns["project_id"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN project_id TEXT NOT NULL DEFAULT '';`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["gitops_branch_mappings"]; !ok {
+			if _, err = r.db.ExecContext(
+				ctx,
+				`ALTER TABLE applications ADD COLUMN gitops_branch_mappings TEXT NOT NULL DEFAULT '[]';`,
+			); err != nil {
+				return err
+			}
+		}
+		if _, ok := columns["release_branches"]; ok {
 			return nil
 		}
 		_, err = r.db.ExecContext(
 			ctx,
-			`ALTER TABLE applications ADD COLUMN gitops_branch_mappings TEXT NOT NULL DEFAULT '[]';`,
+			`ALTER TABLE applications ADD COLUMN release_branches TEXT NOT NULL DEFAULT '[]';`,
 		)
 		return err
 	default:
@@ -127,10 +171,14 @@ func (r *ApplicationRepository) migrateSchema(ctx context.Context) error {
 func (r *ApplicationRepository) Create(ctx context.Context, app domain.Application) error {
 	const q = `
 INSERT INTO applications (
-	id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, name, app_key, project_id, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, release_branches, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	mappingsJSON, err := marshalGitOpsBranchMappings(app.GitOpsBranchMappings)
+	if err != nil {
+		return err
+	}
+	releaseBranchesJSON, err := marshalReleaseBranchOptions(app.ReleaseBranches)
 	if err != nil {
 		return err
 	}
@@ -141,6 +189,7 @@ INSERT INTO applications (
 		app.ID,
 		app.Name,
 		app.Key,
+		app.ProjectID,
 		app.RepoURL,
 		app.Description,
 		app.OwnerUserID,
@@ -149,6 +198,7 @@ INSERT INTO applications (
 		app.ArtifactType,
 		app.Language(),
 		mappingsJSON,
+		releaseBranchesJSON,
 		app.CreatedAt.UTC().UnixNano(),
 		app.UpdatedAt.UTC().UnixNano(),
 	)
@@ -163,9 +213,10 @@ INSERT INTO applications (
 
 func (r *ApplicationRepository) GetByID(ctx context.Context, id string) (domain.Application, error) {
 	const q = `
-SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
-FROM applications
-WHERE id = ?;`
+SELECT a.id, a.name, a.app_key, a.project_id, COALESCE(p.name, ''), COALESCE(p.project_key, ''), a.repo_url, a.description, a.owner_user_id, a.owner, a.status, a.artifact_type, a.language, a.gitops_branch_mappings, a.release_branches, a.created_at, a.updated_at
+FROM applications a
+LEFT JOIN projects p ON p.id = a.project_id
+WHERE a.id = ?;`
 
 	row := r.db.QueryRowContext(ctx, q, id)
 	app, err := scanApplication(row)
@@ -182,7 +233,7 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 	args := make([]any, 0, 4)
 	builder := strings.Builder{}
 	countBuilder := strings.Builder{}
-	countBuilder.WriteString(`SELECT COUNT(1) FROM applications`)
+	countBuilder.WriteString(`SELECT COUNT(1) FROM applications a`)
 
 	where := make([]string, 0, 4)
 	if len(filter.ApplicationIDs) > 0 {
@@ -191,18 +242,22 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 			placeholders = append(placeholders, "?")
 			args = append(args, item)
 		}
-		where = append(where, "id IN ("+strings.Join(placeholders, ", ")+")")
+		where = append(where, "a.id IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if filter.Key != "" {
-		where = append(where, "app_key = ?")
+		where = append(where, "a.app_key = ?")
 		args = append(args, filter.Key)
 	}
 	if filter.Name != "" {
-		where = append(where, "name = ?")
+		where = append(where, "a.name = ?")
 		args = append(args, filter.Name)
 	}
+	if filter.ProjectID != "" {
+		where = append(where, "a.project_id = ?")
+		args = append(args, filter.ProjectID)
+	}
 	if filter.Status != "" {
-		where = append(where, "status = ?")
+		where = append(where, "a.status = ?")
 		args = append(args, string(filter.Status))
 	}
 	if len(where) > 0 {
@@ -216,13 +271,14 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 	}
 
 	builder.WriteString(`
-SELECT id, name, app_key, repo_url, description, owner_user_id, owner, status, artifact_type, language, gitops_branch_mappings, created_at, updated_at
-FROM applications`)
+SELECT a.id, a.name, a.app_key, a.project_id, COALESCE(p.name, ''), COALESCE(p.project_key, ''), a.repo_url, a.description, a.owner_user_id, a.owner, a.status, a.artifact_type, a.language, a.gitops_branch_mappings, a.release_branches, a.created_at, a.updated_at
+FROM applications a
+LEFT JOIN projects p ON p.id = a.project_id`)
 	if len(where) > 0 {
 		builder.WriteString(" WHERE ")
 		builder.WriteString(strings.Join(where, " AND "))
 	}
-	builder.WriteString(" ORDER BY created_at DESC LIMIT ? OFFSET ?;")
+	builder.WriteString(" ORDER BY a.created_at DESC LIMIT ? OFFSET ?;")
 
 	offset := (filter.Page - 1) * filter.PageSize
 	queryArgs := append(args, filter.PageSize, offset)
@@ -250,10 +306,14 @@ FROM applications`)
 func (r *ApplicationRepository) Update(ctx context.Context, id string, input domain.UpdateInput, updatedAt time.Time) (domain.Application, error) {
 	const q = `
 UPDATE applications
-SET name = ?, app_key = ?, repo_url = ?, description = ?, owner_user_id = ?, owner = ?, status = ?, artifact_type = ?, language = ?, gitops_branch_mappings = ?, updated_at = ?
+SET name = ?, app_key = ?, project_id = ?, repo_url = ?, description = ?, owner_user_id = ?, owner = ?, status = ?, artifact_type = ?, language = ?, gitops_branch_mappings = ?, release_branches = ?, updated_at = ?
 WHERE id = ?;`
 
 	mappingsJSON, err := marshalGitOpsBranchMappings(input.GitOpsBranchMappings)
+	if err != nil {
+		return domain.Application{}, err
+	}
+	releaseBranchesJSON, err := marshalReleaseBranchOptions(input.ReleaseBranches)
 	if err != nil {
 		return domain.Application{}, err
 	}
@@ -263,6 +323,7 @@ WHERE id = ?;`
 		q,
 		input.Name,
 		input.Key,
+		input.ProjectID,
 		input.RepoURL,
 		input.Description,
 		input.OwnerUserID,
@@ -271,6 +332,7 @@ WHERE id = ?;`
 		input.ArtifactType,
 		input.Language,
 		mappingsJSON,
+		releaseBranchesJSON,
 		updatedAt.UTC().UnixNano(),
 		id,
 	)
@@ -315,18 +377,22 @@ type scanner interface {
 
 func scanApplication(s scanner) (domain.Application, error) {
 	var (
-		app         domain.Application
-		statusRaw   string
-		langRaw     string
-		mappingsRaw sql.NullString
-		createdAt   int64
-		updatedAt   int64
+		app                domain.Application
+		statusRaw          string
+		langRaw            string
+		mappingsRaw        sql.NullString
+		releaseBranchesRaw sql.NullString
+		createdAt          int64
+		updatedAt          int64
 	)
 
 	if err := s.Scan(
 		&app.ID,
 		&app.Name,
 		&app.Key,
+		&app.ProjectID,
+		&app.ProjectName,
+		&app.ProjectKey,
 		&app.RepoURL,
 		&app.Description,
 		&app.OwnerUserID,
@@ -335,6 +401,7 @@ func scanApplication(s scanner) (domain.Application, error) {
 		&app.ArtifactType,
 		&langRaw,
 		&mappingsRaw,
+		&releaseBranchesRaw,
 		&createdAt,
 		&updatedAt,
 	); err != nil {
@@ -344,9 +411,57 @@ func scanApplication(s scanner) (domain.Application, error) {
 	app.Status = domain.Status(statusRaw)
 	app.SetLanguage(langRaw)
 	app.GitOpsBranchMappings = unmarshalGitOpsBranchMappings(mappingsRaw.String)
+	app.ReleaseBranches = unmarshalReleaseBranchOptions(releaseBranchesRaw.String)
 	app.CreatedAt = time.Unix(0, createdAt).UTC()
 	app.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return app, nil
+}
+
+func marshalReleaseBranchOptions(values []domain.ReleaseBranchOption) (string, error) {
+	if len(values) == 0 {
+		return "[]", nil
+	}
+	payload, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(payload), nil
+}
+
+func unmarshalReleaseBranchOptions(raw string) []domain.ReleaseBranchOption {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	items := make([]domain.ReleaseBranchOption, 0)
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil
+	}
+	result := make([]domain.ReleaseBranchOption, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(item.Name)
+		branch := strings.TrimSpace(item.Branch)
+		if branch == "" {
+			continue
+		}
+		key := strings.ToLower(branch)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if name == "" {
+			name = branch
+		}
+		result = append(result, domain.ReleaseBranchOption{
+			Name:   name,
+			Branch: branch,
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func marshalGitOpsBranchMappings(values []domain.GitOpsBranchMapping) (string, error) {

@@ -22,13 +22,13 @@ func (t ArgoCDSyncTask) Stop() {
 	<-t.done
 }
 
-func StartArgoCDAutoSyncTask(cfg ArgoCDConfig, run func(context.Context) error) ArgoCDSyncTask {
+func StartArgoCDAutoSyncTask(intervalSec int, run func(context.Context) error) ArgoCDSyncTask {
 	done := make(chan struct{})
-	if !cfg.Enabled || !cfg.SyncEnabled || run == nil {
+	if run == nil {
 		close(done)
 		return ArgoCDSyncTask{stop: func() {}, done: done}
 	}
-	interval := time.Duration(cfg.SyncIntervalSec) * time.Second
+	interval := time.Duration(intervalSec) * time.Second
 	if interval <= 0 {
 		interval = 300 * time.Second
 	}

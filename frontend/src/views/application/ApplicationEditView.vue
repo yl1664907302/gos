@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getApplicationByID, updateApplication } from '../../api/application'
+import { listProjects } from '../../api/project'
 import { listUserOptions } from '../../api/user'
 import type { ApplicationPayload } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -14,13 +15,20 @@ interface OwnerOption {
   value: string
 }
 
+interface ProjectOption {
+  label: string
+  value: string
+}
+
 const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
 const submitting = ref(false)
 const ownerLoading = ref(false)
+const projectLoading = ref(false)
 const ownerOptions = ref<OwnerOption[]>([])
+const projectOptions = ref<ProjectOption[]>([])
 const initialValues = ref<Partial<ApplicationPayload>>({})
 
 const applicationId = computed(() => String(route.params.id || ''))
@@ -40,6 +48,21 @@ async function loadOwnerOptions() {
   }
 }
 
+async function loadProjectOptions() {
+  projectLoading.value = true
+  try {
+    const response = await listProjects({ page: 1, page_size: 200 })
+    projectOptions.value = response.data.map((item) => ({
+      label: `${item.name} (${item.key})`,
+      value: item.id,
+    }))
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '项目下拉加载失败'))
+  } finally {
+    projectLoading.value = false
+  }
+}
+
 async function loadDetail() {
   if (!applicationId.value) {
     message.error('缺少应用 ID')
@@ -54,6 +77,7 @@ async function loadDetail() {
     initialValues.value = {
       name: app.name,
       key: app.key,
+      project_id: app.project_id,
       repo_url: app.repo_url,
       description: app.description,
       owner_user_id: app.owner_user_id,
@@ -61,6 +85,7 @@ async function loadDetail() {
       artifact_type: app.artifact_type,
       language: app.language,
       gitops_branch_mappings: app.gitops_branch_mappings || [],
+      release_branches: app.release_branches || [],
     }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '加载应用失败'))
@@ -97,7 +122,7 @@ function goBack() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadOwnerOptions(), loadDetail()])
+  await Promise.all([loadOwnerOptions(), loadProjectOptions(), loadDetail()])
 })
 </script>
 
@@ -123,7 +148,9 @@ onMounted(async () => {
       v-else
       :initial-values="initialValues"
       :owner-options="ownerOptions"
+      :project-options="projectOptions"
       :owner-loading="ownerLoading"
+      :project-loading="projectLoading"
       :loading="submitting"
       submit-text="保存修改"
       @submit="handleSubmit"

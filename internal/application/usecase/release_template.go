@@ -763,8 +763,10 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 		}
 		switch scope {
 		case releasedomain.PipelineScopeCI:
-			if valueSource != releasedomain.TemplateParamValueSourceReleaseInput && valueSource != releasedomain.TemplateParamValueSourceFixed {
-				return nil, nil, "", fmt.Errorf("%w: CI 参数仅支持发布时填写或固定值", ErrInvalidInput)
+			if valueSource != releasedomain.TemplateParamValueSourceReleaseInput &&
+				valueSource != releasedomain.TemplateParamValueSourceFixed &&
+				valueSource != releasedomain.TemplateParamValueSourceBuiltin {
+				return nil, nil, "", fmt.Errorf("%w: CI 参数仅支持发布时填写、固定值或发布基础字段", ErrInvalidInput)
 			}
 		case releasedomain.PipelineScopeCD:
 			if valueSource != releasedomain.TemplateParamValueSourceReleaseInput &&
@@ -794,11 +796,11 @@ func (uc *ReleaseTemplateManager) buildTemplateScopePayload(
 			sourceParamName = firstNonEmpty(sourceParam.ParamName, sourceParamKey)
 		case releasedomain.TemplateParamValueSourceBuiltin:
 			if sourceParamKey == "" {
-				return nil, nil, "", fmt.Errorf("%w: 请选择来源内置字段：%s", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(dict.Name), paramKey))
+				return nil, nil, "", fmt.Errorf("%w: 请选择来源发布基础字段：%s", ErrInvalidInput, firstNonEmpty(strings.TrimSpace(dict.Name), paramKey))
 			}
 			builtinDict, ok := builtinParams[sourceParamKey]
 			if !ok {
-				return nil, nil, "", fmt.Errorf("%w: 仅允许引用已启用的内置字段：%s", ErrInvalidInput, sourceParamKey)
+				return nil, nil, "", fmt.Errorf("%w: 仅允许引用已启用的发布基础字段：%s", ErrInvalidInput, sourceParamKey)
 			}
 			sourceParamName = firstNonEmpty(strings.TrimSpace(builtinDict.Name), sourceParamKey)
 		default:

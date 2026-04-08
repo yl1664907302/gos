@@ -14,6 +14,7 @@ import (
 
 	"gos/internal/application/usecase"
 	domain "gos/internal/domain/application"
+	projectdomain "gos/internal/domain/project"
 	userdomain "gos/internal/domain/user"
 )
 
@@ -59,6 +60,7 @@ func (h *ApplicationHandler) RegisterRoutes(router gin.IRouter) {
 type CreateApplicationRequest struct {
 	Name                 string                       `json:"name"`
 	Key                  string                       `json:"key"`
+	ProjectID            string                       `json:"project_id"`
 	RepoURL              string                       `json:"repo_url"`
 	Description          string                       `json:"description"`
 	OwnerUserID          string                       `json:"owner_user_id"`
@@ -67,11 +69,13 @@ type CreateApplicationRequest struct {
 	ArtifactType         string                       `json:"artifact_type"`
 	Language             string                       `json:"language"`
 	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
+	ReleaseBranches      []domain.ReleaseBranchOption `json:"release_branches"`
 }
 
 type UpdateApplicationRequest struct {
 	Name                 string                       `json:"name"`
 	Key                  string                       `json:"key"`
+	ProjectID            string                       `json:"project_id"`
 	RepoURL              string                       `json:"repo_url"`
 	Description          string                       `json:"description"`
 	OwnerUserID          string                       `json:"owner_user_id"`
@@ -80,12 +84,16 @@ type UpdateApplicationRequest struct {
 	ArtifactType         string                       `json:"artifact_type"`
 	Language             string                       `json:"language"`
 	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
+	ReleaseBranches      []domain.ReleaseBranchOption `json:"release_branches"`
 }
 
 type ApplicationResponse struct {
 	ID                   string                       `json:"id"`
 	Name                 string                       `json:"name"`
 	Key                  string                       `json:"key"`
+	ProjectID            string                       `json:"project_id"`
+	ProjectName          string                       `json:"project_name"`
+	ProjectKey           string                       `json:"project_key"`
 	RepoURL              string                       `json:"repo_url"`
 	Description          string                       `json:"description"`
 	OwnerUserID          string                       `json:"owner_user_id"`
@@ -94,6 +102,7 @@ type ApplicationResponse struct {
 	ArtifactType         string                       `json:"artifact_type"`
 	Language             string                       `json:"language"`
 	GitOpsBranchMappings []domain.GitOpsBranchMapping `json:"gitops_branch_mappings"`
+	ReleaseBranches      []domain.ReleaseBranchOption `json:"release_branches"`
 	CreatedAt            time.Time                    `json:"created_at"`
 	UpdatedAt            time.Time                    `json:"updated_at"`
 }
@@ -149,6 +158,7 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 	app, err := h.creator.Execute(c.Request.Context(), usecase.CreateInput{
 		Name:                 req.Name,
 		Key:                  req.Key,
+		ProjectID:            req.ProjectID,
 		RepoURL:              req.RepoURL,
 		Description:          req.Description,
 		OwnerUserID:          ownerUserID,
@@ -157,6 +167,7 @@ func (h *ApplicationHandler) Create(c *gin.Context) {
 		ArtifactType:         req.ArtifactType,
 		Language:             req.Language,
 		GitOpsBranchMappings: req.GitOpsBranchMappings,
+		ReleaseBranches:      req.ReleaseBranches,
 	})
 	if err != nil {
 		writeHTTPError(c, err)
@@ -191,11 +202,12 @@ func (h *ApplicationHandler) GetByID(c *gin.Context) {
 // @Summary      List applications
 // @Tags         applications
 // @Produce      json
-// @Param        key     query     string  false  "Application key"
-// @Param        name    query     string  false  "Application name"
-// @Param        status  query     string  false  "Application status"
-// @Param        page      query     int     false  "Page number, starts from 1"
-// @Param        page_size query     int     false  "Page size, max 100"
+// @Param        key        query     string  false  "Application key"
+// @Param        name       query     string  false  "Application name"
+// @Param        project_id query     string  false  "Project ID"
+// @Param        status     query     string  false  "Application status"
+// @Param        page       query     int     false  "Page number, starts from 1"
+// @Param        page_size  query     int     false  "Page size, max 100"
 // @Success      200     {object}  ApplicationListResponse
 // @Failure      400     {object}  ErrorResponse
 // @Failure      500     {object}  ErrorResponse
@@ -229,6 +241,7 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 	apps, total, err := h.query.List(c.Request.Context(), domain.ListFilter{
 		Key:            c.Query("key"),
 		Name:           c.Query("name"),
+		ProjectID:      c.Query("project_id"),
 		Status:         domain.Status(strings.TrimSpace(c.Query("status"))),
 		ApplicationIDs: resolveApplicationFilterIDs(strings.TrimSpace(c.Query("application_id")), allowAll, visibleApplicationIDs),
 		Page:           page,
@@ -411,6 +424,7 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 	app, err := h.updater.Execute(c.Request.Context(), c.Param("id"), domain.UpdateInput{
 		Name:                 req.Name,
 		Key:                  req.Key,
+		ProjectID:            req.ProjectID,
 		RepoURL:              req.RepoURL,
 		Description:          req.Description,
 		OwnerUserID:          ownerUserID,
@@ -419,6 +433,7 @@ func (h *ApplicationHandler) Update(c *gin.Context) {
 		ArtifactType:         req.ArtifactType,
 		Language:             req.Language,
 		GitOpsBranchMappings: req.GitOpsBranchMappings,
+		ReleaseBranches:      req.ReleaseBranches,
 	})
 	if err != nil {
 		writeHTTPError(c, err)
@@ -454,6 +469,9 @@ func toResponse(app domain.Application) ApplicationResponse {
 		ID:                   app.ID,
 		Name:                 app.Name,
 		Key:                  app.Key,
+		ProjectID:            app.ProjectID,
+		ProjectName:          app.ProjectName,
+		ProjectKey:           app.ProjectKey,
 		RepoURL:              app.RepoURL,
 		Description:          app.Description,
 		OwnerUserID:          app.OwnerUserID,
@@ -462,6 +480,7 @@ func toResponse(app domain.Application) ApplicationResponse {
 		ArtifactType:         app.ArtifactType,
 		Language:             app.Language(),
 		GitOpsBranchMappings: app.GitOpsBranchMappings,
+		ReleaseBranches:      app.ReleaseBranches,
 		CreatedAt:            app.CreatedAt,
 		UpdatedAt:            app.UpdatedAt,
 	}
@@ -494,6 +513,10 @@ func writeHTTPError(c *gin.Context, err error) {
 	case errors.Is(err, userdomain.ErrUserNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 	case errors.Is(err, domain.ErrKeyDuplicated):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case errors.Is(err, projectdomain.ErrNotFound):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	case errors.Is(err, projectdomain.ErrKeyDuplicated), errors.Is(err, projectdomain.ErrInUse):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})

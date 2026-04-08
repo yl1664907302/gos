@@ -42,11 +42,10 @@ func StartJenkinsReleaseTrackTask(cfg JenkinsConfig, run func(context.Context) e
 	)
 }
 
-func StartReleaseTrackTask(jenkinsCfg JenkinsConfig, argocdCfg ArgoCDConfig, run func(context.Context) error) JenkinsSyncTask {
-	enabled := (jenkinsCfg.Enabled && jenkinsCfg.ReleaseTrackEnabled) || argocdCfg.Enabled
+func StartReleaseTrackTask(intervalSec int, run func(context.Context) error) JenkinsSyncTask {
 	return startJenkinsTask(
-		enabled,
-		time.Duration(jenkinsCfg.ReleaseTrackIntervalSec)*time.Second,
+		true,
+		time.Duration(intervalSec)*time.Second,
 		10*time.Second,
 		"release track",
 		run,

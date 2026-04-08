@@ -46,7 +46,7 @@ func (h *ReleaseOrderHandler) ListValueProgress(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
+	if !ensureReleaseOrderVisible(c, h.authz, order) {
 		return
 	}
 

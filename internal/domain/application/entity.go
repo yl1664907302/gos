@@ -9,6 +9,11 @@ type GitOpsBranchMapping struct {
 	Branch  string `json:"branch"`
 }
 
+type ReleaseBranchOption struct {
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+}
+
 type Status string
 
 const (
@@ -29,6 +34,9 @@ type Application struct {
 	ID                   string
 	Name                 string
 	Key                  string
+	ProjectID            string
+	ProjectName          string
+	ProjectKey           string
 	RepoURL              string
 	Description          string
 	OwnerUserID          string
@@ -36,6 +44,7 @@ type Application struct {
 	Status               Status
 	ArtifactType         string
 	GitOpsBranchMappings []GitOpsBranchMapping
+	ReleaseBranches      []ReleaseBranchOption
 	language             string
 	CreatedAt            time.Time
 	UpdatedAt            time.Time

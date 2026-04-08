@@ -129,27 +129,26 @@ cd gos
 
 - `database.driver`
 - `database.mysql_dsn`
+- `security.encryption_key`
 - `jenkins.enabled`
 - `jenkins.base_url`
 - `jenkins.username`
 - `jenkins.api_token`
-- `argocd.enabled`
-- `argocd.base_url`
-- `argocd.token`
-- `gitops.enabled`
-- `gitops.local_root`
-- `gitops.commit_message_template`
+- `release.env_options`
+- `release.concurrency.*`
 - `auth.admin_username`
 - `auth.admin_password`
-
-也支持通过环境变量覆盖关键配置，详见：
-
-- `configs/README.md`
 
 ### 4. 启动后端
 
 ```bash
-APP_CONFIG_FILE=configs/config.local.json go run ./cmd/server
+go run ./cmd/server
+```
+
+如需显式指定配置文件：
+
+```bash
+go run ./cmd/server -config configs/config.production.json
 ```
 
 默认本地服务监听：
@@ -176,12 +175,12 @@ npm run dev
 
 ## 默认账号
 
-本地默认管理员账号由配置文件决定，常见本地配置为：
+管理员账号由配置文件决定，默认用户名为：
 
 - 用户名：`admin`
-- 密码：`admin123`
+- 密码：由 `configs/config.local.json` 或 `configs/config.production.json` 中的 `auth.admin_password` 指定
 
-生产环境务必修改。
+生产环境务必配置强密码与独立加密密钥。
 
 ## 常用页面
 

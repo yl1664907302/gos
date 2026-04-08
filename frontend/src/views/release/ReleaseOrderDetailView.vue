@@ -1248,6 +1248,12 @@ const precheckSummaryMessage = computed(() => {
   if (!precheck.value) {
     return "";
   }
+  if (!precheck.value.executable && precheck.value.ahead_count > 0) {
+    return (
+      precheck.value.conflict_message ||
+      `当前应用前面还有 ${precheck.value.ahead_count} 单，请等待先前执行单结束后再点击发布。`
+    );
+  }
   if (precheck.value.waiting_for_lock) {
     return (
       precheck.value.conflict_message ||

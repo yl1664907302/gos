@@ -1013,14 +1013,7 @@ func (uc *ReleaseOrderManager) resolveGitOpsService(
 		)
 		return service, nil
 	}
-	if uc.gitops != nil {
-		logx.Warn("argocd_cd", "using_legacy_global_gitops",
-			logx.F("argocd_instance_id", argocdInstance.ID),
-			logx.F("argocd_instance_code", argocdInstance.InstanceCode),
-		)
-		return uc.gitops, nil
-	}
-	return nil, fmt.Errorf("%w: gitops service is not configured", ErrInvalidInput)
+	return nil, fmt.Errorf("%w: argocd instance %s is missing a bound gitops instance", ErrInvalidInput, strings.TrimSpace(argocdInstance.InstanceCode))
 }
 
 // resolveArgoCDApplicationByRef 兼容两种 external_ref：

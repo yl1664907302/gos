@@ -11,11 +11,12 @@ import (
 )
 
 type ListApprovalRecordSummaryInput struct {
-	ApplicationID  string
-	ApplicationIDs []string
-	OperatorUserID string
-	Page           int
-	PageSize       int
+	ApplicationID   string
+	ApplicationIDs  []string
+	VisibleToUserID string
+	OperatorUserID  string
+	Page            int
+	PageSize        int
 }
 
 func (uc *ReleaseOrderManager) ListApprovalRecordSummaries(
@@ -32,11 +33,12 @@ func (uc *ReleaseOrderManager) ListApprovalRecordSummaries(
 		input.PageSize = 100
 	}
 	return uc.repo.ListApprovalRecordSummaries(ctx, domain.ApprovalRecordListFilter{
-		ApplicationID:  strings.TrimSpace(input.ApplicationID),
-		ApplicationIDs: normalizeReleaseApplicationIDs(input.ApplicationIDs),
-		OperatorUserID: strings.TrimSpace(input.OperatorUserID),
-		Page:           input.Page,
-		PageSize:       input.PageSize,
+		ApplicationID:   strings.TrimSpace(input.ApplicationID),
+		ApplicationIDs:  normalizeReleaseApplicationIDs(input.ApplicationIDs),
+		VisibleToUserID: strings.TrimSpace(input.VisibleToUserID),
+		OperatorUserID:  strings.TrimSpace(input.OperatorUserID),
+		Page:            input.Page,
+		PageSize:        input.PageSize,
 	})
 }
 

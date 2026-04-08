@@ -1,33 +1,34 @@
 import { message } from 'ant-design-vue'
 import { createRouter, createWebHistory } from 'vue-router'
-import AppLayout from '../layouts/AppLayout.vue'
 import { useAuthStore } from '../stores/auth'
-import ApplicationCreateView from '../views/application/ApplicationCreateView.vue'
-import ApplicationDetailView from '../views/application/ApplicationDetailView.vue'
-import ApplicationEditView from '../views/application/ApplicationEditView.vue'
-import ApplicationListView from '../views/application/ApplicationListView.vue'
-import ApplicationPipelineBindingView from '../views/application/ApplicationPipelineBindingView.vue'
-import PlatformParamDictView from '../views/application/PlatformParamDictView.vue'
-import ArgoCDManagementView from '../views/component/ArgoCDManagementView.vue'
-import GitOpsManagementView from '../views/component/GitOpsManagementView.vue'
-import JenkinsManagementView from '../views/component/JenkinsManagementView.vue'
-import ExecutorParamManagementView from '../views/component/ExecutorParamManagementView.vue'
-import AgentManagementView from '../views/component/AgentManagementView.vue'
-import AgentTaskManagementView from '../views/component/AgentTaskManagementView.vue'
-import AgentScriptManagementView from '../views/component/AgentScriptManagementView.vue'
-import ForbiddenView from '../views/exception/ForbiddenView.vue'
-import LoginView from '../views/login/LoginView.vue'
-import OfficialWebsiteView from '../views/marketing/OfficialWebsiteView.vue'
-import ReleaseOrderCreateView from '../views/release/ReleaseOrderCreateView.vue'
-import ReleaseOrderDetailView from '../views/release/ReleaseOrderDetailView.vue'
-import ReleaseOrderListView from '../views/release/ReleaseOrderListView.vue'
-import ReleaseApprovalWorkbenchView from '../views/release/ReleaseApprovalWorkbenchView.vue'
-import SystemNotificationView from '../views/system/SystemNotificationView.vue'
-import SystemPermissionView from '../views/system/SystemPermissionView.vue'
-import SystemSettingsView from '../views/system/SystemSettingsView.vue'
-import SystemUserView from '../views/system/SystemUserView.vue'
 
+const AppLayout = () => import('../layouts/AppLayout.vue')
+const ApplicationCreateView = () => import('../views/application/ApplicationCreateView.vue')
+const ApplicationDetailView = () => import('../views/application/ApplicationDetailView.vue')
+const ApplicationEditView = () => import('../views/application/ApplicationEditView.vue')
+const ApplicationListView = () => import('../views/application/ApplicationListView.vue')
+const ApplicationPipelineBindingView = () => import('../views/application/ApplicationPipelineBindingView.vue')
+const ProjectManagementView = () => import('../views/application/ProjectManagementView.vue')
+const PlatformParamDictView = () => import('../views/application/PlatformParamDictView.vue')
+const ArgoCDManagementView = () => import('../views/component/ArgoCDManagementView.vue')
+const GitOpsManagementView = () => import('../views/component/GitOpsManagementView.vue')
+const JenkinsManagementView = () => import('../views/component/JenkinsManagementView.vue')
+const ExecutorParamManagementView = () => import('../views/component/ExecutorParamManagementView.vue')
+const AgentManagementView = () => import('../views/component/AgentManagementView.vue')
+const AgentTaskManagementView = () => import('../views/component/AgentTaskManagementView.vue')
+const AgentScriptManagementView = () => import('../views/component/AgentScriptManagementView.vue')
+const ForbiddenView = () => import('../views/exception/ForbiddenView.vue')
+const LoginView = () => import('../views/login/LoginView.vue')
+const OfficialWebsiteView = () => import('../views/marketing/OfficialWebsiteView.vue')
+const ReleaseOrderCreateView = () => import('../views/release/ReleaseOrderCreateView.vue')
+const ReleaseOrderDetailView = () => import('../views/release/ReleaseOrderDetailView.vue')
+const ReleaseOrderListView = () => import('../views/release/ReleaseOrderListView.vue')
+const ReleaseApprovalWorkbenchView = () => import('../views/release/ReleaseApprovalWorkbenchView.vue')
 const ReleaseTemplateView = () => import('../views/release/ReleaseTemplateView.vue')
+const SystemNotificationView = () => import('../views/system/SystemNotificationView.vue')
+const SystemPermissionView = () => import('../views/system/SystemPermissionView.vue')
+const SystemSettingsView = () => import('../views/system/SystemSettingsView.vue')
+const SystemUserView = () => import('../views/system/SystemUserView.vue')
 
 declare module 'vue-router' {
   interface RouteMeta {
@@ -107,6 +108,12 @@ export const router = createRouter({
           name: 'application-pipeline-bindings',
           component: ApplicationPipelineBindingView,
           meta: { title: '管线绑定', permission: ['pipeline.view', 'pipeline.manage'] },
+        },
+        {
+          path: '/projects',
+          name: 'project-management',
+          component: ProjectManagementView,
+          meta: { title: '项目管理', permission: 'application.manage' },
         },
         {
           path: '/platform-param-dicts',

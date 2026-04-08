@@ -7,16 +7,19 @@ import (
 	"time"
 
 	domain "gos/internal/domain/application"
+	projectdomain "gos/internal/domain/project"
 )
 
 type UpdateApplication struct {
-	repo domain.Repository
-	now  func() time.Time
+	repo        domain.Repository
+	projectRepo projectdomain.Repository
+	now         func() time.Time
 }
 
-func NewUpdateApplication(repo domain.Repository) *UpdateApplication {
+func NewUpdateApplication(repo domain.Repository, projectRepo projectdomain.Repository) *UpdateApplication {
 	return &UpdateApplication{
-		repo: repo,
+		repo:        repo,
+		projectRepo: projectRepo,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -24,11 +27,17 @@ func NewUpdateApplication(repo domain.Repository) *UpdateApplication {
 }
 
 func (uc *UpdateApplication) Execute(ctx context.Context, id string, input domain.UpdateInput) (domain.Application, error) {
+	if uc.repo == nil || uc.projectRepo == nil {
+		return domain.Application{}, fmt.Errorf("%w: application repository is not configured", ErrInvalidInput)
+	}
 	if strings.TrimSpace(id) == "" {
 		return domain.Application{}, ErrInvalidID
 	}
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Key) == "" {
 		return domain.Application{}, fmt.Errorf("%w: name and key are required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(input.ProjectID) == "" {
+		return domain.Application{}, fmt.Errorf("%w: project_id is required", ErrInvalidInput)
 	}
 	if strings.TrimSpace(input.ArtifactType) == "" || strings.TrimSpace(input.Language) == "" {
 		return domain.Application{}, fmt.Errorf("%w: artifact_type and language are required", ErrInvalidInput)
@@ -39,10 +48,15 @@ func (uc *UpdateApplication) Execute(ctx context.Context, id string, input domai
 	if !input.Status.Valid() {
 		return domain.Application{}, ErrInvalidStatus
 	}
+	project, err := uc.projectRepo.GetByID(ctx, strings.TrimSpace(input.ProjectID))
+	if err != nil {
+		return domain.Application{}, err
+	}
 
 	clean := domain.UpdateInput{
 		Name:                 strings.TrimSpace(input.Name),
 		Key:                  strings.TrimSpace(input.Key),
+		ProjectID:            project.ID,
 		RepoURL:              strings.TrimSpace(input.RepoURL),
 		Description:          strings.TrimSpace(input.Description),
 		OwnerUserID:          strings.TrimSpace(input.OwnerUserID),
@@ -51,6 +65,7 @@ func (uc *UpdateApplication) Execute(ctx context.Context, id string, input domai
 		ArtifactType:         strings.TrimSpace(input.ArtifactType),
 		Language:             strings.TrimSpace(input.Language),
 		GitOpsBranchMappings: normalizeGitOpsBranchMappings(input.GitOpsBranchMappings),
+		ReleaseBranches:      normalizeReleaseBranchOptions(input.ReleaseBranches),
 	}
 	return uc.repo.Update(ctx, id, clean, uc.now())
 }
@@ -75,6 +90,37 @@ func normalizeGitOpsBranchMappings(values []domain.GitOpsBranchMapping) []domain
 		result = append(result, domain.GitOpsBranchMapping{
 			EnvCode: envCode,
 			Branch:  branch,
+		})
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func normalizeReleaseBranchOptions(values []domain.ReleaseBranchOption) []domain.ReleaseBranchOption {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]domain.ReleaseBranchOption, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		name := strings.TrimSpace(item.Name)
+		branch := strings.TrimSpace(item.Branch)
+		if branch == "" {
+			continue
+		}
+		key := strings.ToLower(branch)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		if name == "" {
+			name = branch
+		}
+		result = append(result, domain.ReleaseBranchOption{
+			Name:   name,
+			Branch: branch,
 		})
 	}
 	if len(result) == 0 {

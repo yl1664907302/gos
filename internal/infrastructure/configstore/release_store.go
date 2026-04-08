@@ -14,11 +14,10 @@ import (
 var defaultReleaseEnvOptions = []string{"dev", "test", "prod"}
 
 var defaultReleaseConcurrencySettings = usecase.ReleaseConcurrencySettingsOutput{
-	Enabled:            false,
-	LockScope:          usecase.ReleaseConcurrencyLockScopeApplicationEnv,
-	ConflictStrategy:   usecase.ReleaseConcurrencyConflictStrategyReject,
-	LockTimeoutSec:     1800,
-	AllowAdminOverride: true,
+	Enabled:          false,
+	LockScope:        usecase.ReleaseConcurrencyLockScopeApplicationEnv,
+	ConflictStrategy: usecase.ReleaseConcurrencyConflictStrategyReject,
+	LockTimeoutSec:   1800,
 }
 
 type ReleaseStore struct {
@@ -89,15 +88,11 @@ func (s *ReleaseStore) LoadConcurrencySettings(_ context.Context) (usecase.Relea
 	if value := intFromAny(concurrencyNode["lock_timeout_sec"]); value > 0 {
 		settings.LockTimeoutSec = value
 	}
-	if _, ok := concurrencyNode["allow_admin_override"]; ok {
-		settings.AllowAdminOverride = boolFromAny(concurrencyNode["allow_admin_override"])
-	}
 	return usecase.ReleaseConcurrencySettingsOutput{
-		Enabled:            settings.Enabled,
-		LockScope:          settings.LockScope,
-		ConflictStrategy:   settings.ConflictStrategy,
-		LockTimeoutSec:     settings.LockTimeoutSec,
-		AllowAdminOverride: settings.AllowAdminOverride,
+		Enabled:          settings.Enabled,
+		LockScope:        settings.LockScope,
+		ConflictStrategy: settings.ConflictStrategy,
+		LockTimeoutSec:   settings.LockTimeoutSec,
 	}, nil
 }
 
@@ -159,11 +154,10 @@ func (s *ReleaseStore) SaveConcurrencySettings(_ context.Context, input usecase.
 
 	releaseNode := readMapNode(payload, "release")
 	releaseNode["concurrency"] = map[string]interface{}{
-		"enabled":              input.Enabled,
-		"lock_scope":           strings.TrimSpace(string(input.LockScope)),
-		"conflict_strategy":    strings.TrimSpace(string(input.ConflictStrategy)),
-		"lock_timeout_sec":     input.LockTimeoutSec,
-		"allow_admin_override": input.AllowAdminOverride,
+		"enabled":           input.Enabled,
+		"lock_scope":        strings.TrimSpace(string(input.LockScope)),
+		"conflict_strategy": strings.TrimSpace(string(input.ConflictStrategy)),
+		"lock_timeout_sec":  input.LockTimeoutSec,
 	}
 	payload["release"] = releaseNode
 

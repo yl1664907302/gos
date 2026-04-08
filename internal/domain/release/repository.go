@@ -19,6 +19,7 @@ type Repository interface {
 	UpdateConcurrentBatch(ctx context.Context, orderIDs []string, batchNo string, isConcurrent bool) error
 	ListByConcurrentBatchNo(ctx context.Context, batchNo string) ([]ReleaseOrder, error)
 	FindActiveOrderByApplicationEnv(ctx context.Context, applicationID string, envCode string, excludeReleaseOrderID string) (ReleaseOrder, error)
+	CountActiveOrdersByApplicationEnv(ctx context.Context, applicationID string, envCode string, excludeReleaseOrderID string) (int, error)
 	FindActiveExecutionLock(ctx context.Context, lockKey string, excludeReleaseOrderID string, now time.Time) (ReleaseExecutionLock, error)
 	AcquireExecutionLock(ctx context.Context, lock ReleaseExecutionLock, now time.Time) (ReleaseExecutionLock, bool, error)
 	TouchExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, expiredAt time.Time) error
@@ -96,6 +97,7 @@ type Repository interface {
 type ListFilter struct {
 	ApplicationID          string
 	ApplicationIDs         []string
+	VisibleToUserID        string
 	ApprovalApproverUserID string
 	CreatorUserID          string
 	BindingID              string
@@ -133,9 +135,10 @@ type TemplateListFilter struct {
 }
 
 type ApprovalRecordListFilter struct {
-	ApplicationID  string
-	ApplicationIDs []string
-	OperatorUserID string
-	Page           int
-	PageSize       int
+	ApplicationID   string
+	ApplicationIDs  []string
+	VisibleToUserID string
+	OperatorUserID  string
+	Page            int
+	PageSize        int
 }

@@ -5,10 +5,18 @@ export interface GitOpsBranchMapping {
   branch: string
 }
 
+export interface ReleaseBranchOption {
+  name: string
+  branch: string
+}
+
 export interface Application {
   id: string
   name: string
   key: string
+  project_id: string
+  project_name: string
+  project_key: string
   repo_url: string
   description: string
   owner_user_id: string
@@ -17,6 +25,7 @@ export interface Application {
   artifact_type: string
   language: string
   gitops_branch_mappings: GitOpsBranchMapping[]
+  release_branches: ReleaseBranchOption[]
   created_at: string
   updated_at: string
 }
@@ -24,6 +33,7 @@ export interface Application {
 export interface ApplicationPayload {
   name: string
   key: string
+  project_id: string
   repo_url: string
   description: string
   owner_user_id: string
@@ -31,11 +41,13 @@ export interface ApplicationPayload {
   artifact_type: string
   language: string
   gitops_branch_mappings: GitOpsBranchMapping[]
+  release_branches: ReleaseBranchOption[]
 }
 
 export interface ApplicationListParams {
   key?: string
   name?: string
+  project_id?: string
   status?: ApplicationStatus
   page?: number
   page_size?: number

@@ -6,7 +6,6 @@ export interface ReleaseConcurrencySettings {
   lock_scope: ReleaseConcurrencyLockScope
   conflict_strategy: ReleaseConcurrencyConflictStrategy
   lock_timeout_sec: number
-  allow_admin_override: boolean
 }
 
 export interface ReleaseSettings {

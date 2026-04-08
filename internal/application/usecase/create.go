@@ -7,16 +7,19 @@ import (
 	"time"
 
 	domain "gos/internal/domain/application"
+	projectdomain "gos/internal/domain/project"
 )
 
 type CreateApplication struct {
-	repo domain.Repository
-	now  func() time.Time
+	repo        domain.Repository
+	projectRepo projectdomain.Repository
+	now         func() time.Time
 }
 
-func NewCreateApplication(repo domain.Repository) *CreateApplication {
+func NewCreateApplication(repo domain.Repository, projectRepo projectdomain.Repository) *CreateApplication {
 	return &CreateApplication{
-		repo: repo,
+		repo:        repo,
+		projectRepo: projectRepo,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -24,8 +27,14 @@ func NewCreateApplication(repo domain.Repository) *CreateApplication {
 }
 
 func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (domain.Application, error) {
+	if uc.repo == nil || uc.projectRepo == nil {
+		return domain.Application{}, fmt.Errorf("%w: application repository is not configured", ErrInvalidInput)
+	}
 	if strings.TrimSpace(input.Name) == "" || strings.TrimSpace(input.Key) == "" {
 		return domain.Application{}, fmt.Errorf("%w: name and key are required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(input.ProjectID) == "" {
+		return domain.Application{}, fmt.Errorf("%w: project_id is required", ErrInvalidInput)
 	}
 	if strings.TrimSpace(input.ArtifactType) == "" || strings.TrimSpace(input.Language) == "" {
 		return domain.Application{}, fmt.Errorf("%w: artifact_type and language are required", ErrInvalidInput)
@@ -41,12 +50,19 @@ func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (do
 	if status == "" {
 		status = domain.StatusActive
 	}
+	project, err := uc.projectRepo.GetByID(ctx, strings.TrimSpace(input.ProjectID))
+	if err != nil {
+		return domain.Application{}, err
+	}
 
 	now := uc.now()
 	app := domain.Application{
 		ID:                   generateID("app"),
 		Name:                 strings.TrimSpace(input.Name),
 		Key:                  strings.TrimSpace(input.Key),
+		ProjectID:            project.ID,
+		ProjectName:          project.Name,
+		ProjectKey:           project.Key,
 		RepoURL:              strings.TrimSpace(input.RepoURL),
 		Description:          strings.TrimSpace(input.Description),
 		OwnerUserID:          strings.TrimSpace(input.OwnerUserID),
@@ -54,6 +70,7 @@ func (uc *CreateApplication) Execute(ctx context.Context, input CreateInput) (do
 		Status:               status,
 		ArtifactType:         strings.TrimSpace(input.ArtifactType),
 		GitOpsBranchMappings: normalizeGitOpsBranchMappings(input.GitOpsBranchMappings),
+		ReleaseBranches:      normalizeReleaseBranchOptions(input.ReleaseBranches),
 		CreatedAt:            now,
 		UpdatedAt:            now,
 	}

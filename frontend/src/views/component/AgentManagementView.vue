@@ -899,12 +899,8 @@ onBeforeUnmount(() => {
             <div class="detail-item detail-item-full">
               <div class="detail-label">Token</div>
               <div class="detail-value token-row">
-                <code>{{ detail.token || '创建后未返回 token' }}</code>
+                <span class="muted-text">已隐藏，请通过安装配置获取当前 Token</span>
                 <a-space>
-                  <a-button size="small" @click="copyToken(detail.token)">
-                    <template #icon><CopyOutlined /></template>
-                    复制 Token
-                  </a-button>
                   <a-button v-if="canManageAgent" size="small" :loading="resettingToken" @click="handleResetToken">
                     <template #icon><KeyOutlined /></template>
                     重置 Token

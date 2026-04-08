@@ -1210,6 +1210,12 @@ const executePreviewSummaryMessage = computed(() => {
   if (!executePreviewPrecheck.value) {
     return "";
   }
+  if (!executePreviewPrecheck.value.executable && executePreviewPrecheck.value.ahead_count > 0) {
+    return (
+      executePreviewPrecheck.value.conflict_message ||
+      `当前应用前面还有 ${executePreviewPrecheck.value.ahead_count} 单，请等待先前执行单结束后再点击发布。`
+    );
+  }
   if (executePreviewPrecheck.value.waiting_for_lock) {
     return (
       executePreviewPrecheck.value.conflict_message ||

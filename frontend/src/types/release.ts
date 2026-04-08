@@ -269,6 +269,7 @@ export interface ReleaseOrderPrecheck {
   order_no: string;
   executable: boolean;
   waiting_for_lock: boolean;
+  ahead_count: number;
   lock_enabled: boolean;
   lock_scope: string;
   conflict_strategy: string;

@@ -5,16 +5,10 @@ import type {
   GitOpsInstanceListParams,
   GitOpsInstanceListResponse,
   GitOpsInstanceStatusDataResponse,
-  GitOpsStatus,
   GitOpsTemplateField,
   GitOpsValuesCandidate,
   UpsertGitOpsInstancePayload,
 } from '../types/gitops'
-
-export async function getGitOpsStatus() {
-  const response = await http.get<{ data: GitOpsStatus }>('/gitops/status')
-  return response.data
-}
 
 export async function listGitOpsInstances(
   params: GitOpsInstanceListParams = {},

@@ -4,6 +4,7 @@ import { message } from 'ant-design-vue'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { createApplication } from '../../api/application'
+import { listProjects } from '../../api/project'
 import { listUserOptions } from '../../api/user'
 import type { ApplicationPayload } from '../../types/application'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -14,10 +15,17 @@ interface OwnerOption {
   value: string
 }
 
+interface ProjectOption {
+  label: string
+  value: string
+}
+
 const router = useRouter()
 const submitting = ref(false)
 const ownerLoading = ref(false)
+const projectLoading = ref(false)
 const ownerOptions = ref<OwnerOption[]>([])
+const projectOptions = ref<ProjectOption[]>([])
 
 async function loadOwnerOptions() {
   ownerLoading.value = true
@@ -31,6 +39,21 @@ async function loadOwnerOptions() {
     message.error(extractHTTPErrorMessage(error, '负责人下拉加载失败'))
   } finally {
     ownerLoading.value = false
+  }
+}
+
+async function loadProjectOptions() {
+  projectLoading.value = true
+  try {
+    const response = await listProjects({ page: 1, page_size: 200, status: 'active' })
+    projectOptions.value = response.data.map((item) => ({
+      label: `${item.name} (${item.key})`,
+      value: item.id,
+    }))
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '项目下拉加载失败'))
+  } finally {
+    projectLoading.value = false
   }
 }
 
@@ -52,7 +75,7 @@ function goBack() {
 }
 
 onMounted(() => {
-  void loadOwnerOptions()
+  void Promise.all([loadOwnerOptions(), loadProjectOptions()])
 })
 </script>
 
@@ -75,7 +98,9 @@ onMounted(() => {
 
     <ApplicationForm
       :owner-options="ownerOptions"
+      :project-options="projectOptions"
       :owner-loading="ownerLoading"
+      :project-loading="projectLoading"
       :loading="submitting"
       submit-text="创建应用"
       @submit="handleSubmit"

@@ -31,6 +31,7 @@ func (uc *QueryApplication) List(ctx context.Context, filter domain.ListFilter) 
 
 	filter.Key = strings.TrimSpace(filter.Key)
 	filter.Name = strings.TrimSpace(filter.Name)
+	filter.ProjectID = strings.TrimSpace(filter.ProjectID)
 	filter.ApplicationIDs = normalizeApplicationIDs(filter.ApplicationIDs)
 	if filter.Status != "" && !filter.Status.Valid() {
 		return nil, 0, ErrInvalidStatus

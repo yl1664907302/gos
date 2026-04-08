@@ -5,6 +5,7 @@ import domain "gos/internal/domain/application"
 type CreateInput struct {
 	Name                 string
 	Key                  string
+	ProjectID            string
 	RepoURL              string
 	Description          string
 	OwnerUserID          string
@@ -13,4 +14,5 @@ type CreateInput struct {
 	ArtifactType         string
 	Language             string
 	GitOpsBranchMappings []domain.GitOpsBranchMapping
+	ReleaseBranches      []domain.ReleaseBranchOption
 }

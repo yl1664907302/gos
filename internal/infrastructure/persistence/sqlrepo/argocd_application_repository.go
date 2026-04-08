@@ -327,6 +327,14 @@ func (r *ArgoCDApplicationRepository) UpsertInstance(ctx context.Context, item d
 	if createdAt == 0 {
 		createdAt = item.UpdatedAt.UTC().UnixNano()
 	}
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	encryptedPassword, err := encryptStoredSecret(strings.TrimSpace(item.Password))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	var q string
 	switch r.dbDriver {
 	case "mysql":
@@ -383,9 +391,9 @@ ON CONFLICT(instance_code) DO UPDATE SET
 		strings.TrimSpace(item.BaseURL),
 		argocdBoolToTinyInt(item.InsecureSkipVerify),
 		strings.TrimSpace(item.AuthMode),
-		strings.TrimSpace(item.Token),
+		encryptedToken,
 		strings.TrimSpace(item.Username),
-		strings.TrimSpace(item.Password),
+		encryptedPassword,
 		strings.TrimSpace(item.GitOpsInstanceID),
 		strings.TrimSpace(item.ClusterName),
 		strings.TrimSpace(item.DefaultNamespace),
@@ -402,6 +410,14 @@ ON CONFLICT(instance_code) DO UPDATE SET
 }
 
 func (r *ArgoCDApplicationRepository) CreateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	encryptedPassword, err := encryptStoredSecret(strings.TrimSpace(item.Password))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const mysqlQ = `
 INSERT INTO argocd_instance (
 	id, instance_code, name, base_url, insecure_skip_verify, auth_mode, token_ciphertext, username, password_ciphertext,
@@ -419,9 +435,9 @@ INSERT INTO argocd_instance (
 		strings.TrimSpace(item.BaseURL),
 		argocdBoolToTinyInt(item.InsecureSkipVerify),
 		strings.TrimSpace(item.AuthMode),
-		strings.TrimSpace(item.Token),
+		encryptedToken,
 		strings.TrimSpace(item.Username),
-		strings.TrimSpace(item.Password),
+		encryptedPassword,
 		strings.TrimSpace(item.GitOpsInstanceID),
 		strings.TrimSpace(item.ClusterName),
 		strings.TrimSpace(item.DefaultNamespace),
@@ -438,6 +454,14 @@ INSERT INTO argocd_instance (
 }
 
 func (r *ArgoCDApplicationRepository) UpdateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	encryptedPassword, err := encryptStoredSecret(strings.TrimSpace(item.Password))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const q = `
 UPDATE argocd_instance
 SET instance_code = ?, name = ?, base_url = ?, insecure_skip_verify = ?, auth_mode = ?, token_ciphertext = ?, username = ?, password_ciphertext = ?,
@@ -449,9 +473,9 @@ WHERE id = ?;`
 		strings.TrimSpace(item.BaseURL),
 		argocdBoolToTinyInt(item.InsecureSkipVerify),
 		strings.TrimSpace(item.AuthMode),
-		strings.TrimSpace(item.Token),
+		encryptedToken,
 		strings.TrimSpace(item.Username),
-		strings.TrimSpace(item.Password),
+		encryptedPassword,
 		strings.TrimSpace(item.GitOpsInstanceID),
 		strings.TrimSpace(item.ClusterName),
 		strings.TrimSpace(item.DefaultNamespace),
@@ -940,6 +964,8 @@ type argocdApplicationScanner interface{ Scan(dest ...any) error }
 func scanArgoCDInstance(scanner argocdInstanceScanner) (domain.Instance, error) {
 	var (
 		item               domain.Instance
+		encryptedToken     string
+		encryptedPassword  string
 		insecureSkipVerify int
 		status             string
 		lastCheckAt        int64
@@ -953,9 +979,9 @@ func scanArgoCDInstance(scanner argocdInstanceScanner) (domain.Instance, error) 
 		&item.BaseURL,
 		&insecureSkipVerify,
 		&item.AuthMode,
-		&item.Token,
+		&encryptedToken,
 		&item.Username,
-		&item.Password,
+		&encryptedPassword,
 		&item.GitOpsInstanceID,
 		&item.GitOpsInstanceCode,
 		&item.GitOpsInstanceName,
@@ -970,6 +996,16 @@ func scanArgoCDInstance(scanner argocdInstanceScanner) (domain.Instance, error) 
 	); err != nil {
 		return domain.Instance{}, err
 	}
+	token, err := decryptStoredSecret(encryptedToken)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	password, err := decryptStoredSecret(encryptedPassword)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	item.Token = token
+	item.Password = password
 	item.InsecureSkipVerify = insecureSkipVerify == 1
 	item.Status = domain.Status(status)
 	item.LastCheckAt = unixNanoToTime(lastCheckAt)

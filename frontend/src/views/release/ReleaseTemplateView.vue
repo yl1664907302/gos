@@ -215,8 +215,8 @@ const scopeTitles: Record<ReleasePipelineScope, string> = {
 }
 
 const scopeDescriptions: Record<ReleasePipelineScope, string> = {
-  ci: 'CI 固定使用 Jenkins；参数仅允许来自 CI 绑定管线，并且必须已完成平台标准 Key 映射。',
-  cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或内置字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
+  ci: 'CI 固定使用 Jenkins；参数必须已完成平台标准 Key 映射，并可继续映射发布基础字段、固定值或发布时填写。',
+  cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或发布基础字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
 }
 
 const hookVariableSourceTags = ['固定值', '标准字段', '内置字段']
@@ -574,6 +574,9 @@ function handleTemplateParamValueSourceChange(
 }
 
 function resolveTemplateParamSourceOptions(scope: ReleasePipelineScope, config: TemplateParamConfigState) {
+  if (scope === 'ci' && config.value_source === 'builtin') {
+    return builtinTemplateSourceOptions.value
+  }
   if (scope === 'cd' && config.value_source === 'ci_param') {
     return ciTemplateSourceOptions.value
   }
@@ -585,7 +588,14 @@ function resolveTemplateParamSourceOptions(scope: ReleasePipelineScope, config: 
 
 function resolveTemplateParamSourceLabel(scope: ReleasePipelineScope, config: TemplateParamConfigState) {
   if (scope === 'ci') {
-    return config.value_source === 'fixed' ? '固定值' : '发布时填写'
+    switch (config.value_source) {
+      case 'fixed':
+        return '固定值'
+      case 'builtin':
+        return '发布基础字段'
+      default:
+        return '发布时填写'
+    }
   }
   switch (config.value_source) {
     case 'fixed':
@@ -593,7 +603,7 @@ function resolveTemplateParamSourceLabel(scope: ReleasePipelineScope, config: Te
     case 'ci_param':
       return '沿用 CI 标准字段'
     case 'builtin':
-      return '内置字段'
+      return '发布基础字段'
     default:
       return '发布时填写'
   }
@@ -2160,8 +2170,8 @@ onMounted(async () => {
 
               <div v-if="selectedScopeParamDefs('ci').length" class="template-param-config-panel">
                 <div class="template-param-config-header">
-                  <div class="template-param-config-title">CI 参数取值规则</div>
-                  <div class="template-param-config-subtitle">已选择的平台标准字段可在发布时填写，或由模板直接写死。</div>
+                  <div class="template-param-config-title">发布基础字段与 CI 管线字段映射</div>
+                  <div class="template-param-config-subtitle">已选择的平台标准字段可在发布时填写、写死固定值，或直接映射发布基础字段。</div>
                 </div>
                 <div
                   v-for="item in selectedScopeParamDefs('ci')"
@@ -2185,6 +2195,7 @@ onMounted(async () => {
                           :options="[
                             { label: '发布时填写', value: 'release_input' },
                             { label: '固定值', value: 'fixed' },
+                            { label: '发布基础字段', value: 'builtin' },
                           ]"
                           @change="(value: string | number) => handleTemplateParamValueSourceChange('ci', item.id, String(value) as ReleaseTemplateParamValueSource)"
                         />
@@ -2196,6 +2207,22 @@ onMounted(async () => {
                           :value="getTemplateParamConfig('ci', item.id).fixed_value"
                           placeholder="请输入模板固定值"
                           @update:value="(value: string) => (getTemplateParamConfig('ci', item.id).fixed_value = value)"
+                        />
+                      </a-form-item>
+                    </a-col>
+                    <a-col
+                      v-else-if="getTemplateParamConfig('ci', item.id).value_source === 'builtin'"
+                      :span="14"
+                    >
+                      <a-form-item label="发布基础字段" class="template-param-inline-item">
+                        <a-select
+                          :value="getTemplateParamConfig('ci', item.id).source_param_key || undefined"
+                          allow-clear
+                          show-search
+                          option-filter-prop="label"
+                          placeholder="请选择发布基础字段"
+                          :options="resolveTemplateParamSourceOptions('ci', getTemplateParamConfig('ci', item.id))"
+                          @change="(value: string | undefined) => (getTemplateParamConfig('ci', item.id).source_param_key = String(value || '').trim().toLowerCase())"
                         />
                       </a-form-item>
                     </a-col>
@@ -2299,9 +2326,9 @@ onMounted(async () => {
 
               <div v-if="isCDUsingPipeline() && selectedScopeParamDefs('cd').length" class="template-param-config-panel">
                 <div class="template-param-config-header">
-                  <div class="template-param-config-title">CD 管线参数规则</div>
+                  <div class="template-param-config-title">发布基础字段与 CD 管线字段映射</div>
                   <div class="template-param-config-subtitle">
-                    CD 为管线时，参数可配置固定值，或沿用 CI 标准字段、系统内置字段。CD 自填字段在这里作为普通标准字段使用。
+                    CD 为管线时，参数可配置固定值，或沿用 CI 标准字段、发布基础字段。CD 自填字段在这里作为普通标准字段使用。
                   </div>
                 </div>
                 <div
@@ -2327,7 +2354,7 @@ onMounted(async () => {
                             { label: '发布时填写', value: 'release_input' },
                             { label: '固定值', value: 'fixed' },
                             { label: '沿用 CI 字段', value: 'ci_param' },
-                            { label: '内置字段', value: 'builtin' },
+                            { label: '发布基础字段', value: 'builtin' },
                           ]"
                           @change="(value: string | number) => handleTemplateParamValueSourceChange('cd', item.id, String(value) as ReleaseTemplateParamValueSource)"
                         />
@@ -2346,7 +2373,7 @@ onMounted(async () => {
                       v-else-if="['ci_param', 'builtin'].includes(getTemplateParamConfig('cd', item.id).value_source)"
                       :span="14"
                     >
-                      <a-form-item :label="getTemplateParamConfig('cd', item.id).value_source === 'ci_param' ? 'CI 来源字段' : '内置字段'" class="template-param-inline-item">
+                      <a-form-item :label="getTemplateParamConfig('cd', item.id).value_source === 'ci_param' ? 'CI 来源字段' : '发布基础字段'" class="template-param-inline-item">
                         <a-select
                           :value="getTemplateParamConfig('cd', item.id).source_param_key || undefined"
                           allow-clear
@@ -2389,10 +2416,11 @@ onMounted(async () => {
                     <div class="gitops-rule-subtitle">
                       {{
                         isHelmGitOps()
-                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；支持 CI 已勾选字段、系统内置字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
-                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；支持 CI 已勾选字段、系统内置字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
+                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
+                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
                       }}
                     </div>
+                    <div class="gitops-rule-note">候选路径统一从 GitOps 仓库 master 分支读取，作为模板配置基线；实际发布仍按应用命中的目标分支执行。</div>
                   </div>
                   <a-tag class="dashboard-chip dashboard-chip-running">{{ gitopsRules.length }} 条规则</a-tag>
                 </div>
@@ -2439,7 +2467,7 @@ onMounted(async () => {
                               show-search
                               allow-clear
                               option-filter-prop="label"
-                              placeholder="请选择 CI 已勾选字段、系统内置字段或 CD 自填字段"
+                              placeholder="请选择 CI 已勾选字段、发布基础字段或 CD 自填字段"
                               :options="gitOpsSourceOptions"
                               @change="(value: string | undefined) => handleGitOpsRuleSourceChange(rule, value)"
                             />
@@ -3321,6 +3349,12 @@ onMounted(async () => {
 .gitops-rule-subtitle {
   font-size: 12px;
   color: var(--color-text-soft);
+}
+
+.gitops-rule-note {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-dashboard-800);
 }
 
 .gitops-rule-item {

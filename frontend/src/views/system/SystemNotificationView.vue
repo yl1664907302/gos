@@ -146,6 +146,7 @@ const hookFilters = reactive({
 const sourceModalVisible = ref(false)
 const sourceSubmitting = ref(false)
 const editingSourceID = ref('')
+const editingSourceHasVerificationParam = ref(false)
 const sourceFormRef = ref<FormInstance>()
 const sourceForm = reactive<SourceFormState>({
   name: '',
@@ -197,10 +198,12 @@ const hookRules: Record<string, Rule[]> = {
   markdown_template_id: [{ required: true, message: '请选择 Markdown 模板', trigger: 'change' }],
 }
 
-const sourceTypeOptions = [
+const sourceTypeFilterOptions = [
   { label: '钉钉', value: 'dingtalk' },
   { label: '企业微信', value: 'wecom' },
 ] as const
+
+const sourceTypeFormOptions = [{ label: '钉钉', value: 'dingtalk' }] as const
 
 const enabledOptions = [
   { label: '启用', value: 'true' },
@@ -218,6 +221,7 @@ const markdownTemplateOptions = computed(() =>
 const sourceColumns: TableColumnsType<NotificationSource> = [
   { title: '通知源名称', dataIndex: 'name', key: 'name', width: 220 },
   { title: '类型', dataIndex: 'source_type', key: 'source_type', width: 120 },
+  { title: '加签', dataIndex: 'has_verification_param', key: 'has_verification_param', width: 90 },
   { title: 'Webhook 地址', dataIndex: 'webhook_url', key: 'webhook_url', ellipsis: true },
   { title: '状态', dataIndex: 'enabled', key: 'enabled', width: 100 },
   { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 180 },
@@ -384,6 +388,8 @@ function removeCondition(localID: string) {
 
 function openCreateSourceModal() {
   resetSourceForm()
+  editingSourceHasVerificationParam.value = false
+  sourceForm.source_type = 'dingtalk'
   sourceModalVisible.value = true
 }
 
@@ -392,14 +398,16 @@ function openEditSourceModal(item: NotificationSource) {
   sourceForm.name = item.name
   sourceForm.source_type = item.source_type
   sourceForm.webhook_url = item.webhook_url
-  sourceForm.verification_param = item.verification_param || ''
+  sourceForm.verification_param = ''
   sourceForm.enabled = item.enabled
   sourceForm.remark = item.remark || ''
+  editingSourceHasVerificationParam.value = item.has_verification_param
   sourceModalVisible.value = true
 }
 
 function closeSourceModal() {
   sourceModalVisible.value = false
+  editingSourceHasVerificationParam.value = false
   resetSourceForm()
   void sourceFormRef.value?.clearValidate()
 }
@@ -680,7 +688,7 @@ onMounted(async () => {
                 <a-input v-model:value="sourceFilters.keyword" allow-clear placeholder="按名称搜索" @pressEnter="handleSourceSearch" />
               </a-form-item>
               <a-form-item label="类型">
-                <a-select v-model:value="sourceFilters.source_type" allow-clear style="width: 140px" :options="sourceTypeOptions" />
+                <a-select v-model:value="sourceFilters.source_type" allow-clear style="width: 140px" :options="sourceTypeFilterOptions" />
               </a-form-item>
               <a-form-item label="状态">
                 <a-select v-model:value="sourceFilters.enabled" allow-clear style="width: 120px" :options="enabledOptions" />
@@ -706,6 +714,11 @@ onMounted(async () => {
             <template #bodyCell="{ column, record }">
               <template v-if="column.key === 'source_type'">
                 {{ record.source_type === 'dingtalk' ? '钉钉' : '企业微信' }}
+              </template>
+              <template v-else-if="column.key === 'has_verification_param'">
+                <a-tag :color="record.has_verification_param ? 'blue' : 'default'">
+                  {{ record.has_verification_param ? '已配置' : '未配置' }}
+                </a-tag>
               </template>
               <template v-else-if="column.key === 'enabled'">
                 <a-tag :color="record.enabled ? 'green' : 'default'">{{ record.enabled ? '启用' : '停用' }}</a-tag>
@@ -831,17 +844,20 @@ onMounted(async () => {
           <a-input v-model:value="sourceForm.name" allow-clear placeholder="例如：生产发布钉钉群" />
         </a-form-item>
         <a-form-item label="通知源类型" name="source_type">
-          <a-select v-model:value="sourceForm.source_type" :options="sourceTypeOptions" />
+          <a-select v-if="sourceForm.source_type !== 'wecom'" v-model:value="sourceForm.source_type" :options="sourceTypeFormOptions" />
+          <a-input v-else value="企业微信（暂不支持新增）" disabled />
+          <div class="form-help-text">当前仅开放钉钉通知源创建，企业微信入口暂时保留为只读展示。</div>
         </a-form-item>
         <a-form-item label="Webhook 地址" name="webhook_url">
-          <a-input v-model:value="sourceForm.webhook_url" allow-clear placeholder="请输入钉钉或企业微信的机器人 Webhook 地址" />
+          <a-input v-model:value="sourceForm.webhook_url" allow-clear placeholder="请输入钉钉机器人的 Webhook 地址" />
         </a-form-item>
         <a-form-item v-if="sourceForm.source_type === 'dingtalk'" label="验证参数（Secret）">
           <a-input-password
             v-model:value="sourceForm.verification_param"
             allow-clear
-            placeholder="选填，钉钉机器人的加签 Secret"
+            :placeholder="editingSourceHasVerificationParam ? '留空则沿用当前 Secret，输入新值则覆盖' : '选填，钉钉机器人的加签 Secret'"
           />
+          <div v-if="editingSourceHasVerificationParam" class="form-help-text">当前已配置 Secret，留空可继续沿用</div>
         </a-form-item>
         <a-form-item label="备注">
           <a-textarea v-model:value="sourceForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：生产发版群、回滚通知群" />
@@ -1187,6 +1203,12 @@ onMounted(async () => {
   border-radius: 999px;
   background: #eef4ff;
   color: #204c8a;
+}
+
+.form-help-text {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #7b8798;
 }
 
 .notification-source-modal-wrap :deep(.ant-modal) {

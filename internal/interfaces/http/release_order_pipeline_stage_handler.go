@@ -48,7 +48,7 @@ func (h *ReleaseOrderHandler) ListPipelineStages(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
+	if !ensureReleaseOrderVisible(c, h.authz, order) {
 		return
 	}
 
@@ -76,7 +76,7 @@ func (h *ReleaseOrderHandler) GetPipelineStageLog(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	if !ensureReleaseOrderVisible(c, h.authz, order.ApplicationID, order.CreatorUserID) {
+	if !ensureReleaseOrderVisible(c, h.authz, order) {
 		return
 	}
 

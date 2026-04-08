@@ -151,6 +151,14 @@ ON CONFLICT(instance_code) DO UPDATE SET
 }
 
 func (r *GitOpsRepository) CreateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedPassword, err := encryptStoredSecret(strings.TrimSpace(item.Password))
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const q = `
 INSERT INTO gitops_instance (
 	id, instance_code, name, local_root, default_branch, username, password_ciphertext, token_ciphertext,
@@ -163,8 +171,8 @@ INSERT INTO gitops_instance (
 		strings.TrimSpace(item.LocalRoot),
 		strings.TrimSpace(item.DefaultBranch),
 		strings.TrimSpace(item.Username),
-		strings.TrimSpace(item.Password),
-		strings.TrimSpace(item.Token),
+		encryptedPassword,
+		encryptedToken,
 		strings.TrimSpace(item.AuthorName),
 		strings.TrimSpace(item.AuthorEmail),
 		strings.TrimSpace(item.CommitMessageTemplate),
@@ -180,6 +188,14 @@ INSERT INTO gitops_instance (
 }
 
 func (r *GitOpsRepository) UpdateInstance(ctx context.Context, item domain.Instance) (domain.Instance, error) {
+	encryptedPassword, err := encryptStoredSecret(strings.TrimSpace(item.Password))
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	encryptedToken, err := encryptStoredSecret(strings.TrimSpace(item.Token))
+	if err != nil {
+		return domain.Instance{}, err
+	}
 	const q = `
 UPDATE gitops_instance
 SET instance_code = ?, name = ?, local_root = ?, default_branch = ?, username = ?, password_ciphertext = ?, token_ciphertext = ?,
@@ -191,8 +207,8 @@ WHERE id = ?;`
 		strings.TrimSpace(item.LocalRoot),
 		strings.TrimSpace(item.DefaultBranch),
 		strings.TrimSpace(item.Username),
-		strings.TrimSpace(item.Password),
-		strings.TrimSpace(item.Token),
+		encryptedPassword,
+		encryptedToken,
 		strings.TrimSpace(item.AuthorName),
 		strings.TrimSpace(item.AuthorEmail),
 		strings.TrimSpace(item.CommitMessageTemplate),
@@ -328,10 +344,12 @@ type gitOpsInstanceScanner interface{ Scan(dest ...any) error }
 
 func scanGitOpsInstance(scanner gitOpsInstanceScanner) (domain.Instance, error) {
 	var (
-		item      domain.Instance
-		status    string
-		createdAt int64
-		updatedAt int64
+		item              domain.Instance
+		encryptedPassword string
+		encryptedToken    string
+		status            string
+		createdAt         int64
+		updatedAt         int64
 	)
 	if err := scanner.Scan(
 		&item.ID,
@@ -340,8 +358,8 @@ func scanGitOpsInstance(scanner gitOpsInstanceScanner) (domain.Instance, error) 
 		&item.LocalRoot,
 		&item.DefaultBranch,
 		&item.Username,
-		&item.Password,
-		&item.Token,
+		&encryptedPassword,
+		&encryptedToken,
 		&item.AuthorName,
 		&item.AuthorEmail,
 		&item.CommitMessageTemplate,
@@ -353,6 +371,16 @@ func scanGitOpsInstance(scanner gitOpsInstanceScanner) (domain.Instance, error) 
 	); err != nil {
 		return domain.Instance{}, err
 	}
+	password, err := decryptStoredSecret(encryptedPassword)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	token, err := decryptStoredSecret(encryptedToken)
+	if err != nil {
+		return domain.Instance{}, err
+	}
+	item.Password = password
+	item.Token = token
 	item.Status = domain.Status(status)
 	item.CreatedAt = unixNanoToTime(createdAt)
 	item.UpdatedAt = unixNanoToTime(updatedAt)

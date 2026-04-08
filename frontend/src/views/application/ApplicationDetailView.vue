@@ -37,6 +37,10 @@ const detailItems = computed(() => {
     { label: '应用 ID', value: app.id },
     { label: '应用名称', value: app.name },
     { label: '应用 Key', value: app.key },
+    {
+      label: '归属项目',
+      value: app.project_name ? `${app.project_name}${app.project_key ? ` (${app.project_key})` : ''}` : '-',
+    },
     { label: '状态', value: app.status },
     { label: '负责人', value: app.owner || '-' },
     { label: '制品类型', value: app.artifact_type || '-' },
@@ -49,6 +53,7 @@ const detailItems = computed(() => {
 })
 
 const gitopsBranchMappings = computed(() => application.value?.gitops_branch_mappings ?? [])
+const releaseBranches = computed(() => application.value?.release_branches ?? [])
 
 function formatTime(value: string) {
   if (!value) {
@@ -186,6 +191,22 @@ onMounted(() => {
       >
         <a-table-column title="环境" data-index="env_code" key="env_code" />
         <a-table-column title="Git 分支" data-index="branch" key="branch" />
+      </a-table>
+    </a-card>
+
+    <a-card title="发布分支" :bordered="true" class="detail-card" :loading="loading">
+      <div v-if="!releaseBranches.length" class="mapping-empty">
+        当前未配置发布分支。
+      </div>
+      <a-table
+        v-else
+        :data-source="releaseBranches"
+        :pagination="false"
+        row-key="branch"
+        size="small"
+      >
+        <a-table-column title="显示名称" data-index="name" key="name" />
+        <a-table-column title="分支" data-index="branch" key="branch" />
       </a-table>
     </a-card>
   </div>

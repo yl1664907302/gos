@@ -82,6 +82,7 @@ func (uc *ExecutorParamDefManager) ListByApplication(
 	ctx context.Context,
 	applicationID string,
 	bindingType pipelinedomain.BindingType,
+	bindingID string,
 	filter domain.ListFilter,
 ) ([]domain.ExecutorParamDef, int64, error) {
 	applicationID = strings.TrimSpace(applicationID)
@@ -99,21 +100,39 @@ func (uc *ExecutorParamDefManager) ListByApplication(
 		return nil, 0, ErrInvalidBindingType
 	}
 
-	bindings, total, err := uc.pipelineRepo.ListBindingsByApplication(ctx, pipelinedomain.BindingListFilter{
-		ApplicationID: applicationID,
-		BindingType:   bindingType,
-		Provider:      pipelinedomain.ProviderJenkins,
-		Page:          1,
-		PageSize:      1,
-	})
-	if err != nil {
-		return nil, 0, err
+	bindingID = strings.TrimSpace(bindingID)
+	var binding pipelinedomain.PipelineBinding
+	var err error
+	if bindingID != "" {
+		binding, err = uc.pipelineRepo.GetBindingByID(ctx, bindingID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if strings.TrimSpace(binding.ApplicationID) != applicationID {
+			return nil, 0, fmt.Errorf("%w: pipeline binding does not belong to current application", ErrInvalidInput)
+		}
+		if binding.BindingType != bindingType {
+			return nil, 0, fmt.Errorf("%w: pipeline binding type mismatch", ErrInvalidInput)
+		}
+		if binding.Status != pipelinedomain.StatusActive {
+			return nil, 0, fmt.Errorf("%w: jenkins pipeline binding is inactive", pipelinedomain.ErrBindingNotFound)
+		}
+	} else {
+		bindings, total, err := uc.pipelineRepo.ListBindingsByApplication(ctx, pipelinedomain.BindingListFilter{
+			ApplicationID: applicationID,
+			BindingType:   bindingType,
+			Provider:      pipelinedomain.ProviderJenkins,
+			Page:          1,
+			PageSize:      1,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		if total == 0 || len(bindings) == 0 {
+			return nil, 0, fmt.Errorf("%w: jenkins pipeline binding not found", pipelinedomain.ErrBindingNotFound)
+		}
+		binding = bindings[0]
 	}
-	if total == 0 || len(bindings) == 0 {
-		return nil, 0, fmt.Errorf("%w: jenkins pipeline binding not found", pipelinedomain.ErrBindingNotFound)
-	}
-
-	binding := bindings[0]
 	if binding.Provider != pipelinedomain.ProviderJenkins {
 		return nil, 0, fmt.Errorf("%w: bound pipeline provider is not jenkins", ErrInvalidInput)
 	}

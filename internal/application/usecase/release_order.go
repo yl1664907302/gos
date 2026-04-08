@@ -22,21 +22,21 @@ import (
 )
 
 type ReleaseOrderManager struct {
-	repo            domain.Repository
-	appRepo         appdomain.Repository
-	pipelineRepo    pipelinedomain.Repository
-	paramRepo       pipelineparamdomain.Repository
-	platformRepo    platformparamdomain.Repository
-	releaseSettings ReleaseSettingsStore
-	jenkins         JenkinsReleaseExecutor
-	agentRepo       agentdomain.Repository
-	argocdRepo      argocddomain.Repository
-	gitopsRepo      gitopsdomain.Repository
+	repo             domain.Repository
+	appRepo          appdomain.Repository
+	pipelineRepo     pipelinedomain.Repository
+	paramRepo        pipelineparamdomain.Repository
+	platformRepo     platformparamdomain.Repository
+	releaseSettings  ReleaseSettingsStore
+	jenkins          JenkinsReleaseExecutor
+	agentRepo        agentdomain.Repository
+	argocdRepo       argocddomain.Repository
+	gitopsRepo       gitopsdomain.Repository
 	notificationRepo notificationdomain.Repository
-	argocdFactory   ArgoCDClientFactory
-	gitopsFactory   GitOpsServiceFactory
-	gitops          GitOpsReleaseService
-	now             func() time.Time
+	argocdFactory    ArgoCDClientFactory
+	gitopsFactory    GitOpsServiceFactory
+	gitops           GitOpsReleaseService
+	now              func() time.Time
 }
 
 type CreateReleaseOrderInput struct {
@@ -72,6 +72,7 @@ type CreateReleaseOrderStepInput struct {
 type ListReleaseOrderInput struct {
 	ApplicationID          string
 	ApplicationIDs         []string
+	VisibleToUserID        string
 	ApprovalApproverUserID string
 	CreatorUserID          string
 	BindingID              string
@@ -149,13 +150,13 @@ func NewReleaseOrderManager(
 	gitops GitOpsReleaseService,
 ) *ReleaseOrderManager {
 	return &ReleaseOrderManager{
-		repo:            repo,
-		appRepo:         appRepo,
-		pipelineRepo:    pipelineRepo,
-		paramRepo:       paramRepo,
-		platformRepo:    platformRepo,
-		releaseSettings: releaseSettings,
-		jenkins:         jenkins,
+		repo:             repo,
+		appRepo:          appRepo,
+		pipelineRepo:     pipelineRepo,
+		paramRepo:        paramRepo,
+		platformRepo:     platformRepo,
+		releaseSettings:  releaseSettings,
+		jenkins:          jenkins,
 		agentRepo:        agentRepo,
 		argocdRepo:       argocdRepo,
 		gitopsRepo:       gitopsRepo,
@@ -1338,6 +1339,7 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 	items, total, err := uc.repo.List(ctx, domain.ListFilter{
 		ApplicationID:          input.ApplicationID,
 		ApplicationIDs:         normalizeReleaseApplicationIDs(input.ApplicationIDs),
+		VisibleToUserID:        strings.TrimSpace(input.VisibleToUserID),
 		ApprovalApproverUserID: strings.TrimSpace(input.ApprovalApproverUserID),
 		CreatorUserID:          strings.TrimSpace(input.CreatorUserID),
 		BindingID:              input.BindingID,
@@ -1658,7 +1660,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
 	logx.Info("release_order", "execute_start", logx.F("order_id", id))
-	if uc.jenkins == nil && uc.argocdFactory == nil && uc.gitops == nil {
+	if uc.jenkins == nil && uc.argocdFactory == nil {
 		err := fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
 		logx.Error("release_order", "execute_failed", err, logx.F("order_id", id))
 		return domain.ReleaseOrder{}, err

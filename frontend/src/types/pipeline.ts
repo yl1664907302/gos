@@ -176,6 +176,7 @@ export interface ExecutorParamDef {
 
 export interface ApplicationExecutorParamListParams {
   binding_type?: BindingType
+  binding_id?: string
   visible?: boolean
   editable?: boolean
   param_key?: string

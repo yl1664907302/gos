@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"gos/internal/infrastructure/jenkins"
 	"gos/internal/infrastructure/persistence/sqlrepo"
 	httpapi "gos/internal/interfaces/http"
+	"gos/internal/support/secure"
 )
 
 //go:generate swag init -g cmd/server/main.go -o docs --parseInternal
@@ -31,10 +33,16 @@ import (
 // @BasePath        /
 // @schemes         http https
 func main() {
-	cfg, err := bootstrap.LoadConfig()
+	configPath := flag.String("config", "configs/config.local.json", "server config file path")
+	flag.Parse()
+
+	resolvedConfigPath := bootstrap.ResolveConfigPath(*configPath)
+
+	cfg, err := bootstrap.LoadConfigFromPath(resolvedConfigPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+	secure.SetSecretKey(cfg.Security.EncryptionKey)
 	if err := bootstrap.CheckJenkinsConnection(cfg); err != nil {
 		log.Fatalf("check jenkins: %v", err)
 	}
@@ -48,6 +56,10 @@ func main() {
 	}
 	defer func() { _ = db.Close() }()
 
+	projectRepo := sqlrepo.NewProjectRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(projectRepo); err != nil {
+		log.Fatalf("init project schema: %v", err)
+	}
 	repo := sqlrepo.NewApplicationRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(repo); err != nil {
 		log.Fatalf("init schema: %v", err)
@@ -71,6 +83,10 @@ func main() {
 	if err := bootstrap.InitSchema(agentRepo); err != nil {
 		log.Fatalf("init agent schema: %v", err)
 	}
+	userRepo := sqlrepo.NewUserRepository(db, cfg.Database.Driver)
+	if err := bootstrap.InitSchema(userRepo); err != nil {
+		log.Fatalf("init user schema: %v", err)
+	}
 	releaseRepo := sqlrepo.NewReleaseRepository(db, cfg.Database.Driver)
 	if err := bootstrap.InitSchema(releaseRepo); err != nil {
 		log.Fatalf("init release schema: %v", err)
@@ -87,18 +103,8 @@ func main() {
 	if err := bootstrap.InitSchema(notificationRepo); err != nil {
 		log.Fatalf("init notification schema: %v", err)
 	}
-	if err := ensureDefaultGitOpsInstance(context.Background(), gitopsRepo, cfg); err != nil {
-		log.Fatalf("ensure default gitops instance: %v", err)
-	}
-	if err := ensureDefaultArgoCDInstance(context.Background(), argocdAppRepo, cfg); err != nil {
-		log.Fatalf("ensure default argocd instance: %v", err)
-	}
 	if err := argocdAppRepo.CleanupLegacyApplications(context.Background()); err != nil {
 		log.Fatalf("cleanup legacy argocd applications: %v", err)
-	}
-	userRepo := sqlrepo.NewUserRepository(db, cfg.Database.Driver)
-	if err := bootstrap.InitSchema(userRepo); err != nil {
-		log.Fatalf("init user schema: %v", err)
 	}
 
 	jenkinsClient := jenkins.NewClient(jenkins.Config{
@@ -106,18 +112,6 @@ func main() {
 		Username:   cfg.Jenkins.Username,
 		APIToken:   cfg.Jenkins.APIToken,
 		TimeoutSec: cfg.Jenkins.TimeoutSec,
-	})
-	gitopsService := gitopsinfra.NewService(gitopsinfra.Config{
-		Enabled:               cfg.GitOps.Enabled,
-		LocalRoot:             cfg.GitOps.LocalRoot,
-		DefaultBranch:         cfg.GitOps.DefaultBranch,
-		Username:              cfg.GitOps.Username,
-		Password:              cfg.GitOps.Password,
-		Token:                 cfg.GitOps.Token,
-		AuthorName:            cfg.GitOps.AuthorName,
-		AuthorEmail:           cfg.GitOps.AuthorEmail,
-		CommitMessageTemplate: cfg.GitOps.CommitMessageTemplate,
-		CommandTimeoutSec:     cfg.GitOps.CommandTimeoutSec,
 	})
 	gitopsServiceFactory := gitOpsServiceFactory{}
 	argocdClientFactory := argoCDClientFactory{}
@@ -149,14 +143,18 @@ func main() {
 	)
 	userHandler := httpapi.NewUserHandler(userManagement, authSessionManager)
 	handler := httpapi.NewApplicationHandler(
-		usecase.NewCreateApplication(repo),
+		usecase.NewCreateApplication(repo, projectRepo),
 		usecase.NewQueryApplication(repo),
-		usecase.NewUpdateApplication(repo),
+		usecase.NewUpdateApplication(repo, projectRepo),
 		usecase.NewDeleteApplication(repo),
 		userManagement,
 		authSessionManager,
 	)
-	releaseStore := configstore.NewReleaseStore(bootstrap.ResolveConfigPath())
+	projectHandler := httpapi.NewProjectHandler(
+		usecase.NewProjectManager(projectRepo),
+		authSessionManager,
+	)
+	releaseStore := configstore.NewReleaseStore(resolvedConfigPath)
 	releaseSettingsQuery := usecase.NewQueryReleaseSettings(releaseStore)
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(
 		releaseSettingsQuery,
@@ -179,19 +177,10 @@ func main() {
 		argocdInstanceManager,
 		authSessionManager,
 	)
-	gitopsStatusQuery := usecase.NewQueryGitOpsStatus(gitopsService)
 	gitopsHandler := httpapi.NewGitOpsHandler(
-		gitopsStatusQuery,
-		usecase.NewQueryGitOpsBindingTargets(gitopsService),
 		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
 		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsInstanceManager),
 		usecase.NewQueryGitOpsValuesCandidates(repo, gitopsInstanceManager),
-		usecase.NewUpdateGitOpsCommitTemplate(
-			configstore.NewGitOpsStore(bootstrap.ResolveConfigPath()),
-			gitopsService,
-			gitopsStatusQuery,
-			platformParamRepo,
-		),
 		gitopsInstanceManager,
 		authSessionManager,
 	)
@@ -223,7 +212,7 @@ func main() {
 		argocdClientFactory,
 		gitopsRepo,
 		gitopsServiceFactory,
-		gitopsService,
+		nil,
 	)
 	releaseTemplateManager := usecase.NewReleaseTemplateManager(releaseRepo, repo, pipelineRepo, executorParamRepo, platformParamRepo, argocdAppRepo, agentRepo, notificationRepo, gitopsInstanceManager)
 	releaseOrderLogStreamer := usecase.NewReleaseOrderLogStreamer(releaseRepo, pipelineRepo, jenkinsClient)
@@ -272,7 +261,7 @@ func main() {
 	})
 	defer syncTask.Stop()
 
-	argocdSyncTask := bootstrap.StartArgoCDAutoSyncTask(cfg.ArgoCD, func(ctx context.Context) error {
+	argocdSyncTask := bootstrap.StartArgoCDAutoSyncTask(cfg.ArgoCD.SyncIntervalSec, func(ctx context.Context) error {
 		result, err := syncArgoCDApplications.Execute(ctx)
 		if err != nil {
 			return err
@@ -288,7 +277,7 @@ func main() {
 	})
 	defer argocdSyncTask.Stop()
 
-	releaseTrackTask := bootstrap.StartReleaseTrackTask(cfg.Jenkins, cfg.ArgoCD, func(ctx context.Context) error {
+	releaseTrackTask := bootstrap.StartReleaseTrackTask(cfg.Jenkins.ReleaseTrackIntervalSec, func(ctx context.Context) error {
 		releaseResult, err := releaseTracker.Execute(ctx)
 		if err != nil {
 			return err
@@ -310,6 +299,7 @@ func main() {
 		userHandler,
 		authSessionManager,
 		handler,
+		projectHandler,
 		systemSettingsHandler,
 		pipelineHandler,
 		argocdHandler,
@@ -335,12 +325,11 @@ func main() {
 		serverErr <- server.ListenAndServe()
 	}()
 	log.Printf(
-		"server listening on %s (env=%s db=%s jenkins_enabled=%t argocd_enabled=%t)",
+		"server listening on %s (env=%s db=%s jenkins_enabled=%t)",
 		cfg.Server.Addr,
 		cfg.Environment,
 		cfg.Database.Driver,
 		cfg.Jenkins.Enabled,
-		cfg.ArgoCD.Enabled,
 	)
 
 	stop := make(chan os.Signal, 1)

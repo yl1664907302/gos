@@ -140,6 +140,7 @@ func (h *ExecutorParamHandler) ListByApplication(c *gin.Context) {
 		c.Request.Context(),
 		c.Param("id"),
 		pipelinedomain.BindingType(strings.TrimSpace(c.Query("binding_type"))),
+		c.Query("binding_id"),
 		domain.ListFilter{
 			Visible:  visible,
 			Editable: editable,

@@ -17,6 +17,7 @@ type Repository interface {
 type ListFilter struct {
 	Key            string
 	Name           string
+	ProjectID      string
 	Status         Status
 	ApplicationIDs []string
 	Page           int
@@ -26,6 +27,7 @@ type ListFilter struct {
 type UpdateInput struct {
 	Name                 string
 	Key                  string
+	ProjectID            string
 	RepoURL              string
 	Description          string
 	OwnerUserID          string
@@ -34,4 +36,5 @@ type UpdateInput struct {
 	ArtifactType         string
 	Language             string
 	GitOpsBranchMappings []GitOpsBranchMapping
+	ReleaseBranches      []ReleaseBranchOption
 }

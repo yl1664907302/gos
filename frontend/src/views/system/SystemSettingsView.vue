@@ -12,7 +12,6 @@ const concurrency = reactive({
   lock_scope: 'application_env',
   conflict_strategy: 'reject',
   lock_timeout_sec: 1800,
-  allow_admin_override: true,
 })
 
 function normalizeEnvOptions(values: string[]) {
@@ -38,7 +37,6 @@ async function loadSettings() {
     concurrency.lock_scope = response.data.concurrency?.lock_scope || 'application_env'
     concurrency.conflict_strategy = response.data.concurrency?.conflict_strategy || 'reject'
     concurrency.lock_timeout_sec = Number(response.data.concurrency?.lock_timeout_sec || 1800)
-    concurrency.allow_admin_override = Boolean(response.data.concurrency?.allow_admin_override)
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '系统设置加载失败'))
   } finally {
@@ -61,7 +59,6 @@ async function saveSettings() {
         lock_scope: concurrency.lock_scope as 'application' | 'application_env' | 'gitops_repo_branch',
         conflict_strategy: concurrency.conflict_strategy as 'reject' | 'queue',
         lock_timeout_sec: Number(concurrency.lock_timeout_sec || 1800),
-        allow_admin_override: concurrency.allow_admin_override,
       },
     })
     envOptions.value = normalizeEnvOptions(response.data.env_options || [])
@@ -69,7 +66,6 @@ async function saveSettings() {
     concurrency.lock_scope = response.data.concurrency?.lock_scope || 'application_env'
     concurrency.conflict_strategy = response.data.concurrency?.conflict_strategy || 'reject'
     concurrency.lock_timeout_sec = Number(response.data.concurrency?.lock_timeout_sec || 1800)
-    concurrency.allow_admin_override = Boolean(response.data.concurrency?.allow_admin_override)
     message.success('系统设置已保存')
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '系统设置保存失败'))
@@ -146,9 +142,6 @@ onMounted(() => {
         </a-form-item>
         <a-form-item label="锁超时（秒）">
           <a-input-number v-model:value="concurrency.lock_timeout_sec" :min="30" :max="86400" style="width: 100%" />
-        </a-form-item>
-        <a-form-item label="允许管理员强制覆盖">
-          <a-switch v-model:checked="concurrency.allow_admin_override" />
         </a-form-item>
       </a-form>
     </a-card>

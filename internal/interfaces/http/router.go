@@ -17,6 +17,7 @@ func NewRouter(
 	userHandler *UserHandler,
 	sessionResolver SessionUserResolver,
 	applicationHandler *ApplicationHandler,
+	projectHandler *ProjectHandler,
 	systemSettingsHandler *SystemSettingsHandler,
 	pipelineHandler *PipelineHandler,
 	argocdHandler *ArgoCDHandler,
@@ -38,6 +39,7 @@ func NewRouter(
 	registerAgentRoutes(router, agentHandler)
 	registerUserRoutes(router, userHandler)
 	registerApplicationRoutes(router, applicationHandler)
+	registerProjectRoutes(router, projectHandler)
 	registerSystemSettingsRoutes(router, systemSettingsHandler)
 	registerPipelineRoutes(router, pipelineHandler)
 	registerArgoCDRoutes(router, argocdHandler)
@@ -78,6 +80,13 @@ func registerAgentRoutes(router gin.IRouter, agentHandler *AgentHandler) {
 
 func registerApplicationRoutes(router gin.IRouter, applicationHandler *ApplicationHandler) {
 	applicationHandler.RegisterRoutes(router)
+}
+
+func registerProjectRoutes(router gin.IRouter, projectHandler *ProjectHandler) {
+	if projectHandler == nil {
+		return
+	}
+	projectHandler.RegisterRoutes(router)
 }
 
 func registerSystemSettingsRoutes(router gin.IRouter, systemSettingsHandler *SystemSettingsHandler) {

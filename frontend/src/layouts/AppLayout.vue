@@ -32,6 +32,9 @@ const activeMenuKey = computed(() => {
   if (route.path.includes('/pipeline-bindings')) {
     return ['pipeline-bindings']
   }
+  if (route.path.startsWith('/projects')) {
+    return ['project-management']
+  }
   if (route.path.startsWith('/platform-param-dicts')) {
     return ['platform-param-dicts']
   }
@@ -94,7 +97,11 @@ const openMenuKeys = computed(() => {
   if (route.path.startsWith('/release-templates')) {
     return ['release-management']
   }
-  if (route.path.startsWith('/applications') || route.path.startsWith('/platform-param-dicts')) {
+  if (
+    route.path.startsWith('/applications') ||
+    route.path.startsWith('/projects') ||
+    route.path.startsWith('/platform-param-dicts')
+  ) {
     return ['application-management']
   }
   if (route.path.startsWith('/system/')) {
@@ -169,6 +176,10 @@ function goToPipelineBindings() {
 
 function goToPlatformParamDicts() {
   void router.push('/platform-param-dicts')
+}
+
+function goToProjectManagement() {
+  void router.push('/projects')
 }
 
 function goToJenkinsManagement() {
@@ -267,6 +278,9 @@ async function handleLogout() {
           </a-menu-item>
           <a-menu-item v-if="canViewPipeline" key="pipeline-bindings" @click="goToPipelineBindings">
             管线绑定
+          </a-menu-item>
+          <a-menu-item v-if="canManageApplications" key="project-management" @click="goToProjectManagement">
+            项目管理
           </a-menu-item>
           <a-menu-item v-if="canManagePlatformParam" key="platform-param-dicts" @click="goToPlatformParamDicts">
             标准字库

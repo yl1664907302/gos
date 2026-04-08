@@ -1257,20 +1257,6 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	if filter.ApplicationID != "" {
 		where = append(where, "application_id = ?")
 		args = append(args, filter.ApplicationID)
-	} else if len(filter.ApplicationIDs) > 0 {
-		placeholders := make([]string, 0, len(filter.ApplicationIDs))
-		for _, item := range filter.ApplicationIDs {
-			value := strings.TrimSpace(item)
-			if value == "" {
-				continue
-			}
-			placeholders = append(placeholders, "?")
-			args = append(args, value)
-		}
-		if len(placeholders) == 0 {
-			return []domain.ReleaseOrder{}, 0, nil
-		}
-		where = append(where, "application_id IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if filter.BindingID != "" {
 		where = append(where, "binding_id = ?")
@@ -1282,7 +1268,7 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	}
 	if value := strings.TrimSpace(filter.ApprovalApproverUserID); value != "" {
 		where = append(where, "approval_approver_ids_json LIKE ?")
-		args = append(args, `%\"`+value+`\"%`)
+		args = append(args, "%\""+value+"\"%")
 	}
 	if filter.EnvCode != "" {
 		where = append(where, "env_code = ?")
@@ -1295,6 +1281,10 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 	if filter.TriggerType != "" {
 		where = append(where, "trigger_type = ?")
 		args = append(args, string(filter.TriggerType))
+	}
+	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClause(filter.ApplicationIDs, filter.VisibleToUserID); visibilityClause != "" {
+		where = append(where, visibilityClause)
+		args = append(args, visibilityArgs...)
 	}
 
 	countQuery := "SELECT COUNT(1) FROM release_order"
@@ -1695,10 +1685,11 @@ FROM release_order
 WHERE application_id = ?
   AND env_code = ?
   AND id <> ?
-  AND status IN (?, ?)
+  AND status IN (?, ?, ?)
 ORDER BY CASE status
 	WHEN ? THEN 0
 	WHEN ? THEN 1
+	WHEN ? THEN 2
 	ELSE 9
 END, created_at ASC
 LIMIT 1;`
@@ -1709,10 +1700,12 @@ LIMIT 1;`
 		applicationID,
 		envCode,
 		excludeReleaseOrderID,
+		string(domain.OrderStatusQueued),
 		string(domain.OrderStatusDeploying),
 		string(domain.OrderStatusRunning),
 		string(domain.OrderStatusDeploying),
 		string(domain.OrderStatusRunning),
+		string(domain.OrderStatusQueued),
 	)
 	item, err := scanReleaseOrder(row)
 	if err != nil {
@@ -1722,6 +1715,43 @@ LIMIT 1;`
 		return domain.ReleaseOrder{}, err
 	}
 	return item, nil
+}
+
+func (r *ReleaseRepository) CountActiveOrdersByApplicationEnv(
+	ctx context.Context,
+	applicationID string,
+	envCode string,
+	excludeReleaseOrderID string,
+) (int, error) {
+	applicationID = strings.TrimSpace(applicationID)
+	envCode = strings.TrimSpace(envCode)
+	excludeReleaseOrderID = strings.TrimSpace(excludeReleaseOrderID)
+	if applicationID == "" || envCode == "" {
+		return 0, nil
+	}
+
+	const q = `
+SELECT COUNT(1)
+FROM release_order
+WHERE application_id = ?
+  AND env_code = ?
+  AND id <> ?
+  AND status IN (?, ?, ?);`
+
+	var count int
+	if err := r.db.QueryRowContext(
+		ctx,
+		q,
+		applicationID,
+		envCode,
+		excludeReleaseOrderID,
+		string(domain.OrderStatusQueued),
+		string(domain.OrderStatusDeploying),
+		string(domain.OrderStatusRunning),
+	).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (r *ReleaseRepository) FindActiveExecutionLock(
@@ -2657,24 +2687,14 @@ func (r *ReleaseRepository) ListApprovalRecordSummaries(ctx context.Context, fil
 	if value := strings.TrimSpace(filter.ApplicationID); value != "" {
 		where = append(where, "ro.application_id = ?")
 		args = append(args, value)
-	} else if len(filter.ApplicationIDs) > 0 {
-		placeholders := make([]string, 0, len(filter.ApplicationIDs))
-		for _, item := range filter.ApplicationIDs {
-			value := strings.TrimSpace(item)
-			if value == "" {
-				continue
-			}
-			placeholders = append(placeholders, "?")
-			args = append(args, value)
-		}
-		if len(placeholders) == 0 {
-			return []domain.ReleaseOrderApprovalRecordSummary{}, 0, nil
-		}
-		where = append(where, "ro.application_id IN ("+strings.Join(placeholders, ", ")+")")
 	}
 	if value := strings.TrimSpace(filter.OperatorUserID); value != "" {
 		where = append(where, "ar.operator_user_id = ?")
 		args = append(args, value)
+	}
+	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClauseWithAlias("ro", filter.ApplicationIDs, filter.VisibleToUserID); visibilityClause != "" {
+		where = append(where, visibilityClause)
+		args = append(args, visibilityArgs...)
 	}
 
 	countQuery := `
@@ -2731,6 +2751,44 @@ INNER JOIN release_order ro ON ro.id = ar.release_order_id`
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func buildReleaseOrderVisibilityClause(applicationIDs []string, viewerUserID string) (string, []any) {
+	return buildReleaseOrderVisibilityClauseWithAlias("", applicationIDs, viewerUserID)
+}
+
+func buildReleaseOrderVisibilityClauseWithAlias(alias string, applicationIDs []string, viewerUserID string) (string, []any) {
+	qualified := func(column string) string {
+		if strings.TrimSpace(alias) == "" {
+			return column
+		}
+		return alias + "." + column
+	}
+
+	parts := make([]string, 0, 3)
+	args := make([]any, 0, len(applicationIDs)+2)
+	placeholders := make([]string, 0, len(applicationIDs))
+	for _, item := range applicationIDs {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, value)
+	}
+	if len(placeholders) > 0 {
+		parts = append(parts, qualified("application_id")+" IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	if value := strings.TrimSpace(viewerUserID); value != "" {
+		parts = append(parts, qualified("creator_user_id")+" = ?")
+		args = append(args, value)
+		parts = append(parts, qualified("approval_approver_ids_json")+" LIKE ?")
+		args = append(args, "%\""+value+"\"%")
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 func (r *ReleaseRepository) insertTemplateBindings(

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 )
 
@@ -18,6 +17,7 @@ type Config struct {
 	GitOps      GitOpsConfig   `json:"gitops"`
 	Release     ReleaseConfig  `json:"release"`
 	Auth        AuthConfig     `json:"auth"`
+	Security    SecurityConfig `json:"security"`
 }
 
 type ServerConfig struct {
@@ -98,11 +98,10 @@ type ReleaseConfig struct {
 }
 
 type ReleaseConcurrencyConfig struct {
-	Enabled            bool   `json:"enabled"`
-	LockScope          string `json:"lock_scope"`
-	ConflictStrategy   string `json:"conflict_strategy"`
-	LockTimeoutSec     int    `json:"lock_timeout_sec"`
-	AllowAdminOverride bool   `json:"allow_admin_override"`
+	Enabled          bool   `json:"enabled"`
+	LockScope        string `json:"lock_scope"`
+	ConflictStrategy string `json:"conflict_strategy"`
+	LockTimeoutSec   int    `json:"lock_timeout_sec"`
 }
 
 type AuthConfig struct {
@@ -112,15 +111,22 @@ type AuthConfig struct {
 	AdminPassword    string `json:"admin_password"`
 }
 
+type SecurityConfig struct {
+	EncryptionKey string `json:"encryption_key"`
+}
+
 func LoadConfig() (Config, error) {
+	return LoadConfigFromPath("")
+}
+
+func LoadConfigFromPath(path string) (Config, error) {
 	cfg := defaultConfig()
 
-	configPath := ResolveConfigPath()
+	configPath := ResolveConfigPath(path)
 
 	if err := loadFromFile(configPath, &cfg); err != nil {
 		return Config{}, err
 	}
-	overrideFromEnv(&cfg)
 	applyConfigDefaults(&cfg)
 
 	if err := validateConfig(cfg); err != nil {
@@ -129,8 +135,8 @@ func LoadConfig() (Config, error) {
 	return cfg, nil
 }
 
-func ResolveConfigPath() string {
-	configPath := strings.TrimSpace(os.Getenv("APP_CONFIG_FILE"))
+func ResolveConfigPath(path string) string {
+	configPath := strings.TrimSpace(path)
 	if configPath == "" {
 		configPath = "configs/config.local.json"
 	}
@@ -149,8 +155,8 @@ func defaultConfig() Config {
 			ShutdownTimeoutSec:   10,
 		},
 		Database: DatabaseConfig{
-			Driver:                  "mysql",
-			MySQLDSN:                "root:root@tcp(127.0.0.1:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC",
+			Driver:                  "sqlite",
+			MySQLDSN:                "",
 			SQLitePath:              "data/demo.db",
 			MaxOpenConns:            10,
 			MaxIdleConns:            5,
@@ -199,19 +205,19 @@ func defaultConfig() Config {
 		Release: ReleaseConfig{
 			EnvOptions: []string{"dev", "test", "prod"},
 			Concurrency: ReleaseConcurrencyConfig{
-				Enabled:            false,
-				LockScope:          "application_env",
-				ConflictStrategy:   "reject",
-				LockTimeoutSec:     1800,
-				AllowAdminOverride: true,
+				Enabled:          false,
+				LockScope:        "application_env",
+				ConflictStrategy: "reject",
+				LockTimeoutSec:   1800,
 			},
 		},
 		Auth: AuthConfig{
 			SessionTTLHours:  24,
 			AdminUsername:    "admin",
 			AdminDisplayName: "Administrator",
-			AdminPassword:    "admin123",
+			AdminPassword:    "",
 		},
+		Security: SecurityConfig{},
 	}
 }
 
@@ -231,135 +237,6 @@ func loadFromFile(path string, cfg *Config) error {
 		return fmt.Errorf("decode config file %q: %w", path, err)
 	}
 	return nil
-}
-
-func overrideFromEnv(cfg *Config) {
-	if v := strings.TrimSpace(os.Getenv("APP_ENV")); v != "" {
-		cfg.Environment = v
-	}
-	if v := strings.TrimSpace(os.Getenv("APP_ADDR")); v != "" {
-		cfg.Server.Addr = v
-	}
-	if v := strings.TrimSpace(os.Getenv("DB_DRIVER")); v != "" {
-		cfg.Database.Driver = strings.ToLower(v)
-	}
-	if v := strings.TrimSpace(os.Getenv("MYSQL_DSN")); v != "" {
-		cfg.Database.MySQLDSN = v
-	}
-	if v := strings.TrimSpace(os.Getenv("SQLITE_PATH")); v != "" {
-		cfg.Database.SQLitePath = v
-	}
-	if v, ok := boolFromEnv("JENKINS_ENABLED"); ok {
-		cfg.Jenkins.Enabled = v
-	}
-	if v := strings.TrimSpace(os.Getenv("JENKINS_BASE_URL")); v != "" {
-		cfg.Jenkins.BaseURL = v
-	}
-	if v := strings.TrimSpace(os.Getenv("JENKINS_USERNAME")); v != "" {
-		cfg.Jenkins.Username = v
-	}
-	if v := strings.TrimSpace(os.Getenv("JENKINS_API_TOKEN")); v != "" {
-		cfg.Jenkins.APIToken = v
-	}
-	if v, ok := intFromEnv("JENKINS_TIMEOUT_SEC"); ok {
-		cfg.Jenkins.TimeoutSec = v
-	}
-	if v, ok := boolFromEnv("JENKINS_STARTUP_CHECK_ENABLED"); ok {
-		cfg.Jenkins.StartupCheckEnabled = v
-	}
-	if v, ok := intFromEnv("JENKINS_STARTUP_MAX_RETRIES"); ok {
-		cfg.Jenkins.StartupMaxRetries = v
-	}
-	if v, ok := intFromEnv("JENKINS_STARTUP_RETRY_INTERVAL_SEC"); ok {
-		cfg.Jenkins.StartupRetryIntervalSec = v
-	}
-	if v, ok := boolFromEnv("JENKINS_AUTO_SYNC_ENABLED"); ok {
-		cfg.Jenkins.AutoSyncEnabled = v
-	}
-	if v, ok := intFromEnv("JENKINS_AUTO_SYNC_INTERVAL_SEC"); ok {
-		cfg.Jenkins.AutoSyncIntervalSec = v
-	}
-	if v, ok := boolFromEnv("JENKINS_RELEASE_TRACK_ENABLED"); ok {
-		cfg.Jenkins.ReleaseTrackEnabled = v
-	}
-	if v, ok := intFromEnv("JENKINS_RELEASE_TRACK_INTERVAL_SEC"); ok {
-		cfg.Jenkins.ReleaseTrackIntervalSec = v
-	}
-	if v, ok := boolFromEnv("ARGOCD_ENABLED"); ok {
-		cfg.ArgoCD.Enabled = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ARGOCD_BASE_URL")); v != "" {
-		cfg.ArgoCD.BaseURL = v
-	}
-	if v, ok := boolFromEnv("ARGOCD_INSECURE_SKIP_VERIFY"); ok {
-		cfg.ArgoCD.InsecureSkipVerify = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ARGOCD_AUTH_MODE")); v != "" {
-		cfg.ArgoCD.AuthMode = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ARGOCD_TOKEN")); v != "" {
-		cfg.ArgoCD.Token = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ARGOCD_USERNAME")); v != "" {
-		cfg.ArgoCD.Username = v
-	}
-	if v := strings.TrimSpace(os.Getenv("ARGOCD_PASSWORD")); v != "" {
-		cfg.ArgoCD.Password = v
-	}
-	if v, ok := intFromEnv("ARGOCD_REQUEST_TIMEOUT_SEC"); ok {
-		cfg.ArgoCD.TimeoutSec = v
-	}
-	if v, ok := boolFromEnv("ARGOCD_STARTUP_CHECK_ENABLED"); ok {
-		cfg.ArgoCD.StartupCheckEnabled = v
-	}
-	if v, ok := boolFromEnv("ARGOCD_SYNC_ENABLED"); ok {
-		cfg.ArgoCD.SyncEnabled = v
-	}
-	if v, ok := intFromEnv("ARGOCD_SYNC_INTERVAL_SEC"); ok {
-		cfg.ArgoCD.SyncIntervalSec = v
-	}
-	if v, ok := boolFromEnv("GITOPS_ENABLED"); ok {
-		cfg.GitOps.Enabled = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_LOCAL_ROOT")); v != "" {
-		cfg.GitOps.LocalRoot = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_DEFAULT_BRANCH")); v != "" {
-		cfg.GitOps.DefaultBranch = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_USERNAME")); v != "" {
-		cfg.GitOps.Username = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_PASSWORD")); v != "" {
-		cfg.GitOps.Password = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_TOKEN")); v != "" {
-		cfg.GitOps.Token = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_AUTHOR_NAME")); v != "" {
-		cfg.GitOps.AuthorName = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_AUTHOR_EMAIL")); v != "" {
-		cfg.GitOps.AuthorEmail = v
-	}
-	if v := strings.TrimSpace(os.Getenv("GITOPS_COMMIT_MESSAGE_TEMPLATE")); v != "" {
-		cfg.GitOps.CommitMessageTemplate = v
-	}
-	if v, ok := intFromEnv("GITOPS_COMMAND_TIMEOUT_SEC"); ok {
-		cfg.GitOps.CommandTimeoutSec = v
-	}
-	if v, ok := intFromEnv("AUTH_SESSION_TTL_HOURS"); ok {
-		cfg.Auth.SessionTTLHours = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_USERNAME")); v != "" {
-		cfg.Auth.AdminUsername = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_DISPLAY_NAME")); v != "" {
-		cfg.Auth.AdminDisplayName = v
-	}
-	if v := strings.TrimSpace(os.Getenv("AUTH_ADMIN_PASSWORD")); v != "" {
-		cfg.Auth.AdminPassword = v
-	}
 }
 
 func applyConfigDefaults(cfg *Config) {
@@ -410,8 +287,8 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.Database.Driver == "" {
 		cfg.Database.Driver = "mysql"
 	}
-	cfg.Database.MySQLDSN = strings.TrimSpace(os.ExpandEnv(cfg.Database.MySQLDSN))
-	cfg.Database.SQLitePath = strings.TrimSpace(os.ExpandEnv(cfg.Database.SQLitePath))
+	cfg.Database.MySQLDSN = strings.TrimSpace(cfg.Database.MySQLDSN)
+	cfg.Database.SQLitePath = strings.TrimSpace(cfg.Database.SQLitePath)
 	if cfg.Database.MaxOpenConns <= 0 {
 		cfg.Database.MaxOpenConns = 10
 	}
@@ -434,9 +311,9 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Database.StartupRetryIntervalSec = 2
 	}
 
-	cfg.Jenkins.BaseURL = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.BaseURL))
-	cfg.Jenkins.Username = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.Username))
-	cfg.Jenkins.APIToken = strings.TrimSpace(os.ExpandEnv(cfg.Jenkins.APIToken))
+	cfg.Jenkins.BaseURL = strings.TrimSpace(cfg.Jenkins.BaseURL)
+	cfg.Jenkins.Username = strings.TrimSpace(cfg.Jenkins.Username)
+	cfg.Jenkins.APIToken = strings.TrimSpace(cfg.Jenkins.APIToken)
 	if cfg.Jenkins.TimeoutSec <= 0 {
 		cfg.Jenkins.TimeoutSec = 60
 	}
@@ -453,11 +330,11 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.Jenkins.ReleaseTrackIntervalSec = 10
 	}
 
-	cfg.ArgoCD.BaseURL = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.BaseURL))
-	cfg.ArgoCD.AuthMode = strings.ToLower(strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.AuthMode)))
-	cfg.ArgoCD.Token = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Token))
-	cfg.ArgoCD.Username = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Username))
-	cfg.ArgoCD.Password = strings.TrimSpace(os.ExpandEnv(cfg.ArgoCD.Password))
+	cfg.ArgoCD.BaseURL = strings.TrimSpace(cfg.ArgoCD.BaseURL)
+	cfg.ArgoCD.AuthMode = strings.ToLower(strings.TrimSpace(cfg.ArgoCD.AuthMode))
+	cfg.ArgoCD.Token = strings.TrimSpace(cfg.ArgoCD.Token)
+	cfg.ArgoCD.Username = strings.TrimSpace(cfg.ArgoCD.Username)
+	cfg.ArgoCD.Password = strings.TrimSpace(cfg.ArgoCD.Password)
 	if cfg.ArgoCD.AuthMode == "" {
 		cfg.ArgoCD.AuthMode = "token"
 	}
@@ -468,14 +345,14 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.ArgoCD.SyncIntervalSec = 300
 	}
 
-	cfg.GitOps.LocalRoot = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.LocalRoot))
-	cfg.GitOps.DefaultBranch = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.DefaultBranch))
-	cfg.GitOps.Username = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Username))
-	cfg.GitOps.Password = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Password))
-	cfg.GitOps.Token = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.Token))
-	cfg.GitOps.AuthorName = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorName))
-	cfg.GitOps.AuthorEmail = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.AuthorEmail))
-	cfg.GitOps.CommitMessageTemplate = strings.TrimSpace(os.ExpandEnv(cfg.GitOps.CommitMessageTemplate))
+	cfg.GitOps.LocalRoot = strings.TrimSpace(cfg.GitOps.LocalRoot)
+	cfg.GitOps.DefaultBranch = strings.TrimSpace(cfg.GitOps.DefaultBranch)
+	cfg.GitOps.Username = strings.TrimSpace(cfg.GitOps.Username)
+	cfg.GitOps.Password = strings.TrimSpace(cfg.GitOps.Password)
+	cfg.GitOps.Token = strings.TrimSpace(cfg.GitOps.Token)
+	cfg.GitOps.AuthorName = strings.TrimSpace(cfg.GitOps.AuthorName)
+	cfg.GitOps.AuthorEmail = strings.TrimSpace(cfg.GitOps.AuthorEmail)
+	cfg.GitOps.CommitMessageTemplate = strings.TrimSpace(cfg.GitOps.CommitMessageTemplate)
 	if cfg.GitOps.LocalRoot == "" {
 		cfg.GitOps.LocalRoot = "data/gitops"
 	}
@@ -503,17 +380,18 @@ func applyConfigDefaults(cfg *Config) {
 	if cfg.Auth.SessionTTLHours <= 0 {
 		cfg.Auth.SessionTTLHours = 24
 	}
-	cfg.Auth.AdminUsername = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminUsername))
-	cfg.Auth.AdminDisplayName = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminDisplayName))
-	cfg.Auth.AdminPassword = strings.TrimSpace(os.ExpandEnv(cfg.Auth.AdminPassword))
+	cfg.Auth.AdminUsername = strings.TrimSpace(cfg.Auth.AdminUsername)
+	cfg.Auth.AdminDisplayName = strings.TrimSpace(cfg.Auth.AdminDisplayName)
+	cfg.Auth.AdminPassword = strings.TrimSpace(cfg.Auth.AdminPassword)
 	if cfg.Auth.AdminUsername == "" {
 		cfg.Auth.AdminUsername = "admin"
 	}
 	if cfg.Auth.AdminDisplayName == "" {
 		cfg.Auth.AdminDisplayName = "Administrator"
 	}
-	if cfg.Auth.AdminPassword == "" {
-		cfg.Auth.AdminPassword = "admin123"
+	cfg.Security.EncryptionKey = strings.TrimSpace(cfg.Security.EncryptionKey)
+	if cfg.Security.EncryptionKey == "" && strings.EqualFold(cfg.Environment, "local") {
+		cfg.Security.EncryptionKey = "gos-local-dev-encryption-key"
 	}
 }
 
@@ -578,31 +456,14 @@ func validateConfig(cfg Config) error {
 		return fmt.Errorf("unsupported release.concurrency.conflict_strategy %q", cfg.Release.Concurrency.ConflictStrategy)
 	}
 
+	if cfg.Auth.AdminPassword == "" {
+		return errors.New("auth.admin_password is required")
+	}
+	if cfg.Security.EncryptionKey == "" {
+		return errors.New("security.encryption_key is required")
+	}
+
 	return nil
-}
-
-func boolFromEnv(key string) (bool, bool) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return false, false
-	}
-	value, err := strconv.ParseBool(raw)
-	if err != nil {
-		return false, false
-	}
-	return value, true
-}
-
-func intFromEnv(key string) (int, bool) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return 0, false
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, false
-	}
-	return value, true
 }
 
 func normalizeStringList(values []string) []string {
@@ -612,7 +473,7 @@ func normalizeStringList(values []string) []string {
 	result := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))
 	for _, item := range values {
-		value := strings.TrimSpace(os.ExpandEnv(item))
+		value := strings.TrimSpace(item)
 		if value == "" {
 			continue
 		}
