@@ -104,9 +104,9 @@ const workbenchLoading = computed(() => loading.value || loadingTemplateAvailabi
 const initialWorkbenchLoading = computed(() => workbenchLoading.value && dataSource.value.length === 0)
 
 const filters = computed(() => ({
-  key: listStore.key.trim() || undefined,
-  name: listStore.name.trim() || undefined,
-  project_id: listStore.project_id.trim() || undefined,
+  key: String(listStore.key || '').trim() || undefined,
+  name: String(listStore.name || '').trim() || undefined,
+  project_id: String(listStore.project_id || '').trim() || undefined,
   status: listStore.status || undefined,
   page: listStore.page,
   page_size: listStore.pageSize,
@@ -1327,6 +1327,26 @@ onUnmounted(() => {
   display: grid;
   gap: 20px;
   align-items: start;
+}
+
+.filter-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 16px;
+}
+
+.filter-form :deep(.ant-form-item) {
+  align-items: center;
+  margin-inline-end: 0;
+  margin-bottom: 0;
+}
+
+.filter-form :deep(.ant-form-item-label) {
+  padding-inline-end: 10px;
+}
+
+.filter-form :deep(.ant-form-item-control) {
+  min-width: 150px;
 }
 
 .application-workbench-columns-3 {
