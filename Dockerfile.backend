@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+
+FROM golang:1.25 AS builder
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/gos-server ./cmd/server
+
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates tzdata curl \
+  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /out/gos-server /usr/local/bin/gos-server
+COPY configs/config.docker.json /app/configs/config.docker.json
+
+EXPOSE 8081
+CMD ["gos-server", "-config", "/app/configs/config.docker.json"]

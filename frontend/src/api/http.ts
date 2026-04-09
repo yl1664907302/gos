@@ -4,12 +4,25 @@ function resolveDefaultAPIBaseURL() {
   if (typeof window === 'undefined') {
     return 'http://localhost:8081'
   }
+
+  const configured = String(import.meta.env.VITE_API_BASE_URL || '').trim()
+  if (configured) {
+    return configured
+  }
+
   const protocol = window.location.protocol || 'http:'
   const hostname = window.location.hostname || 'localhost'
-  return `${protocol}//${hostname}:8081`
+  const port = window.location.port || ''
+
+  // 本地开发默认前端 5174、后端 8081；生产环境默认走同源。
+  if (port === '5174') {
+    return `${protocol}//${hostname}:8081`
+  }
+
+  return window.location.origin
 }
 
-export const apiBaseURL = import.meta.env.VITE_API_BASE_URL?.trim() || resolveDefaultAPIBaseURL()
+export const apiBaseURL = resolveDefaultAPIBaseURL()
 
 export const http = axios.create({
   baseURL: apiBaseURL,

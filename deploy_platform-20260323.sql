@@ -1,8 +1,3 @@
--- MySQL dump 10.13  Distrib 9.6.0, for macos26.2 (arm64)
---
--- Host: 192.168.49.227    Database: deploy_platform
--- ------------------------------------------------------
--- Server version	8.0.27
 
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
 /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
@@ -15,10 +10,105 @@
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
 
---
--- Table structure for table `applications`
---
+CREATE DATABASE /*!32312 IF NOT EXISTS*/ `deploy_platform` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */;
 
+USE `deploy_platform`;
+DROP TABLE IF EXISTS `agent_instance`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `agent_instance` (
+  `id` varchar(64) NOT NULL,
+  `agent_code` varchar(100) NOT NULL,
+  `name` varchar(120) NOT NULL,
+  `environment_code` varchar(120) NOT NULL DEFAULT '',
+  `work_dir` varchar(500) NOT NULL,
+  `token_ciphertext` text NOT NULL,
+  `tags_json` text NOT NULL,
+  `hostname` varchar(255) NOT NULL DEFAULT '',
+  `host_ip` varchar(120) NOT NULL DEFAULT '',
+  `agent_version` varchar(120) NOT NULL DEFAULT '',
+  `os` varchar(120) NOT NULL DEFAULT '',
+  `arch` varchar(120) NOT NULL DEFAULT '',
+  `status` varchar(20) NOT NULL DEFAULT 'active',
+  `last_heartbeat_at` bigint NOT NULL DEFAULT '0',
+  `current_task_id` varchar(120) NOT NULL DEFAULT '',
+  `current_task_name` varchar(255) NOT NULL DEFAULT '',
+  `current_task_type` varchar(120) NOT NULL DEFAULT '',
+  `current_task_started_at` bigint NOT NULL DEFAULT '0',
+  `last_task_status` varchar(20) NOT NULL DEFAULT 'unknown',
+  `last_task_summary` varchar(500) NOT NULL DEFAULT '',
+  `last_task_finished_at` bigint NOT NULL DEFAULT '0',
+  `remark` varchar(500) NOT NULL DEFAULT '',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_agent_instance_code` (`agent_code`),
+  KEY `idx_agent_instance_status` (`status`),
+  KEY `idx_agent_instance_env` (`environment_code`),
+  KEY `idx_agent_instance_heartbeat` (`last_heartbeat_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `agent_script`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `agent_script` (
+  `id` varchar(64) NOT NULL,
+  `name` varchar(160) NOT NULL,
+  `description` varchar(500) NOT NULL DEFAULT '',
+  `task_type` varchar(50) NOT NULL,
+  `shell_type` varchar(20) NOT NULL DEFAULT 'sh',
+  `script_path` varchar(500) NOT NULL DEFAULT '',
+  `script_text` mediumtext NOT NULL,
+  `created_by` varchar(100) NOT NULL DEFAULT '',
+  `updated_by` varchar(100) NOT NULL DEFAULT '',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_agent_script_type_created` (`task_type`,`created_at`),
+  KEY `idx_agent_script_name_created` (`name`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `agent_task`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `agent_task` (
+  `id` varchar(64) NOT NULL,
+  `agent_id` varchar(64) NOT NULL,
+  `agent_code` varchar(100) NOT NULL,
+  `name` varchar(200) NOT NULL,
+  `task_mode` varchar(20) NOT NULL DEFAULT 'temporary',
+  `task_type` varchar(50) NOT NULL,
+  `shell_type` varchar(20) NOT NULL DEFAULT 'sh',
+  `work_dir` varchar(500) NOT NULL,
+  `script_id` varchar(64) NOT NULL DEFAULT '',
+  `script_name` varchar(200) NOT NULL DEFAULT '',
+  `script_path` varchar(500) NOT NULL DEFAULT '',
+  `script_text` mediumtext NOT NULL,
+  `variables_json` mediumtext NOT NULL,
+  `timeout_sec` int NOT NULL DEFAULT '300',
+  `status` varchar(20) NOT NULL DEFAULT 'pending',
+  `claimed_at` bigint NOT NULL DEFAULT '0',
+  `started_at` bigint NOT NULL DEFAULT '0',
+  `finished_at` bigint NOT NULL DEFAULT '0',
+  `exit_code` int NOT NULL DEFAULT '0',
+  `stdout_text` mediumtext NOT NULL,
+  `stderr_text` mediumtext NOT NULL,
+  `failure_reason` text NOT NULL,
+  `run_count` int NOT NULL DEFAULT '0',
+  `success_count` int NOT NULL DEFAULT '0',
+  `failure_count` int NOT NULL DEFAULT '0',
+  `last_run_status` varchar(20) NOT NULL DEFAULT '',
+  `last_run_summary` text NOT NULL,
+  `created_by` varchar(100) NOT NULL DEFAULT '',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_agent_task_agent_status` (`agent_id`,`status`),
+  KEY `idx_agent_task_status_created` (`status`,`created_at`),
+  KEY `idx_agent_task_agent_created` (`agent_id`,`created_at`),
+  KEY `idx_agent_task_agent_mode_status` (`agent_id`,`task_mode`,`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `applications`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -26,6 +116,7 @@ CREATE TABLE `applications` (
   `id` varchar(64) NOT NULL,
   `name` varchar(128) NOT NULL,
   `app_key` varchar(128) NOT NULL,
+  `project_id` varchar(64) NOT NULL DEFAULT '',
   `repo_url` text NOT NULL,
   `description` text NOT NULL,
   `owner_user_id` varchar(64) NOT NULL DEFAULT '',
@@ -33,17 +124,14 @@ CREATE TABLE `applications` (
   `status` varchar(32) NOT NULL,
   `artifact_type` varchar(64) NOT NULL,
   `language` varchar(64) NOT NULL,
+  `gitops_branch_mappings` json DEFAULT NULL,
+  `release_branches` json DEFAULT NULL,
   `created_at` bigint NOT NULL,
   `updated_at` bigint NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_application_key` (`app_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `argocd_application`
---
-
 DROP TABLE IF EXISTS `argocd_application`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -79,11 +167,6 @@ CREATE TABLE `argocd_application` (
   KEY `idx_argocd_application_instance` (`argocd_instance_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `argocd_env_binding`
---
-
 DROP TABLE IF EXISTS `argocd_env_binding`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -100,11 +183,6 @@ CREATE TABLE `argocd_env_binding` (
   KEY `idx_argocd_env_binding_instance` (`argocd_instance_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `argocd_instance`
---
-
 DROP TABLE IF EXISTS `argocd_instance`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -133,11 +211,6 @@ CREATE TABLE `argocd_instance` (
   KEY `idx_argocd_instance_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `executor_param_def`
---
-
 DROP TABLE IF EXISTS `executor_param_def`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -166,11 +239,6 @@ CREATE TABLE `executor_param_def` (
   KEY `idx_pipeline_param_param_key` (`param_key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `gitops_instance`
---
-
 DROP TABLE IF EXISTS `gitops_instance`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -197,11 +265,64 @@ CREATE TABLE `gitops_instance` (
   KEY `idx_gitops_instance_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `pipeline_bindings`
---
-
+DROP TABLE IF EXISTS `notification_hook`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `notification_hook` (
+  `id` varchar(64) NOT NULL,
+  `name` varchar(200) NOT NULL,
+  `source_id` varchar(64) NOT NULL,
+  `markdown_template_id` varchar(64) NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `remark` text NOT NULL,
+  `created_by` varchar(128) NOT NULL,
+  `updated_by` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_notification_hook_name` (`name`),
+  KEY `idx_notification_hook_source` (`source_id`),
+  KEY `idx_notification_hook_template` (`markdown_template_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `notification_markdown_template`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `notification_markdown_template` (
+  `id` varchar(64) NOT NULL,
+  `name` varchar(200) NOT NULL,
+  `title_template` text NOT NULL,
+  `body_template` text NOT NULL,
+  `conditions_json` longtext NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `remark` text NOT NULL,
+  `created_by` varchar(128) NOT NULL,
+  `updated_by` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_notification_markdown_template_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `notification_source`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `notification_source` (
+  `id` varchar(64) NOT NULL,
+  `name` varchar(200) NOT NULL,
+  `source_type` varchar(32) NOT NULL,
+  `webhook_url` text NOT NULL,
+  `verification_param` text NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `remark` text NOT NULL,
+  `created_by` varchar(128) NOT NULL,
+  `updated_by` varchar(128) NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_notification_source_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `pipeline_bindings`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -224,11 +345,6 @@ CREATE TABLE `pipeline_bindings` (
   KEY `idx_binding_app_created_at` (`application_id`,`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `pipelines`
---
-
 DROP TABLE IF EXISTS `pipelines`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -251,11 +367,6 @@ CREATE TABLE `pipelines` (
   KEY `idx_pipeline_status_updated_at` (`status`,`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `platform_param_dict`
---
-
 DROP TABLE IF EXISTS `platform_param_dict`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -277,11 +388,42 @@ CREATE TABLE `platform_param_dict` (
   KEY `idx_platform_param_status_updated_at` (`status`,`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_order`
---
-
+DROP TABLE IF EXISTS `projects`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `projects` (
+  `id` varchar(64) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `project_key` varchar(128) NOT NULL,
+  `description` text NOT NULL,
+  `status` varchar(32) NOT NULL,
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_project_key` (`project_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `release_execution_lock`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `release_execution_lock` (
+  `id` varchar(64) NOT NULL,
+  `lock_scope` varchar(32) NOT NULL,
+  `lock_key` varchar(500) NOT NULL,
+  `application_id` varchar(64) NOT NULL DEFAULT '',
+  `env_code` varchar(64) NOT NULL DEFAULT '',
+  `release_order_id` varchar(64) NOT NULL DEFAULT '',
+  `release_order_no` varchar(64) NOT NULL DEFAULT '',
+  `status` varchar(32) NOT NULL DEFAULT 'active',
+  `owner_type` varchar(32) NOT NULL DEFAULT 'release_order',
+  `created_at` bigint NOT NULL,
+  `expired_at` bigint DEFAULT NULL,
+  `released_at` bigint DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_release_execution_lock_key_status` (`lock_key`,`status`),
+  KEY `idx_release_execution_lock_order` (`release_order_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `release_order`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -289,6 +431,12 @@ CREATE TABLE `release_order` (
   `id` varchar(64) NOT NULL,
   `order_no` varchar(64) NOT NULL,
   `previous_order_no` varchar(64) NOT NULL DEFAULT '',
+  `operation_type` varchar(32) NOT NULL DEFAULT 'deploy',
+  `source_order_id` varchar(64) NOT NULL DEFAULT '',
+  `source_order_no` varchar(64) NOT NULL DEFAULT '',
+  `is_concurrent` tinyint(1) NOT NULL DEFAULT '0',
+  `concurrent_batch_no` varchar(64) NOT NULL DEFAULT '',
+  `concurrent_batch_seq` int NOT NULL DEFAULT '0',
   `application_id` varchar(64) NOT NULL,
   `application_name` varchar(100) NOT NULL DEFAULT '',
   `template_id` varchar(64) NOT NULL DEFAULT '',
@@ -301,6 +449,15 @@ CREATE TABLE `release_order` (
   `image_tag` varchar(200) NOT NULL DEFAULT '',
   `trigger_type` varchar(50) NOT NULL,
   `status` varchar(50) NOT NULL DEFAULT 'pending',
+  `approval_required` tinyint(1) NOT NULL DEFAULT '0',
+  `approval_mode` varchar(32) NOT NULL DEFAULT '',
+  `approval_approver_ids_json` text NOT NULL,
+  `approval_approver_names_json` text NOT NULL,
+  `approved_at` bigint DEFAULT NULL,
+  `approved_by` varchar(64) NOT NULL DEFAULT '',
+  `rejected_at` bigint DEFAULT NULL,
+  `rejected_by` varchar(64) NOT NULL DEFAULT '',
+  `rejected_reason` varchar(1000) NOT NULL DEFAULT '',
   `remark` varchar(500) NOT NULL DEFAULT '',
   `creator_user_id` varchar(64) NOT NULL DEFAULT '',
   `triggered_by` varchar(64) NOT NULL DEFAULT '',
@@ -312,14 +469,46 @@ CREATE TABLE `release_order` (
   UNIQUE KEY `uk_release_order_no` (`order_no`),
   KEY `idx_release_order_application` (`application_id`),
   KEY `idx_release_order_binding` (`binding_id`),
-  KEY `idx_release_order_created_at` (`created_at`)
+  KEY `idx_release_order_created_at` (`created_at`),
+  KEY `idx_release_order_batch` (`concurrent_batch_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_order_execution`
---
-
+DROP TABLE IF EXISTS `release_order_approval_record`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `release_order_approval_record` (
+  `id` varchar(64) NOT NULL,
+  `release_order_id` varchar(64) NOT NULL,
+  `action` varchar(32) NOT NULL,
+  `operator_user_id` varchar(64) NOT NULL DEFAULT '',
+  `operator_name` varchar(100) NOT NULL DEFAULT '',
+  `comment` varchar(1000) NOT NULL DEFAULT '',
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_release_order_approval_record_order_created` (`release_order_id`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `release_order_deploy_snapshot`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `release_order_deploy_snapshot` (
+  `id` varchar(64) NOT NULL,
+  `release_order_id` varchar(64) NOT NULL,
+  `provider` varchar(32) NOT NULL DEFAULT '',
+  `gitops_type` varchar(32) NOT NULL DEFAULT '',
+  `argocd_instance_id` varchar(64) NOT NULL DEFAULT '',
+  `gitops_instance_id` varchar(64) NOT NULL DEFAULT '',
+  `argocd_app_name` varchar(255) NOT NULL DEFAULT '',
+  `repo_url` varchar(500) NOT NULL DEFAULT '',
+  `branch` varchar(128) NOT NULL DEFAULT '',
+  `source_path` varchar(255) NOT NULL DEFAULT '',
+  `env_code` varchar(64) NOT NULL DEFAULT '',
+  `snapshot_payload_json` longtext NOT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_release_order_snapshot_order` (`release_order_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `release_order_execution`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -344,11 +533,6 @@ CREATE TABLE `release_order_execution` (
   KEY `idx_release_order_execution_order` (`release_order_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_order_param`
---
-
 DROP TABLE IF EXISTS `release_order_param`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -366,11 +550,6 @@ CREATE TABLE `release_order_param` (
   KEY `idx_release_order_param_order` (`release_order_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_order_pipeline_stage`
---
-
 DROP TABLE IF EXISTS `release_order_pipeline_stage`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -395,11 +574,6 @@ CREATE TABLE `release_order_pipeline_stage` (
   KEY `idx_release_order_pipeline_stage_order_sort` (`release_order_id`,`pipeline_scope`,`sort_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_order_step`
---
-
 DROP TABLE IF EXISTS `release_order_step`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -421,11 +595,6 @@ CREATE TABLE `release_order_step` (
   KEY `idx_release_order_step_order_sort` (`release_order_id`,`sort_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_template`
---
-
 DROP TABLE IF EXISTS `release_template`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -439,6 +608,10 @@ CREATE TABLE `release_template` (
   `binding_type` varchar(32) NOT NULL DEFAULT '',
   `gitops_type` varchar(32) NOT NULL DEFAULT '',
   `status` varchar(32) NOT NULL DEFAULT 'active',
+  `approval_enabled` tinyint(1) NOT NULL DEFAULT '0',
+  `approval_mode` varchar(32) NOT NULL DEFAULT '',
+  `approval_approver_ids_json` text NOT NULL,
+  `approval_approver_names_json` text NOT NULL,
   `remark` varchar(500) NOT NULL DEFAULT '',
   `created_at` bigint NOT NULL,
   `updated_at` bigint NOT NULL,
@@ -449,11 +622,6 @@ CREATE TABLE `release_template` (
   KEY `idx_release_template_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_template_binding`
---
-
 DROP TABLE IF EXISTS `release_template_binding`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -475,11 +643,6 @@ CREATE TABLE `release_template_binding` (
   KEY `idx_release_template_binding_binding` (`binding_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_template_gitops_rule`
---
-
 DROP TABLE IF EXISTS `release_template_gitops_rule`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -504,11 +667,29 @@ CREATE TABLE `release_template_gitops_rule` (
   KEY `idx_release_template_gitops_rule_template_sort` (`template_id`,`sort_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `release_template_param`
---
-
+DROP TABLE IF EXISTS `release_template_hook`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `release_template_hook` (
+  `id` varchar(64) NOT NULL,
+  `template_id` varchar(64) NOT NULL,
+  `hook_type` varchar(64) NOT NULL,
+  `name` varchar(255) NOT NULL DEFAULT '',
+  `trigger_condition` varchar(32) NOT NULL DEFAULT 'on_success',
+  `failure_policy` varchar(32) NOT NULL DEFAULT 'warn_only',
+  `target_id` varchar(64) NOT NULL DEFAULT '',
+  `target_name` varchar(255) NOT NULL DEFAULT '',
+  `webhook_method` varchar(16) NOT NULL DEFAULT '',
+  `webhook_url` varchar(500) NOT NULL DEFAULT '',
+  `webhook_body` text NOT NULL,
+  `note` varchar(500) NOT NULL DEFAULT '',
+  `sort_no` int NOT NULL DEFAULT '0',
+  `created_at` bigint NOT NULL,
+  `updated_at` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_release_template_hook_template_sort` (`template_id`,`sort_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `release_template_param`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -522,6 +703,10 @@ CREATE TABLE `release_template_param` (
   `param_key` varchar(100) NOT NULL,
   `param_name` varchar(100) NOT NULL DEFAULT '',
   `executor_param_name` varchar(100) NOT NULL DEFAULT '',
+  `value_source` varchar(32) NOT NULL DEFAULT 'release_input',
+  `source_param_key` varchar(100) NOT NULL DEFAULT '',
+  `source_param_name` varchar(100) NOT NULL DEFAULT '',
+  `fixed_value` varchar(500) NOT NULL DEFAULT '',
   `required` tinyint(1) NOT NULL DEFAULT '0',
   `sort_no` int NOT NULL DEFAULT '0',
   `created_at` bigint NOT NULL,
@@ -531,11 +716,6 @@ CREATE TABLE `release_template_param` (
   KEY `idx_release_template_param_template_sort` (`template_id`,`sort_no`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `sys_permission`
---
-
 DROP TABLE IF EXISTS `sys_permission`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -552,11 +732,6 @@ CREATE TABLE `sys_permission` (
   UNIQUE KEY `uk_sys_permission_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `sys_user`
---
-
 DROP TABLE IF EXISTS `sys_user`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -575,11 +750,6 @@ CREATE TABLE `sys_user` (
   UNIQUE KEY `uk_sys_user_username` (`username`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `sys_user_param_permission`
---
-
 DROP TABLE IF EXISTS `sys_user_param_permission`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -599,11 +769,6 @@ CREATE TABLE `sys_user_param_permission` (
   KEY `idx_supp_app` (`application_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `sys_user_permission`
---
-
 DROP TABLE IF EXISTS `sys_user_permission`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -623,11 +788,6 @@ CREATE TABLE `sys_user_permission` (
   KEY `idx_sup_scope` (`scope_type`,`scope_value`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
-
---
--- Table structure for table `sys_user_session`
---
-
 DROP TABLE IF EXISTS `sys_user_session`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -655,4 +815,3 @@ CREATE TABLE `sys_user_session` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
 
--- Dump completed on 2026-03-23 16:48:47

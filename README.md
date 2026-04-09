@@ -2,6 +2,47 @@
 
 轻量级内部发布平台，面向应用治理、Jenkins / ArgoCD 接入与发布单执行场景。
 
+## Docker 发布与运行（推荐）
+
+如果你要直接发布镜像并在目标机器上单容器运行，可以优先使用下面这组命令。
+
+### 1. 推送镜像
+
+```bash
+docker push xx/gos-release:v1.0
+```
+
+### 2. 运行容器
+
+```bash
+docker run -d \
+  --name gos-release \
+  -p 2445:5174 \
+  -e GOS_DB_DRIVER=mysql \
+  -e GOS_MYSQL_DSN='xx:xx@tcp(xx:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=UTC' \
+  -e GOS_JENKINS_ENABLED=true \
+  -e GOS_JENKINS_BASE_URL='http://xx:8000/' \
+  -e GOS_JENKINS_USERNAME='xx' \
+  -e GOS_JENKINS_API_TOKEN='xx' \
+  -e GOS_AUTH_ADMIN_USERNAME='admin' \
+  -e GOS_AUTH_ADMIN_PASSWORD='xx' \
+  -e GOS_SECURITY_ENCRYPTION_KEY='xx' \
+  -v /data/deploy-manifests:/gitops/deploy-manifests \
+  -e GOS_GITOPS_PATH_MAPS='/data/deploy-manifests=/gitops/deploy-manifests' \
+  xx/gos-release:v1.0
+```
+
+### 3. 访问地址
+
+- 平台入口：`http://127.0.0.1:2445`
+- 登录账号：`admin / xx`
+
+这套运行方式会：
+
+- 容器内同时提供前端和后端服务
+- 通过单端口 `2445` 对外访问
+- 复用宿主机 GitOps 目录 `<gitops-dir>`
+
 ## 项目定位
 
 GOS 不是 Jenkins 或 ArgoCD 的替代品，而是它们上层的发布治理层：
@@ -119,7 +160,21 @@ git clone <your-repo-url>
 cd gos
 ```
 
-### 3. 配置后端
+### 3. 初始化数据库结构
+
+首次部署 MySQL 时，建议先导入仓库中的表结构 SQL：
+
+```bash
+mysql -h xx -P 3306 -u xx -p < ./deploy_platform-20260323.sql
+```
+
+说明：
+
+- `./deploy_platform-20260323.sql` 为当前仓库导出的最新表结构
+- SQL 文件已包含 `CREATE DATABASE` 与 `USE deploy_platform`
+- 导入完成后，再继续配置后端并启动服务
+
+### 4. 配置后端
 
 本项目通过配置文件启动，默认读取：
 
@@ -139,7 +194,7 @@ cd gos
 - `auth.admin_username`
 - `auth.admin_password`
 
-### 4. 启动后端
+### 5. 启动后端
 
 ```bash
 go run ./cmd/server
@@ -159,7 +214,7 @@ Swagger 文档：
 
 - `http://127.0.0.1:8081/swagger/index.html`
 
-### 5. 启动前端
+### 6. 启动前端
 
 ```bash
 cd frontend
@@ -172,6 +227,32 @@ npm run dev
 - `http://127.0.0.1:5174`
 
 如果你已经按项目配置开放了监听地址，也可以通过局域网 IP 直接访问。
+
+## Docker 单容器启动
+
+如需直接起一个同时包含前端与后端的容器，可参考：
+
+```bash
+cd /Users/lingyunxieqing/Desktop/gos
+docker build -t gos-release:latest .
+docker run -d \
+  --name gos-release \
+  -p 5174:5174 \
+  -p 8081:8081 \
+  -e GOS_DB_DRIVER=mysql \
+  -e GOS_MYSQL_DSN='xx:xx@tcp(xx:3306)/deploy_platform?charset=utf8mb4&parseTime=true&loc=Local' \
+  -e GOS_JENKINS_ENABLED=true \
+  -e GOS_JENKINS_BASE_URL='http://xx:8000/' \
+  -e GOS_JENKINS_USERNAME='xx' \
+  -e GOS_JENKINS_API_TOKEN='xx' \
+  -e GOS_AUTH_ADMIN_PASSWORD='xx' \
+  -e GOS_SECURITY_ENCRYPTION_KEY='xx' \
+  -v /data/deploy-manifests:/gitops/deploy-manifests \
+  -e GOS_GITOPS_PATH_MAPS='/data/deploy-manifests=/gitops/deploy-manifests' \
+  gos-release:latest
+```
+
+更多说明见：`/Users/lingyunxieqing/Desktop/gos/docs/部署/Docker部署说明.md`
 
 ## 默认账号
 
