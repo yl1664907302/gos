@@ -1102,23 +1102,69 @@ async function handleBatchExecute() {
     }
     await loadReleaseOrders();
   } catch (error) {
+    const acceptedBatch = await detectAcceptedBatchExecute(targetOrderIDs);
     await loadReleaseOrders({ silent: true });
-    const acceptedCount = dataSource.value.filter(
-      (item) =>
-        targetOrderIDs.includes(item.id) &&
-        (item.is_concurrent || item.status !== "pending"),
-    ).length;
+    const acceptedCount = acceptedBatch.acceptedCount;
     if (acceptedCount > 0) {
       selectedOrderIDs.value = [];
-      message.warning(
-        "并发执行请求已受理，列表状态已开始更新；如果看到执行中的发布单，可忽略本次请求异常提示。",
-      );
+      const batchText = acceptedBatch.batchNo
+        ? `批次号：${acceptedBatch.batchNo}`
+        : `已受理 ${acceptedCount} 张`;
+      message.warning(`并发执行请求已受理，${batchText}，可忽略本次异常提示。`);
       return;
     }
     message.error(extractHTTPErrorMessage(error, "并发执行发起失败"));
   } finally {
     batchExecuting.value = false;
   }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function detectAcceptedBatchExecute(orderIDs: string[]): Promise<{
+  acceptedCount: number;
+  batchNo: string;
+}> {
+  const targetOrderIDs = orderIDs
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (targetOrderIDs.length === 0) {
+    return { acceptedCount: 0, batchNo: "" };
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const responses = await Promise.allSettled(
+      targetOrderIDs.map((id) => getReleaseOrderByID(id)),
+    );
+    const acceptedOrders = responses
+      .filter((item): item is PromiseFulfilledResult<{ data: ReleaseOrder }> => {
+        return item.status === "fulfilled";
+      })
+      .map((item) => item.value.data)
+      .filter((item) => {
+        return (
+          item.is_concurrent ||
+          Boolean(String(item.concurrent_batch_no || "").trim()) ||
+          !["pending", "approved"].includes(String(item.status || "").trim())
+        );
+      });
+
+    if (acceptedOrders.length > 0) {
+      const batchNo = String(
+        acceptedOrders.find((item) => String(item.concurrent_batch_no || "").trim())
+          ?.concurrent_batch_no || "",
+      ).trim();
+      return { acceptedCount: acceptedOrders.length, batchNo };
+    }
+
+    if (attempt < 3) {
+      await sleep(800);
+    }
+  }
+
+  return { acceptedCount: 0, batchNo: "" };
 }
 
 function closeBatchExecutePreviewModal() {
