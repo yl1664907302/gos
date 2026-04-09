@@ -9,7 +9,7 @@
 ### 1. 推送镜像
 
 ```bash
-docker push xx/gos-release:v1.0
+docker push yl10115658529/gos-release:v1.0
 ```
 
 ### 2. 运行容器
