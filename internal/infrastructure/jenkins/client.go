@@ -1569,7 +1569,7 @@ func (c *Client) postXMLOnce(ctx context.Context, endpoint string, payload strin
 	if c.username != "" && c.apiToken != "" {
 		req.SetBasicAuth(c.username, c.apiToken)
 	}
-	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Content-Type", "application/xml; charset=UTF-8")
 	if crumb.field != "" && crumb.value != "" {
 		req.Header.Set(crumb.field, crumb.value)
 	}
