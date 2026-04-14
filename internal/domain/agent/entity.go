@@ -60,6 +60,7 @@ func (s LastTaskStatus) Valid() bool {
 type TaskStatus string
 
 const (
+	TaskStatusDraft     TaskStatus = "draft"
 	TaskStatusPending   TaskStatus = "pending"
 	TaskStatusQueued    TaskStatus = "queued"
 	TaskStatusClaimed   TaskStatus = "claimed"
@@ -71,7 +72,7 @@ const (
 
 func (s TaskStatus) Valid() bool {
 	switch s {
-	case TaskStatusPending, TaskStatusQueued, TaskStatusClaimed, TaskStatusRunning, TaskStatusSuccess, TaskStatusFailed, TaskStatusCancelled:
+	case TaskStatusDraft, TaskStatusPending, TaskStatusQueued, TaskStatusClaimed, TaskStatusRunning, TaskStatusSuccess, TaskStatusFailed, TaskStatusCancelled:
 		return true
 	default:
 		return false
@@ -122,6 +123,7 @@ func (t TaskType) ScriptLibrarySupported() bool {
 
 type Instance struct {
 	ID                 string
+	MachineID          string
 	AgentCode          string
 	Name               string
 	EnvironmentCode    string
@@ -183,43 +185,49 @@ type RuntimeTaskPayload struct {
 }
 
 type Task struct {
-	ID             string
-	AgentID        string
-	AgentCode      string
-	Name           string
-	TaskMode       TaskMode
-	TaskType       string
-	ShellType      string
-	WorkDir        string
-	ScriptID       string
-	ScriptName     string
-	ScriptPath     string
-	ScriptText     string
-	Variables      map[string]string
-	TimeoutSec     int
-	Status         TaskStatus
-	ClaimedAt      *time.Time
-	StartedAt      *time.Time
-	FinishedAt     *time.Time
-	ExitCode       int
-	StdoutText     string
-	StderrText     string
-	FailureReason  string
-	RunCount       int
-	SuccessCount   int
-	FailureCount   int
-	LastRunStatus  TaskStatus
-	LastRunSummary string
-	CreatedBy      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              string
+	AgentID         string
+	AgentCode       string
+	TargetAgentIDs  []string
+	SourceTaskID    string
+	DispatchBatchID string
+	Name            string
+	TaskMode        TaskMode
+	TaskType        string
+	ShellType       string
+	WorkDir         string
+	ScriptID        string
+	ScriptName      string
+	ScriptPath      string
+	ScriptText      string
+	Variables       map[string]string
+	TimeoutSec      int
+	Status          TaskStatus
+	ClaimedAt       *time.Time
+	StartedAt       *time.Time
+	FinishedAt      *time.Time
+	ExitCode        int
+	StdoutText      string
+	StderrText      string
+	FailureReason   string
+	RunCount        int
+	SuccessCount    int
+	FailureCount    int
+	LastRunStatus   TaskStatus
+	LastRunSummary  string
+	CreatedBy       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type TaskListFilter struct {
-	AgentID  string
-	Statuses []TaskStatus
-	Page     int
-	PageSize int
+	AgentID         string
+	ScriptID        string
+	SourceTaskID    string
+	DispatchBatchID string
+	Statuses        []TaskStatus
+	Page            int
+	PageSize        int
 }
 
 type Script struct {

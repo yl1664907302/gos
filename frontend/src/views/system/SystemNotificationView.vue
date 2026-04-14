@@ -94,7 +94,32 @@ const markdownVariableOptions = computed(() => {
     value: item.param_key,
     type: '标准平台 Key',
   }))
-  return [...builtinVariableOptions, ...platformOptions]
+  // 去重：移除与内置字段重复的平台参数
+  const builtinKeys = new Set(builtinVariableOptions.map((item) => item.value))
+  const uniquePlatformOptions = platformOptions.filter(
+    (item) => !builtinKeys.has(item.value)
+  )
+  return [...builtinVariableOptions, ...uniquePlatformOptions]
+})
+
+// 条件下拉选择专用选项，排除 release_status 等运行时字段
+const conditionParamKeyOptions = computed(() => {
+  const platformOptions = platformParams.value.map((item) => ({
+    label: `${item.name} (${item.param_key})`,
+    value: item.param_key,
+    type: '标准平台 Key',
+  }))
+  // 排除 release_status 等不适合作为条件的运行时字段
+  const excludeKeys = new Set(['release_status'])
+  const filteredBuiltin = builtinVariableOptions.filter(
+    (item) => !excludeKeys.has(item.value as string)
+  )
+  // 去重：移除与内置字段重复的平台参数
+  const builtinKeys = new Set(filteredBuiltin.map((item) => item.value))
+  const uniquePlatformOptions = platformOptions.filter(
+    (item) => !builtinKeys.has(item.value)
+  )
+  return [...filteredBuiltin, ...uniquePlatformOptions]
 })
 
 const conditionOperatorOptions = [
@@ -667,7 +692,7 @@ onMounted(async () => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">通知模块</h2>
-        <p class="page-subtitle">统一管理通知源、Markdown 模板与通知 Hook，并在发布模板中以 Hook 方式复用发布过程数据。</p>
+        <p class="page-subtitle">统一管理通知源、Markdown 模板与通知 Hook，并在发布模板中以 Hook 方式复用发布过程数据</p>
       </div>
     </div>
 
@@ -913,7 +938,7 @@ onMounted(async () => {
         <div class="condition-section-head notification-template-section-head">
           <div>
             <div class="section-title">条件 Markdown 语句</div>
-            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句。</div>
+            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句。注意：release_status 只在发布完成后才有值，不建议作为条件判断字段。</div>
           </div>
           <a-button type="dashed" @click="addCondition">
             <template #icon><PlusOutlined /></template>
@@ -936,7 +961,7 @@ onMounted(async () => {
                   show-search
                   allow-clear
                   option-filter-prop="label"
-                  :options="markdownVariableOptions"
+                  :options="conditionParamKeyOptions"
                   placeholder="选择用于判断的标准平台 Key"
                 />
               </a-form-item>

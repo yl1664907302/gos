@@ -3,14 +3,17 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	releasedomain "gos/internal/domain/release"
 	userdomain "gos/internal/domain/user"
 )
 
 const currentUserContextKey = "current_user"
+const applicationEnvScopeSeparator = "::"
 
 type RequestAuthorizer interface {
 	HasPermission(ctx context.Context, user userdomain.User, permissionCode string, scopeType string, scopeValue string) (bool, error)
@@ -144,4 +147,86 @@ func ensureAnyApplicationPermission(
 	}
 	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
 	return false
+}
+
+func buildApplicationEnvScopeValue(applicationID string, envCode string) string {
+	appID := strings.TrimSpace(applicationID)
+	env := strings.TrimSpace(envCode)
+	if appID == "" || env == "" {
+		return ""
+	}
+	return appID + applicationEnvScopeSeparator + env
+}
+
+func parseApplicationEnvScopeValue(value string) (applicationID string, envCode string, ok bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(text, applicationEnvScopeSeparator, 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	applicationID = strings.TrimSpace(parts[0])
+	envCode = strings.TrimSpace(parts[1])
+	if applicationID == "" || envCode == "" {
+		return "", "", false
+	}
+	return applicationID, envCode, true
+}
+
+func collectApplicationScopesFromPermissions(
+	items []userdomain.UserPermission,
+	acceptedCodes map[string]struct{},
+) ([]string, []releasedomain.ApplicationEnvScope) {
+	appSeen := make(map[string]struct{})
+	scopeSeen := make(map[string]struct{})
+	applicationIDs := make([]string, 0)
+	envScopes := make([]releasedomain.ApplicationEnvScope, 0)
+
+	for _, item := range items {
+		if !item.Enabled {
+			continue
+		}
+		code := strings.ToLower(strings.TrimSpace(item.PermissionCode))
+		if len(acceptedCodes) > 0 {
+			if _, exists := acceptedCodes[code]; !exists {
+				continue
+			}
+		}
+		switch strings.ToLower(strings.TrimSpace(item.ScopeType)) {
+		case "application":
+			applicationID := strings.TrimSpace(item.ScopeValue)
+			if applicationID == "" {
+				continue
+			}
+			if _, exists := appSeen[applicationID]; exists {
+				continue
+			}
+			appSeen[applicationID] = struct{}{}
+			applicationIDs = append(applicationIDs, applicationID)
+		case "application_env":
+			applicationID, envCode, ok := parseApplicationEnvScopeValue(item.ScopeValue)
+			if !ok {
+				continue
+			}
+			scopeKey := applicationID + applicationEnvScopeSeparator + envCode
+			if _, exists := scopeSeen[scopeKey]; !exists {
+				scopeSeen[scopeKey] = struct{}{}
+				envScopes = append(envScopes, releasedomain.ApplicationEnvScope{
+					ApplicationID: applicationID,
+					EnvCode:       envCode,
+				})
+			}
+		}
+	}
+
+	sort.Strings(applicationIDs)
+	sort.Slice(envScopes, func(i, j int) bool {
+		if envScopes[i].ApplicationID == envScopes[j].ApplicationID {
+			return envScopes[i].EnvCode < envScopes[j].EnvCode
+		}
+		return envScopes[i].ApplicationID < envScopes[j].ApplicationID
+	})
+	return applicationIDs, envScopes
 }

@@ -150,7 +150,7 @@ onMounted(() => {
         </a-button>
         <div class="page-header-copy">
           <h2 class="page-title">应用详情</h2>
-          <p class="page-subtitle">集中查看应用基础档案、仓库信息与发布准备情况，常用操作会始终保持在标题区右侧。</p>
+          <p class="page-subtitle">集中查看应用基础档案、仓库信息与发布准备情况，常用操作会始终保持在标题区右侧</p>
         </div>
       </div>
       <a-space class="page-header-actions" wrap>

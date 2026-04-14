@@ -4,6 +4,7 @@ import { getMe, login as loginAPI, logout as logoutAPI } from '../api/auth'
 import type { UserParamPermission, UserPermission, UserProfile } from '../types/user'
 
 const TOKEN_KEY = 'gos_access_token'
+const APPLICATION_ENV_SCOPE_SEPARATOR = '::'
 
 export const useAuthStore = defineStore('auth', () => {
   const accessToken = ref<string>(localStorage.getItem(TOKEN_KEY) || '')
@@ -14,7 +15,12 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => Boolean(accessToken.value))
   const isAdmin = computed(() => profile.value?.role === 'admin')
-  const releaseScopedPermissionCodes = new Set(['release.create', 'release.execute', 'release.cancel'])
+  const releaseScopedPermissionCodes = new Set([
+    'release.view',
+    'release.create',
+    'release.execute',
+    'release.cancel',
+  ])
 
   function setToken(token: string) {
     const value = String(token || '').trim()
@@ -65,33 +71,65 @@ export const useAuthStore = defineStore('auth', () => {
     meLoaded.value = true
   }
 
+  function normalizePermissionCode(value: string) {
+    return String(value || '').trim().toLowerCase()
+  }
+
+  function normalizeScopeType(value: string) {
+    return String(value || '').trim().toLowerCase()
+  }
+
+  function parseApplicationEnvScopeValue(value: string) {
+    const raw = String(value || '').trim()
+    if (!raw) {
+      return null
+    }
+    const segments = raw.split(APPLICATION_ENV_SCOPE_SEPARATOR)
+    if (segments.length !== 2) {
+      return null
+    }
+    const applicationID = String(segments[0] || '').trim()
+    const envCode = String(segments[1] || '').trim()
+    if (!applicationID || !envCode) {
+      return null
+    }
+    return { applicationID, envCode }
+  }
+
   function hasPermission(permissionCode: string) {
     const code = String(permissionCode || '').trim()
     if (!code) {
       return false
     }
-    const normalizedCode = code.toLowerCase()
+    const normalizedCode = normalizePermissionCode(code)
     if (isAdmin.value) {
       return true
     }
     if (releaseScopedPermissionCodes.has(normalizedCode)) {
       return permissions.value.some((item) => {
-        if (!item.enabled || String(item.permission_code || '').trim().toLowerCase() !== normalizedCode) {
+        if (!item.enabled || normalizePermissionCode(item.permission_code) !== normalizedCode) {
           return false
         }
-        const scopeType = String(item.scope_type || '').trim().toLowerCase()
+        const scopeType = normalizeScopeType(item.scope_type)
         const scopeValue = String(item.scope_value || '').trim()
-        return scopeType === 'application' && scopeValue !== ''
+        if (scopeType === 'application') {
+          return scopeValue !== ''
+        }
+        if (scopeType === 'application_env') {
+          return Boolean(parseApplicationEnvScopeValue(scopeValue))
+        }
+        return false
       })
     }
     return permissions.value.some(
-      (item) => item.enabled && String(item.permission_code || '').trim().toLowerCase() === normalizedCode,
+      (item) => item.enabled && normalizePermissionCode(item.permission_code) === normalizedCode,
     )
   }
 
-  function hasApplicationPermission(permissionCode: string, applicationID: string) {
-    const code = String(permissionCode || '').trim().toLowerCase()
+  function hasApplicationPermission(permissionCode: string, applicationID: string, envCode = '') {
+    const code = normalizePermissionCode(permissionCode)
     const appID = String(applicationID || '').trim()
+    const env = String(envCode || '').trim()
     if (!code || !appID) {
       return false
     }
@@ -99,14 +137,67 @@ export const useAuthStore = defineStore('auth', () => {
       return true
     }
     return permissions.value.some((item) => {
-      if (!item.enabled || String(item.permission_code || '').trim().toLowerCase() !== code) {
+      if (!item.enabled || normalizePermissionCode(item.permission_code) !== code) {
         return false
       }
-      return (
-        String(item.scope_type || '').trim().toLowerCase() === 'application' &&
-        String(item.scope_value || '').trim() === appID
-      )
+      const scopeType = normalizeScopeType(item.scope_type)
+      const scopeValue = String(item.scope_value || '').trim()
+      if (scopeType === 'application') {
+        return scopeValue === appID
+      }
+      if (scopeType === 'application_env') {
+        const parsed = parseApplicationEnvScopeValue(scopeValue)
+        if (!parsed || parsed.applicationID !== appID) {
+          return false
+        }
+        if (!env) {
+          return true
+        }
+        return parsed.envCode === env
+      }
+      return false
     })
+  }
+
+  function listApplicationPermissionEnvCodes(
+    permissionCode: string,
+    applicationID: string,
+    validEnvOptions: string[] = [],
+  ) {
+    const code = normalizePermissionCode(permissionCode)
+    const appID = String(applicationID || '').trim()
+    if (!code || !appID) {
+      return []
+    }
+    const normalizedEnvOptions = Array.from(
+      new Set(validEnvOptions.map((item) => String(item || '').trim()).filter(Boolean)),
+    )
+    if (isAdmin.value) {
+      return normalizedEnvOptions
+    }
+
+    const result = new Set<string>()
+    permissions.value.forEach((item) => {
+      if (!item.enabled || normalizePermissionCode(item.permission_code) !== code) {
+        return
+      }
+      const scopeType = normalizeScopeType(item.scope_type)
+      const scopeValue = String(item.scope_value || '').trim()
+      if (scopeType === 'application' && scopeValue === appID) {
+        normalizedEnvOptions.forEach((env) => result.add(env))
+        return
+      }
+      if (scopeType === 'application_env') {
+        const parsed = parseApplicationEnvScopeValue(scopeValue)
+        if (!parsed || parsed.applicationID !== appID) {
+          return
+        }
+        if (normalizedEnvOptions.length === 0 || normalizedEnvOptions.includes(parsed.envCode)) {
+          result.add(parsed.envCode)
+        }
+      }
+    })
+    return normalizedEnvOptions.filter((env) => result.has(env))
   }
 
   function resolveParamPermission(paramKey: string, applicationID: string) {
@@ -164,6 +255,7 @@ export const useAuthStore = defineStore('auth', () => {
     loadMe,
     hasPermission,
     hasApplicationPermission,
+    listApplicationPermissionEnvCodes,
     canViewParam,
     canEditParam,
   }

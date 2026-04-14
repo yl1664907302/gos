@@ -3,7 +3,6 @@ package httpapi
 import (
 	"net/http"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -171,15 +170,16 @@ type ReleaseTemplateGitOpsRuleResponse struct {
 }
 
 type ReleaseTemplateHookRequest struct {
-	HookType         string `json:"hook_type"`
-	Name             string `json:"name"`
-	TriggerCondition string `json:"trigger_condition"`
-	FailurePolicy    string `json:"failure_policy"`
-	TargetID         string `json:"target_id"`
-	WebhookMethod    string `json:"webhook_method"`
-	WebhookURL       string `json:"webhook_url"`
-	WebhookBody      string `json:"webhook_body"`
-	Note             string `json:"note"`
+	HookType         string   `json:"hook_type"`
+	Name             string   `json:"name"`
+	TriggerCondition string   `json:"trigger_condition"`
+	FailurePolicy    string   `json:"failure_policy"`
+	EnvCodes         []string `json:"env_codes"`
+	TargetID         string   `json:"target_id"`
+	WebhookMethod    string   `json:"webhook_method"`
+	WebhookURL       string   `json:"webhook_url"`
+	WebhookBody      string   `json:"webhook_body"`
+	Note             string   `json:"note"`
 }
 
 type ReleaseTemplateHookResponse struct {
@@ -189,6 +189,7 @@ type ReleaseTemplateHookResponse struct {
 	Name             string    `json:"name"`
 	TriggerCondition string    `json:"trigger_condition"`
 	FailurePolicy    string    `json:"failure_policy"`
+	EnvCodes         []string  `json:"env_codes"`
 	TargetID         string    `json:"target_id"`
 	TargetName       string    `json:"target_name"`
 	WebhookMethod    string    `json:"webhook_method"`
@@ -396,17 +397,15 @@ func (h *ReleaseTemplateHandler) resolveListApplications(c *gin.Context) (allowA
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return false, nil, false
 	}
-
-	seen := make(map[string]struct{})
-	result := make([]string, 0)
-	for _, item := range items {
-		if !item.Enabled || strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "release.create" {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
-			continue
-		}
-		value := strings.TrimSpace(item.ScopeValue)
+	result, envScopes := collectApplicationScopesFromPermissions(items, map[string]struct{}{
+		"release.create": {},
+	})
+	seen := make(map[string]struct{}, len(result)+len(envScopes))
+	for _, item := range result {
+		seen[item] = struct{}{}
+	}
+	for _, item := range envScopes {
+		value := strings.TrimSpace(item.ApplicationID)
 		if value == "" {
 			continue
 		}
@@ -416,7 +415,6 @@ func (h *ReleaseTemplateHandler) resolveListApplications(c *gin.Context) (allowA
 		seen[value] = struct{}{}
 		result = append(result, value)
 	}
-	sort.Strings(result)
 	return false, result, true
 }
 
@@ -569,6 +567,7 @@ func toReleaseTemplateHookInputs(items []ReleaseTemplateHookRequest) []usecase.R
 			Name:             item.Name,
 			TriggerCondition: releasedomain.TemplateHookTriggerCondition(strings.ToLower(strings.TrimSpace(item.TriggerCondition))),
 			FailurePolicy:    releasedomain.TemplateHookFailurePolicy(strings.ToLower(strings.TrimSpace(item.FailurePolicy))),
+			EnvCodes:         append([]string(nil), item.EnvCodes...),
 			TargetID:         item.TargetID,
 			WebhookMethod:    item.WebhookMethod,
 			WebhookURL:       item.WebhookURL,
@@ -626,6 +625,7 @@ func toReleaseTemplateHookResponse(item releasedomain.ReleaseTemplateHook) Relea
 		Name:             item.Name,
 		TriggerCondition: string(item.TriggerCondition),
 		FailurePolicy:    string(item.FailurePolicy),
+		EnvCodes:         append([]string(nil), item.EnvCodes...),
 		TargetID:         item.TargetID,
 		TargetName:       item.TargetName,
 		WebhookMethod:    item.WebhookMethod,

@@ -187,18 +187,22 @@ type ReleaseOrderParamResponse struct {
 }
 
 type ReleaseOrderStepResponse struct {
-	ID             string     `json:"id"`
-	ReleaseOrderID string     `json:"release_order_id"`
-	StepScope      string     `json:"step_scope"`
-	ExecutionID    string     `json:"execution_id"`
-	StepCode       string     `json:"step_code"`
-	StepName       string     `json:"step_name"`
-	Status         string     `json:"status"`
-	Message        string     `json:"message"`
-	SortNo         int        `json:"sort_no"`
-	StartedAt      *time.Time `json:"started_at"`
-	FinishedAt     *time.Time `json:"finished_at"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID                 string     `json:"id"`
+	ReleaseOrderID     string     `json:"release_order_id"`
+	StepScope          string     `json:"step_scope"`
+	ExecutionID        string     `json:"execution_id"`
+	StepCode           string     `json:"step_code"`
+	StepName           string     `json:"step_name"`
+	Status             string     `json:"status"`
+	Message            string     `json:"message"`
+	DetailLog          string     `json:"detail_log"`
+	RelatedTaskSummary string     `json:"related_task_summary"`
+	RelatedTaskIDs     []string   `json:"related_task_ids"`
+	RelatedTaskCount   int        `json:"related_task_count"`
+	SortNo             int        `json:"sort_no"`
+	StartedAt          *time.Time `json:"started_at"`
+	FinishedAt         *time.Time `json:"finished_at"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 type ReleaseOrderDataResponse struct {
@@ -374,7 +378,7 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", req.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", req.ApplicationID, req.EnvCode) {
 		return
 	}
 
@@ -457,6 +461,9 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 		if !ensureReleaseOrderExecuteActor(c, currentUser, item) {
 			return
 		}
+		if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", item.ApplicationID, item.EnvCode) {
+			return
+		}
 	}
 	output, err := h.manager.BatchExecute(c.Request.Context(), usecase.BatchExecuteReleaseOrdersInput{
 		OrderIDs: req.OrderIDs,
@@ -501,7 +508,7 @@ func (h *ReleaseOrderHandler) CreateRollbackByOrder(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID, sourceOrder.EnvCode) {
 		return
 	}
 	currentUser, ok := getCurrentUser(c)
@@ -533,7 +540,7 @@ func (h *ReleaseOrderHandler) CreateReplayByOrder(c *gin.Context) {
 		writeReleaseOrderHTTPError(c, err)
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", sourceOrder.ApplicationID, sourceOrder.EnvCode) {
 		return
 	}
 	currentUser, ok := getCurrentUser(c)
@@ -590,7 +597,7 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 		return
 	}
 	applicationID := strings.TrimSpace(c.Query("application_id"))
-	allowAll, visibleApplicationIDs, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	allowAll, visibleApplicationIDs, visibleEnvScopes, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
 	if !ok {
 		return
 	}
@@ -600,17 +607,18 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 	}
 
 	items, total, err := h.manager.List(c.Request.Context(), usecase.ListReleaseOrderInput{
-		ApplicationID:          applicationID,
-		ApplicationIDs:         resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
-		VisibleToUserID:        visibleToUserID,
-		ApprovalApproverUserID: strings.TrimSpace(c.Query("approval_approver_user_id")),
-		CreatorUserID:          resolveReleaseOrderCreatorFilter(currentUser),
-		BindingID:              c.Query("binding_id"),
-		EnvCode:                c.Query("env_code"),
-		Status:                 domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
-		TriggerType:            domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
-		Page:                   page,
-		PageSize:               pageSize,
+		ApplicationID:               applicationID,
+		ApplicationIDs:              resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		VisibleApplicationEnvScopes: visibleEnvScopes,
+		VisibleToUserID:             visibleToUserID,
+		ApprovalApproverUserID:      strings.TrimSpace(c.Query("approval_approver_user_id")),
+		CreatorUserID:               resolveReleaseOrderCreatorFilter(currentUser),
+		BindingID:                   c.Query("binding_id"),
+		EnvCode:                     c.Query("env_code"),
+		Status:                      domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
+		TriggerType:                 domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
+		Page:                        page,
+		PageSize:                    pageSize,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -647,7 +655,7 @@ func (h *ReleaseOrderHandler) ListApprovalRecordSummaries(c *gin.Context) {
 		return
 	}
 	applicationID := strings.TrimSpace(c.Query("application_id"))
-	allowAll, visibleApplicationIDs, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	allowAll, visibleApplicationIDs, visibleEnvScopes, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
 	if !ok {
 		return
 	}
@@ -663,12 +671,13 @@ func (h *ReleaseOrderHandler) ListApprovalRecordSummaries(c *gin.Context) {
 	}
 
 	items, total, err := h.manager.ListApprovalRecordSummaries(c.Request.Context(), usecase.ListApprovalRecordSummaryInput{
-		ApplicationID:   applicationID,
-		ApplicationIDs:  resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
-		VisibleToUserID: visibleToUserID,
-		OperatorUserID:  strings.TrimSpace(c.Query("operator_user_id")),
-		Page:            page,
-		PageSize:        pageSize,
+		ApplicationID:               applicationID,
+		ApplicationIDs:              resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		VisibleApplicationEnvScopes: visibleEnvScopes,
+		VisibleToUserID:             visibleToUserID,
+		OperatorUserID:              strings.TrimSpace(c.Query("operator_user_id")),
+		Page:                        page,
+		PageSize:                    pageSize,
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -829,12 +838,12 @@ func (h *ReleaseOrderHandler) SubmitApproval(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.approval.submit", existing.ApplicationID) {
-		return
-	}
 	currentUser, ok := getCurrentUser(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderCreatorActor(c, currentUser, existing, "submit approval") {
 		return
 	}
 	var req ReleaseOrderApprovalActionRequest
@@ -950,7 +959,7 @@ func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.cancel", existing.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.cancel", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
 	item, err := h.manager.Cancel(c.Request.Context(), c.Param("id"))
@@ -987,6 +996,9 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 		return
 	}
 	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
 	item, err := h.manager.Execute(c.Request.Context(), c.Param("id"))
@@ -1196,7 +1208,7 @@ func (h *ReleaseOrderHandler) StartStep(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
 	var req StartReleaseOrderStepRequest
@@ -1241,7 +1253,7 @@ func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID) {
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
 	var req FinishReleaseOrderStepRequest
@@ -1427,18 +1439,22 @@ func toReleaseOrderParamResponse(item domain.ReleaseOrderParam) ReleaseOrderPara
 
 func toReleaseOrderStepResponse(item domain.ReleaseOrderStep) ReleaseOrderStepResponse {
 	return ReleaseOrderStepResponse{
-		ID:             item.ID,
-		ReleaseOrderID: item.ReleaseOrderID,
-		StepScope:      string(item.StepScope),
-		ExecutionID:    item.ExecutionID,
-		StepCode:       item.StepCode,
-		StepName:       item.StepName,
-		Status:         string(item.Status),
-		Message:        item.Message,
-		SortNo:         item.SortNo,
-		StartedAt:      item.StartedAt,
-		FinishedAt:     item.FinishedAt,
-		CreatedAt:      item.CreatedAt,
+		ID:                 item.ID,
+		ReleaseOrderID:     item.ReleaseOrderID,
+		StepScope:          string(item.StepScope),
+		ExecutionID:        item.ExecutionID,
+		StepCode:           item.StepCode,
+		StepName:           item.StepName,
+		Status:             string(item.Status),
+		Message:            item.Message,
+		DetailLog:          item.DetailLog,
+		RelatedTaskSummary: item.RelatedTaskSummary,
+		RelatedTaskIDs:     append([]string(nil), item.RelatedTaskIDs...),
+		RelatedTaskCount:   item.RelatedTaskCount,
+		SortNo:             item.SortNo,
+		StartedAt:          item.StartedAt,
+		FinishedAt:         item.FinishedAt,
+		CreatedAt:          item.CreatedAt,
 	}
 }
 
@@ -1559,13 +1575,20 @@ func ensureReleaseApplicationPermission(
 	authz RequestAuthorizer,
 	permissionCode string,
 	applicationID string,
+	envCode string,
 ) bool {
+	scopeType := "application"
+	scopeValue := strings.TrimSpace(applicationID)
+	if strings.TrimSpace(envCode) != "" {
+		scopeType = "application_env"
+		scopeValue = buildApplicationEnvScopeValue(applicationID, envCode)
+	}
 	return ensurePermissionWithMessage(
 		c,
 		authz,
 		permissionCode,
-		"application",
-		strings.TrimSpace(applicationID),
+		scopeType,
+		scopeValue,
 		"无权限：当前应用的发布权限已变更，请刷新页面后重试",
 	)
 }
@@ -1593,6 +1616,15 @@ func ensureReleaseOrderExecuteActor(
 	user userdomain.User,
 	order domain.ReleaseOrder,
 ) bool {
+	return ensureReleaseOrderCreatorActor(c, user, order, "execute this release order")
+}
+
+func ensureReleaseOrderCreatorActor(
+	c *gin.Context,
+	user userdomain.User,
+	order domain.ReleaseOrder,
+	action string,
+) bool {
 	currentUserID := strings.TrimSpace(user.ID)
 	if currentUserID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -1601,7 +1633,7 @@ func ensureReleaseOrderExecuteActor(
 	if strings.TrimSpace(order.CreatorUserID) == currentUserID {
 		return true
 	}
-	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: only release order creator can execute this release order"})
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: only release order creator can " + strings.TrimSpace(action)})
 	return false
 }
 
@@ -1646,8 +1678,41 @@ func ensureReleaseOrderVisible(
 func resolveVisibleReleaseOrderApplicationIDs(
 	c *gin.Context,
 	authz RequestAuthorizer,
-) (allowAll bool, applicationIDs []string, ok bool) {
-	return resolveVisibleApplicationIDsForApplications(c, authz)
+) (allowAll bool, applicationIDs []string, envScopes []domain.ApplicationEnvScope, ok bool) {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false, nil, nil, false
+	}
+	if authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false, nil, nil, false
+	}
+	if user.Role == userdomain.RoleAdmin {
+		return true, nil, nil, true
+	}
+	manageAllowed, err := authz.HasPermission(c.Request.Context(), user, "application.manage", "", "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false, nil, nil, false
+	}
+	if manageAllowed {
+		return true, nil, nil, true
+	}
+
+	items, err := authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false, nil, nil, false
+	}
+	accepted := map[string]struct{}{
+		"release.view":    {},
+		"release.create":  {},
+		"release.execute": {},
+		"release.cancel":  {},
+	}
+	applicationIDs, envScopes = collectApplicationScopesFromPermissions(items, accepted)
+	return false, applicationIDs, envScopes, true
 }
 
 func resolveReleaseListApplicationIDs(applicationID string, allowAll bool, visibleApplicationIDs []string) []string {
@@ -1682,7 +1747,7 @@ func canCurrentUserViewReleaseOrder(
 			}
 		}
 	}
-	return canViewReleaseOrderApplication(ctx, authz, user, order.ApplicationID)
+	return canViewReleaseOrderApplication(ctx, authz, user, order.ApplicationID, order.EnvCode)
 }
 
 func canViewReleaseOrderApplication(
@@ -1690,6 +1755,7 @@ func canViewReleaseOrderApplication(
 	authz RequestAuthorizer,
 	user userdomain.User,
 	applicationID string,
+	envCode string,
 ) (bool, error) {
 	if user.Role == userdomain.RoleAdmin {
 		return true, nil
@@ -1701,15 +1767,22 @@ func canViewReleaseOrderApplication(
 	if manageAllowed {
 		return true, nil
 	}
-	appID := strings.TrimSpace(applicationID)
-	viewAllowed, err := authz.HasPermission(ctx, user, "application.view", "application", appID)
-	if err != nil {
-		return false, err
+	for _, code := range []string{"release.view", "release.create", "release.execute", "release.cancel"} {
+		scopeType := "application"
+		scopeValue := strings.TrimSpace(applicationID)
+		if strings.TrimSpace(envCode) != "" {
+			scopeType = "application_env"
+			scopeValue = buildApplicationEnvScopeValue(applicationID, envCode)
+		}
+		allowed, err := authz.HasPermission(ctx, user, code, scopeType, scopeValue)
+		if err != nil {
+			return false, err
+		}
+		if allowed {
+			return true, nil
+		}
 	}
-	if viewAllowed {
-		return true, nil
-	}
-	return authz.HasPermission(ctx, user, "release.create", "application", appID)
+	return false, nil
 }
 
 func writeEmptyReleaseOrderList(c *gin.Context, page int, pageSize int) {

@@ -2,7 +2,9 @@ package sqlrepo
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ type AgentRepository struct {
 }
 
 const staleClaimTimeout = time.Minute
+const defaultAgentBootstrapTokenID = "default"
 
 func NewAgentRepository(db *sql.DB, dbDriver string) *AgentRepository {
 	return &AgentRepository{db: db, dbDriver: strings.ToLower(strings.TrimSpace(dbDriver))}
@@ -30,6 +33,7 @@ func (r *AgentRepository) InitSchema(ctx context.Context) error {
 		statements = []string{
 			`CREATE TABLE IF NOT EXISTS agent_instance (
 	id VARCHAR(64) PRIMARY KEY,
+	machine_id VARCHAR(120) NOT NULL DEFAULT '',
 	agent_code VARCHAR(100) NOT NULL,
 	name VARCHAR(120) NOT NULL,
 	environment_code VARCHAR(120) NOT NULL DEFAULT '',
@@ -54,14 +58,24 @@ func (r *AgentRepository) InitSchema(ctx context.Context) error {
 	created_at BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
 	UNIQUE KEY uk_agent_instance_code (agent_code),
+	KEY idx_agent_instance_machine (machine_id),
 	KEY idx_agent_instance_status (status),
 	KEY idx_agent_instance_env (environment_code),
 	KEY idx_agent_instance_heartbeat (last_heartbeat_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+			`CREATE TABLE IF NOT EXISTS agent_bootstrap_token (
+	id VARCHAR(32) PRIMARY KEY,
+	token_ciphertext TEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
 			`CREATE TABLE IF NOT EXISTS agent_task (
 	id VARCHAR(64) PRIMARY KEY,
 	agent_id VARCHAR(64) NOT NULL,
 	agent_code VARCHAR(100) NOT NULL,
+	target_agent_ids_json MEDIUMTEXT NOT NULL,
+	source_task_id VARCHAR(64) NOT NULL DEFAULT '',
+	dispatch_batch_id VARCHAR(64) NOT NULL DEFAULT '',
 	name VARCHAR(200) NOT NULL,
 	task_mode VARCHAR(20) NOT NULL DEFAULT 'temporary',
 	task_type VARCHAR(50) NOT NULL,
@@ -114,6 +128,7 @@ func (r *AgentRepository) InitSchema(ctx context.Context) error {
 		statements = []string{
 			`CREATE TABLE IF NOT EXISTS agent_instance (
 	id TEXT PRIMARY KEY,
+	machine_id TEXT NOT NULL DEFAULT '',
 	agent_code TEXT NOT NULL UNIQUE,
 	name TEXT NOT NULL,
 	environment_code TEXT NOT NULL DEFAULT '',
@@ -138,13 +153,23 @@ func (r *AgentRepository) InitSchema(ctx context.Context) error {
 	created_at INTEGER NOT NULL,
 	updated_at INTEGER NOT NULL
 );`,
+			`CREATE INDEX IF NOT EXISTS idx_agent_instance_machine ON agent_instance (machine_id);`,
 			`CREATE INDEX IF NOT EXISTS idx_agent_instance_status ON agent_instance (status);`,
 			`CREATE INDEX IF NOT EXISTS idx_agent_instance_env ON agent_instance (environment_code);`,
 			`CREATE INDEX IF NOT EXISTS idx_agent_instance_heartbeat ON agent_instance (last_heartbeat_at);`,
+			`CREATE TABLE IF NOT EXISTS agent_bootstrap_token (
+	id TEXT PRIMARY KEY,
+	token_ciphertext TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`,
 			`CREATE TABLE IF NOT EXISTS agent_task (
 	id TEXT PRIMARY KEY,
 	agent_id TEXT NOT NULL,
 	agent_code TEXT NOT NULL DEFAULT '',
+	target_agent_ids_json TEXT NOT NULL DEFAULT '[]',
+	source_task_id TEXT NOT NULL DEFAULT '',
+	dispatch_batch_id TEXT NOT NULL DEFAULT '',
 	name TEXT NOT NULL,
 	task_mode TEXT NOT NULL DEFAULT 'temporary',
 	task_type TEXT NOT NULL,
@@ -208,10 +233,19 @@ func (r *AgentRepository) InitSchema(ctx context.Context) error {
 func (r *AgentRepository) migrateSchema(ctx context.Context) error {
 	switch r.dbDriver {
 	case "mysql":
-		definitions := []struct {
+		instanceDefinitions := []struct {
 			name string
 			sql  string
 		}{
+			{"machine_id", `ALTER TABLE agent_instance ADD COLUMN machine_id VARCHAR(120) NOT NULL DEFAULT '' AFTER id;`},
+		}
+		taskDefinitions := []struct {
+			name string
+			sql  string
+		}{
+			{"target_agent_ids_json", `ALTER TABLE agent_task ADD COLUMN target_agent_ids_json MEDIUMTEXT NOT NULL AFTER agent_code;`},
+			{"source_task_id", `ALTER TABLE agent_task ADD COLUMN source_task_id VARCHAR(64) NOT NULL DEFAULT '' AFTER target_agent_ids_json;`},
+			{"dispatch_batch_id", `ALTER TABLE agent_task ADD COLUMN dispatch_batch_id VARCHAR(64) NOT NULL DEFAULT '' AFTER source_task_id;`},
 			{"script_path", `ALTER TABLE agent_task ADD COLUMN script_path VARCHAR(500) NOT NULL DEFAULT '' AFTER work_dir;`},
 			{"task_mode", `ALTER TABLE agent_task ADD COLUMN task_mode VARCHAR(20) NOT NULL DEFAULT 'temporary' AFTER name;`},
 			{"script_id", `ALTER TABLE agent_task ADD COLUMN script_id VARCHAR(64) NOT NULL DEFAULT '' AFTER work_dir;`},
@@ -222,7 +256,19 @@ func (r *AgentRepository) migrateSchema(ctx context.Context) error {
 			{"last_run_status", `ALTER TABLE agent_task ADD COLUMN last_run_status VARCHAR(20) NOT NULL DEFAULT '' AFTER failure_count;`},
 			{"last_run_summary", `ALTER TABLE agent_task ADD COLUMN last_run_summary TEXT NOT NULL AFTER last_run_status;`},
 		}
-		for _, definition := range definitions {
+		for _, definition := range instanceDefinitions {
+			exists, err := r.mysqlColumnExists(ctx, "agent_instance", definition.name)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err = r.db.ExecContext(ctx, definition.sql); err != nil {
+				return err
+			}
+		}
+		for _, definition := range taskDefinitions {
 			exists, err := r.mysqlColumnExists(ctx, "agent_task", definition.name)
 			if err != nil {
 				return err
@@ -234,19 +280,35 @@ func (r *AgentRepository) migrateSchema(ctx context.Context) error {
 				return err
 			}
 		}
+		if _, err := r.db.ExecContext(ctx, `CREATE INDEX idx_agent_instance_machine ON agent_instance (machine_id);`); err != nil && !isAlreadyExistsIndexError(err) {
+			return err
+		}
 		if _, err := r.db.ExecContext(ctx, `CREATE INDEX idx_agent_task_agent_mode_status ON agent_task (agent_id, task_mode, status);`); err != nil && !isAlreadyExistsIndexError(err) {
 			return err
 		}
 		return nil
 	case "sqlite":
-		columns, err := r.sqliteTableColumns(ctx, "agent_task")
+		instanceColumns, err := r.sqliteTableColumns(ctx, "agent_instance")
 		if err != nil {
 			return err
 		}
-		definitions := []struct {
+		taskColumns, err := r.sqliteTableColumns(ctx, "agent_task")
+		if err != nil {
+			return err
+		}
+		instanceDefinitions := []struct {
 			name string
 			sql  string
 		}{
+			{"machine_id", `ALTER TABLE agent_instance ADD COLUMN machine_id TEXT NOT NULL DEFAULT '';`},
+		}
+		taskDefinitions := []struct {
+			name string
+			sql  string
+		}{
+			{"target_agent_ids_json", `ALTER TABLE agent_task ADD COLUMN target_agent_ids_json TEXT NOT NULL DEFAULT '[]';`},
+			{"source_task_id", `ALTER TABLE agent_task ADD COLUMN source_task_id TEXT NOT NULL DEFAULT '';`},
+			{"dispatch_batch_id", `ALTER TABLE agent_task ADD COLUMN dispatch_batch_id TEXT NOT NULL DEFAULT '';`},
 			{"script_path", `ALTER TABLE agent_task ADD COLUMN script_path TEXT NOT NULL DEFAULT '';`},
 			{"task_mode", `ALTER TABLE agent_task ADD COLUMN task_mode TEXT NOT NULL DEFAULT 'temporary';`},
 			{"script_id", `ALTER TABLE agent_task ADD COLUMN script_id TEXT NOT NULL DEFAULT '';`},
@@ -257,13 +319,24 @@ func (r *AgentRepository) migrateSchema(ctx context.Context) error {
 			{"last_run_status", `ALTER TABLE agent_task ADD COLUMN last_run_status TEXT NOT NULL DEFAULT '';`},
 			{"last_run_summary", `ALTER TABLE agent_task ADD COLUMN last_run_summary TEXT NOT NULL DEFAULT '';`},
 		}
-		for _, definition := range definitions {
-			if _, ok := columns[definition.name]; ok {
+		for _, definition := range instanceDefinitions {
+			if _, ok := instanceColumns[definition.name]; ok {
 				continue
 			}
 			if _, err = r.db.ExecContext(ctx, definition.sql); err != nil {
 				return err
 			}
+		}
+		for _, definition := range taskDefinitions {
+			if _, ok := taskColumns[definition.name]; ok {
+				continue
+			}
+			if _, err = r.db.ExecContext(ctx, definition.sql); err != nil {
+				return err
+			}
+		}
+		if _, err := r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_agent_instance_machine ON agent_instance (machine_id);`); err != nil {
+			return err
 		}
 		if _, err := r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_agent_task_agent_mode_status ON agent_task (agent_id, task_mode, status);`); err != nil {
 			return err
@@ -281,13 +354,14 @@ func (r *AgentRepository) CreateInstance(ctx context.Context, item domain.Instan
 	}
 	const q = `
 INSERT INTO agent_instance (
-	id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
+	id, machine_id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
 	hostname, host_ip, agent_version, os, arch, status, last_heartbeat_at,
 	current_task_id, current_task_name, current_task_type, current_task_started_at,
 	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	_, err = r.db.ExecContext(ctx, q,
 		item.ID,
+		strings.TrimSpace(item.MachineID),
 		strings.TrimSpace(item.AgentCode),
 		strings.TrimSpace(item.Name),
 		strings.TrimSpace(item.EnvironmentCode),
@@ -328,12 +402,13 @@ func (r *AgentRepository) UpdateInstance(ctx context.Context, item domain.Instan
 	}
 	const q = `
 UPDATE agent_instance
-SET agent_code = ?, name = ?, environment_code = ?, work_dir = ?, token_ciphertext = ?, tags_json = ?,
+SET machine_id = ?, agent_code = ?, name = ?, environment_code = ?, work_dir = ?, token_ciphertext = ?, tags_json = ?,
 	hostname = ?, host_ip = ?, agent_version = ?, os = ?, arch = ?, status = ?, last_heartbeat_at = ?,
 	current_task_id = ?, current_task_name = ?, current_task_type = ?, current_task_started_at = ?,
 	last_task_status = ?, last_task_summary = ?, last_task_finished_at = ?, remark = ?, updated_at = ?
 WHERE id = ?;`
 	res, err := r.db.ExecContext(ctx, q,
+		strings.TrimSpace(item.MachineID),
 		strings.TrimSpace(item.AgentCode),
 		strings.TrimSpace(item.Name),
 		strings.TrimSpace(item.EnvironmentCode),
@@ -376,7 +451,7 @@ WHERE id = ?;`
 
 func (r *AgentRepository) GetInstanceByID(ctx context.Context, id string) (domain.Instance, error) {
 	const q = `
-SELECT id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
+SELECT id, machine_id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
 	hostname, host_ip, agent_version, os, arch, status, last_heartbeat_at,
 	current_task_id, current_task_name, current_task_type, current_task_started_at,
 	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
@@ -393,12 +468,36 @@ FROM agent_instance WHERE id = ?;`
 
 func (r *AgentRepository) GetInstanceByCode(ctx context.Context, code string) (domain.Instance, error) {
 	const q = `
-SELECT id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
+SELECT id, machine_id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
 	hostname, host_ip, agent_version, os, arch, status, last_heartbeat_at,
 	current_task_id, current_task_name, current_task_type, current_task_started_at,
 	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
 FROM agent_instance WHERE agent_code = ?;`
 	item, err := scanAgentInstance(r.db.QueryRowContext(ctx, q, strings.TrimSpace(code)))
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Instance{}, domain.ErrInstanceNotFound
+		}
+		return domain.Instance{}, err
+	}
+	return item, nil
+}
+
+func (r *AgentRepository) GetInstanceByMachineID(ctx context.Context, machineID string) (domain.Instance, error) {
+	machineID = strings.TrimSpace(machineID)
+	if machineID == "" {
+		return domain.Instance{}, domain.ErrInstanceNotFound
+	}
+	const q = `
+SELECT id, machine_id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
+	hostname, host_ip, agent_version, os, arch, status, last_heartbeat_at,
+	current_task_id, current_task_name, current_task_type, current_task_started_at,
+	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
+FROM agent_instance
+WHERE machine_id = ?
+ORDER BY updated_at DESC, created_at DESC
+LIMIT 1;`
+	item, err := scanAgentInstance(r.db.QueryRowContext(ctx, q, machineID))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Instance{}, domain.ErrInstanceNotFound
@@ -421,7 +520,7 @@ func (r *AgentRepository) ListInstances(ctx context.Context, filter domain.ListF
 		args = append(args, string(filter.Status))
 	}
 	countQ := "SELECT COUNT(1) FROM agent_instance"
-	queryQ := `SELECT id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
+	queryQ := `SELECT id, machine_id, agent_code, name, environment_code, work_dir, token_ciphertext, tags_json,
 	hostname, host_ip, agent_version, os, arch, status, last_heartbeat_at,
 	current_task_id, current_task_name, current_task_type, current_task_started_at,
 	last_task_status, last_task_summary, last_task_finished_at, remark, created_at, updated_at
@@ -462,6 +561,21 @@ FROM agent_instance`
 		return nil, 0, err
 	}
 	return result, total, nil
+}
+
+func (r *AgentRepository) DeleteInstance(ctx context.Context, id string) error {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM agent_instance WHERE id = ?;`, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return domain.ErrInstanceNotFound
+	}
+	return nil
 }
 
 func (r *AgentRepository) UpdateHeartbeat(ctx context.Context, instanceID string, payload domain.HeartbeatPayload) (domain.Instance, error) {
@@ -533,6 +647,49 @@ WHERE id = ?;`
 		return domain.Instance{}, domain.ErrInstanceNotFound
 	}
 	return r.GetInstanceByID(ctx, instanceID)
+}
+
+func (r *AgentRepository) GetBootstrapToken(ctx context.Context) (string, error) {
+	const q = `SELECT token_ciphertext FROM agent_bootstrap_token WHERE id = ?;`
+	var encryptedToken string
+	err := r.db.QueryRowContext(ctx, q, defaultAgentBootstrapTokenID).Scan(&encryptedToken)
+	if err == nil {
+		return decryptStoredSecret(encryptedToken)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return r.ResetBootstrapToken(ctx)
+}
+
+func (r *AgentRepository) ResetBootstrapToken(ctx context.Context) (string, error) {
+	token := generateBootstrapToken()
+	encryptedToken, err := encryptStoredSecret(token)
+	if err != nil {
+		return "", err
+	}
+	now := time.Now().UTC().UnixNano()
+	switch r.dbDriver {
+	case "mysql":
+		const q = `
+INSERT INTO agent_bootstrap_token (id, token_ciphertext, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE token_ciphertext = VALUES(token_ciphertext), updated_at = VALUES(updated_at);`
+		if _, err := r.db.ExecContext(ctx, q, defaultAgentBootstrapTokenID, encryptedToken, now, now); err != nil {
+			return "", err
+		}
+	case "sqlite":
+		const q = `
+INSERT INTO agent_bootstrap_token (id, token_ciphertext, created_at, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET token_ciphertext = excluded.token_ciphertext, updated_at = excluded.updated_at;`
+		if _, err := r.db.ExecContext(ctx, q, defaultAgentBootstrapTokenID, encryptedToken, now, now); err != nil {
+			return "", err
+		}
+	default:
+		return "", fmt.Errorf("unsupported db driver: %s", r.dbDriver)
+	}
+	return token, nil
 }
 
 func (r *AgentRepository) CreateScript(ctx context.Context, item domain.Script) (domain.Script, error) {
@@ -669,7 +826,7 @@ func (r *AgentRepository) DeleteScript(ctx context.Context, id string) error {
 }
 
 const agentTaskSelectColumns = `
-id, agent_id, agent_code, name, task_mode, task_type, shell_type, work_dir, script_id, script_name, script_path, script_text, variables_json,
+id, agent_id, agent_code, target_agent_ids_json, source_task_id, dispatch_batch_id, name, task_mode, task_type, shell_type, work_dir, script_id, script_name, script_path, script_text, variables_json,
 timeout_sec, status, claimed_at, started_at, finished_at, exit_code, stdout_text, stderr_text, failure_reason,
 run_count, success_count, failure_count, last_run_status, last_run_summary,
 created_by, created_at, updated_at`
@@ -677,15 +834,18 @@ created_by, created_at, updated_at`
 func (r *AgentRepository) CreateTask(ctx context.Context, item domain.Task) (domain.Task, error) {
 	const q = `
 INSERT INTO agent_task (
-	id, agent_id, agent_code, name, task_mode, task_type, shell_type, work_dir, script_id, script_name, script_path, script_text, variables_json,
+	id, agent_id, agent_code, target_agent_ids_json, source_task_id, dispatch_batch_id, name, task_mode, task_type, shell_type, work_dir, script_id, script_name, script_path, script_text, variables_json,
 	timeout_sec, status, claimed_at, started_at, finished_at, exit_code, stdout_text, stderr_text, failure_reason,
 	run_count, success_count, failure_count, last_run_status, last_run_summary,
 	created_by, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 	_, err := r.db.ExecContext(ctx, q,
 		item.ID,
 		strings.TrimSpace(item.AgentID),
 		strings.TrimSpace(item.AgentCode),
+		marshalStringSlice(item.TargetAgentIDs),
+		strings.TrimSpace(item.SourceTaskID),
+		strings.TrimSpace(item.DispatchBatchID),
 		strings.TrimSpace(item.Name),
 		string(item.TaskMode),
 		strings.TrimSpace(item.TaskType),
@@ -723,9 +883,17 @@ INSERT INTO agent_task (
 func (r *AgentRepository) UpdateTask(ctx context.Context, item domain.Task) (domain.Task, error) {
 	const q = `
 UPDATE agent_task
-SET name = ?, task_mode = ?, task_type = ?, shell_type = ?, work_dir = ?, script_id = ?, script_name = ?, script_path = ?, script_text = ?, variables_json = ?, timeout_sec = ?, updated_at = ?
+SET agent_id = ?, agent_code = ?, target_agent_ids_json = ?, source_task_id = ?, dispatch_batch_id = ?,
+	name = ?, task_mode = ?, task_type = ?, shell_type = ?, work_dir = ?, script_id = ?, script_name = ?, script_path = ?, script_text = ?, variables_json = ?,
+	timeout_sec = ?, status = ?, claimed_at = ?, started_at = ?, finished_at = ?, exit_code = ?, stdout_text = ?, stderr_text = ?, failure_reason = ?,
+	run_count = ?, success_count = ?, failure_count = ?, last_run_status = ?, last_run_summary = ?, created_by = ?, updated_at = ?
 WHERE id = ?;`
 	res, err := r.db.ExecContext(ctx, q,
+		strings.TrimSpace(item.AgentID),
+		strings.TrimSpace(item.AgentCode),
+		marshalStringSlice(item.TargetAgentIDs),
+		strings.TrimSpace(item.SourceTaskID),
+		strings.TrimSpace(item.DispatchBatchID),
 		strings.TrimSpace(item.Name),
 		string(item.TaskMode),
 		strings.TrimSpace(item.TaskType),
@@ -737,6 +905,20 @@ WHERE id = ?;`
 		item.ScriptText,
 		marshalStringMap(item.Variables),
 		item.TimeoutSec,
+		string(item.Status),
+		ptrTimeToUnixNano(item.ClaimedAt),
+		ptrTimeToUnixNano(item.StartedAt),
+		ptrTimeToUnixNano(item.FinishedAt),
+		item.ExitCode,
+		item.StdoutText,
+		item.StderrText,
+		item.FailureReason,
+		item.RunCount,
+		item.SuccessCount,
+		item.FailureCount,
+		string(item.LastRunStatus),
+		item.LastRunSummary,
+		strings.TrimSpace(item.CreatedBy),
 		item.UpdatedAt.UTC().UnixNano(),
 		strings.TrimSpace(item.ID),
 	)
@@ -767,10 +949,22 @@ func (r *AgentRepository) GetTaskByID(ctx context.Context, id string) (domain.Ta
 
 func (r *AgentRepository) ListTasks(ctx context.Context, filter domain.TaskListFilter) ([]domain.Task, int64, error) {
 	args := make([]any, 0, 8)
-	where := make([]string, 0, 3)
+	where := make([]string, 0, 5)
 	if agentID := strings.TrimSpace(filter.AgentID); agentID != "" {
 		where = append(where, "agent_id = ?")
 		args = append(args, agentID)
+	}
+	if scriptID := strings.TrimSpace(filter.ScriptID); scriptID != "" {
+		where = append(where, "script_id = ?")
+		args = append(args, scriptID)
+	}
+	if sourceTaskID := strings.TrimSpace(filter.SourceTaskID); sourceTaskID != "" {
+		where = append(where, "source_task_id = ?")
+		args = append(args, sourceTaskID)
+	}
+	if dispatchBatchID := strings.TrimSpace(filter.DispatchBatchID); dispatchBatchID != "" {
+		where = append(where, "dispatch_batch_id = ?")
+		args = append(args, dispatchBatchID)
 	}
 	if len(filter.Statuses) > 0 {
 		holders := make([]string, 0, len(filter.Statuses))
@@ -927,6 +1121,49 @@ func (r *AgentRepository) MarkTaskRunning(ctx context.Context, taskID string, st
 		startedAt.UTC().UnixNano(),
 		strings.TrimSpace(taskID),
 		string(domain.TaskStatusClaimed),
+	)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if affected == 0 {
+		return domain.Task{}, domain.ErrTaskNotClaimable
+	}
+	return r.GetTaskByID(ctx, taskID)
+}
+
+func (r *AgentRepository) ActivateTemporaryTask(ctx context.Context, taskID string, nextStatus domain.TaskStatus, activatedAt time.Time) (domain.Task, error) {
+	if nextStatus != domain.TaskStatusPending && nextStatus != domain.TaskStatusQueued {
+		nextStatus = domain.TaskStatusPending
+	}
+	current, err := r.GetTaskByID(ctx, taskID)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if current.TaskMode != domain.TaskModeTemporary {
+		return domain.Task{}, domain.ErrTaskNotClaimable
+	}
+	switch current.Status {
+	case domain.TaskStatusPending, domain.TaskStatusQueued, domain.TaskStatusClaimed, domain.TaskStatusRunning:
+		return domain.Task{}, domain.ErrTaskNotClaimable
+	}
+	const q = `
+UPDATE agent_task
+SET status = ?, claimed_at = 0, started_at = 0, finished_at = 0, exit_code = 0,
+	stdout_text = '', stderr_text = '', failure_reason = '', updated_at = ?
+WHERE id = ? AND task_mode = ? AND status IN (?, ?, ?, ?);`
+	res, err := r.db.ExecContext(ctx, q,
+		string(nextStatus),
+		activatedAt.UTC().UnixNano(),
+		strings.TrimSpace(taskID),
+		string(domain.TaskModeTemporary),
+		string(domain.TaskStatusDraft),
+		string(domain.TaskStatusSuccess),
+		string(domain.TaskStatusFailed),
+		string(domain.TaskStatusCancelled),
 	)
 	if err != nil {
 		return domain.Task{}, err
@@ -1105,6 +1342,7 @@ func scanAgentInstance(scanner interface{ Scan(dest ...any) error }) (domain.Ins
 	var updatedAt int64
 	if err := scanner.Scan(
 		&item.ID,
+		&item.MachineID,
 		&item.AgentCode,
 		&item.Name,
 		&item.EnvironmentCode,
@@ -1157,6 +1395,7 @@ func scanAgentInstance(scanner interface{ Scan(dest ...any) error }) (domain.Ins
 
 func scanAgentTask(scanner interface{ Scan(dest ...any) error }) (domain.Task, error) {
 	var item domain.Task
+	var targetAgentIDsJSON string
 	var variablesJSON string
 	var status string
 	var taskMode string
@@ -1170,6 +1409,9 @@ func scanAgentTask(scanner interface{ Scan(dest ...any) error }) (domain.Task, e
 		&item.ID,
 		&item.AgentID,
 		&item.AgentCode,
+		&targetAgentIDsJSON,
+		&item.SourceTaskID,
+		&item.DispatchBatchID,
 		&item.Name,
 		&taskMode,
 		&item.TaskType,
@@ -1203,6 +1445,7 @@ func scanAgentTask(scanner interface{ Scan(dest ...any) error }) (domain.Task, e
 	item.TaskMode = domain.TaskMode(firstNonEmpty(strings.TrimSpace(taskMode), string(domain.TaskModeTemporary)))
 	item.Status = domain.TaskStatus(strings.TrimSpace(status))
 	item.LastRunStatus = domain.TaskStatus(strings.TrimSpace(lastRunStatus))
+	item.TargetAgentIDs = unmarshalStringSlice(targetAgentIDsJSON)
 	item.Variables = unmarshalStringMap(variablesJSON)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
@@ -1346,6 +1589,14 @@ func firstLineFromText(value string) string {
 		}
 	}
 	return value
+}
+
+func generateBootstrapToken() string {
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		return "agboot-" + fmt.Sprint(time.Now().UTC().UnixNano())
+	}
+	return "agboot-" + hex.EncodeToString(buf)
 }
 
 func (r *AgentRepository) mysqlColumnExists(ctx context.Context, table, column string) (bool, error) {

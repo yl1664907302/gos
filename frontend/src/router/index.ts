@@ -54,6 +54,27 @@ function resolveFirstAccessiblePath(authStore: ReturnType<typeof useAuthStore>) 
   return '/releases'
 }
 
+const ROUTE_CHUNK_RELOAD_KEY = 'gos-route-chunk-reload-path'
+const ROUTE_CHUNK_RELOAD_QUERY = '__gos_reload'
+
+function isDynamicImportLoadError(error: unknown) {
+  const text = String((error as { message?: string })?.message || error || '').toLowerCase()
+  return [
+    'failed to fetch dynamically imported module',
+    'importing a module script failed',
+    'chunkloaderror',
+    'unable to preload css',
+    'loading css chunk',
+    'loading chunk',
+  ].some((pattern) => text.includes(pattern))
+}
+
+function buildReloadURL(fullPath: string) {
+  const url = new URL(fullPath || '/', window.location.origin)
+  url.searchParams.set(ROUTE_CHUNK_RELOAD_QUERY, String(Date.now()))
+  return `${url.pathname}${url.search}${url.hash}`
+}
+
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
@@ -275,4 +296,28 @@ router.beforeEach(async (to) => {
     return { path: '/403' }
   }
   return true
+})
+
+router.afterEach((to) => {
+  document.title = to.meta.title ? `${to.meta.title} · GOS Release` : 'GOS Release'
+  sessionStorage.removeItem(ROUTE_CHUNK_RELOAD_KEY)
+})
+
+router.onError((error, to) => {
+  if (!isDynamicImportLoadError(error)) {
+    console.error('[router] navigation error:', error)
+    message.error('页面加载失败，请刷新后重试')
+    return
+  }
+
+  const targetPath = String(to?.fullPath || window.location.pathname || '/')
+  const reloadedPath = sessionStorage.getItem(ROUTE_CHUNK_RELOAD_KEY)
+  if (reloadedPath === targetPath) {
+    sessionStorage.removeItem(ROUTE_CHUNK_RELOAD_KEY)
+    message.error('页面资源已更新，请关闭当前页后重新打开')
+    return
+  }
+
+  sessionStorage.setItem(ROUTE_CHUNK_RELOAD_KEY, targetPath)
+  window.location.replace(buildReloadURL(targetPath))
 })

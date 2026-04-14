@@ -167,6 +167,59 @@ func TestListApprovalRecordSummaries_VisibilityIncludesAppCreatorAndApprover(t *
 	}
 }
 
+func TestCreateTemplate_PersistsHookEnvCodes(t *testing.T) {
+	t.Parallel()
+
+	repo := newTestReleaseRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	template := domain.ReleaseTemplate{
+		ID:              "rt-1",
+		Name:            "template-1",
+		ApplicationID:   "app-1",
+		ApplicationName: "App 1",
+		BindingID:       "app-1",
+		BindingName:     "App 1",
+		BindingType:     "application",
+		Status:          domain.TemplateStatusActive,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	hooks := []domain.ReleaseTemplateHook{
+		{
+			ID:               "hook-1",
+			TemplateID:       template.ID,
+			HookType:         domain.TemplateHookTypeWebhookNotification,
+			Name:             "prod hook",
+			TriggerCondition: domain.TemplateHookTriggerOnSuccess,
+			FailurePolicy:    domain.TemplateHookFailurePolicyWarnOnly,
+			EnvCodes:         []string{"prod", "pre"},
+			WebhookMethod:    "POST",
+			WebhookURL:       "https://example.com/hook",
+			WebhookBody:      "{}",
+			SortNo:           1,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		},
+	}
+
+	if err := repo.CreateTemplate(ctx, template, nil, nil, nil, hooks); err != nil {
+		t.Fatalf("CreateTemplate failed: %v", err)
+	}
+
+	_, _, _, _, storedHooks, err := repo.GetTemplateByID(ctx, template.ID)
+	if err != nil {
+		t.Fatalf("GetTemplateByID failed: %v", err)
+	}
+	if len(storedHooks) != 1 {
+		t.Fatalf("stored hooks len = %d, want 1", len(storedHooks))
+	}
+	if got := storedHooks[0].EnvCodes; len(got) != 2 || got[0] != "prod" || got[1] != "pre" {
+		t.Fatalf("stored hook env codes = %#v, want [prod pre]", got)
+	}
+}
+
 func newTestReleaseRepository(t *testing.T) *ReleaseRepository {
 	t.Helper()
 

@@ -357,7 +357,7 @@ onMounted(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">管线列表</h2>
-        <p class="page-subtitle">展示并维护 Jenkins 管线；支持查看原始脚本，以及创建/编辑 inline raw pipeline。</p>
+        <p class="page-subtitle">展示并维护 Jenkins 管线；支持查看原始脚本，以及创建/编辑 inline raw pipeline</p>
       </div>
       <a-space>
         <a-button v-if="canManagePipeline" type="primary" @click="openCreateModal">

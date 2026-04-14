@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CopyOutlined, EyeOutlined, KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CaretRightOutlined, CopyOutlined, EyeOutlined, KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { Modal, message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
@@ -7,22 +7,28 @@ import { useRouter } from 'vue-router'
 import {
   createAgentTask,
   createAgent,
+  deleteAgent,
   deleteAgentTask,
   disableAgent,
+  executeAgentTask,
   enableAgent,
   getAgent,
+  getAgentBootstrapConfig,
   getAgentConfig,
+  listAgentScripts,
   listAllAgentTasks,
   listAgentTasks,
   listAgents,
   maintenanceAgent,
-  resumeAgentTask,
+  resetAgentBootstrapToken,
   resetAgentToken,
+  resumeAgentTask,
   stopAgentTask,
-  updateAgent,
+  updateAgentTask,
 } from '../../api/agent'
 import { useAuthStore } from '../../stores/auth'
-import type { AgentInstallConfig, AgentInstance, AgentListParams, AgentRuntimeState, AgentStatus, AgentTask, AgentTaskMode, AgentTaskType, UpsertAgentPayload } from '../../types/agent'
+import type { AgentInstallConfig, AgentInstance, AgentListParams, AgentRuntimeState, AgentStatus, AgentTask, AgentTaskMode, AgentTaskType, UpsertAgentPayload, AgentScript } from '../../types/agent'
+import type { CreateAgentTaskPayload } from '../../types/agent'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 const authStore = useAuthStore()
@@ -33,21 +39,27 @@ const loading = ref(false)
 const saving = ref(false)
 const detailLoading = ref(false)
 const configLoading = ref(false)
-const resettingToken = ref(false)
+const bootstrapConfigLoading = ref(false)
+const resettingBootstrapToken = ref(false)
 const modalVisible = ref(false)
 const detailVisible = ref(false)
 const dispatchVisible = ref(false)
 const dispatchLoading = ref(false)
+const deletingAgentID = ref('')
 const editingAgentID = ref('')
 const dataSource = ref<AgentInstance[]>([])
 const total = ref(0)
 const detail = ref<AgentInstance | null>(null)
 const installConfig = ref<AgentInstallConfig | null>(null)
+const bootstrapConfig = ref<AgentInstallConfig | null>(null)
 const taskLoading = ref(false)
 const taskList = ref<AgentTask[]>([])
 const selectedAgentIDs = ref<string[]>([])
 const taskTemplateList = ref<AgentTask[]>([])
 const selectedDispatchTaskID = ref('')
+const boundAgentModalVisible = ref(false)
+const currentBoundTask = ref<AgentTask | null>(null)
+const scriptOptions = ref<AgentScript[]>([])
 let autoRefreshTimer: number | null = null
 
 const filters = reactive<Required<AgentListParams>>({
@@ -108,7 +120,7 @@ const columns: TableColumnsType<AgentInstance> = [
   { title: '当前任务', dataIndex: 'current_task_name', key: 'current_task_name', width: 220 },
   { title: '当前常驻任务', dataIndex: 'current_resident_task_name', key: 'current_resident_task_name', width: 240 },
   { title: '最近结果', dataIndex: 'last_task_status', key: 'last_task_status', width: 120 },
-  { title: '操作', key: 'actions', width: 220, fixed: 'right' },
+  { title: '操作', key: 'actions', width: 260, fixed: 'right' },
 ]
 
 function resetForm() {
@@ -160,6 +172,29 @@ async function loadAgents(options: { silent?: boolean } = {}) {
   }
 }
 
+async function loadBootstrapConfig(options: { silent?: boolean } = {}) {
+  if (!canManageAgent.value) {
+    bootstrapConfig.value = null
+    return
+  }
+  if (!options.silent) {
+    bootstrapConfigLoading.value = true
+  }
+  try {
+    const response = await getAgentBootstrapConfig()
+    bootstrapConfig.value = response.data
+  } catch (error) {
+    bootstrapConfig.value = null
+    if (!options.silent) {
+      message.error(extractHTTPErrorMessage(error, 'Agent 接入配置加载失败'))
+    }
+  } finally {
+    if (!options.silent) {
+      bootstrapConfigLoading.value = false
+    }
+  }
+}
+
 async function loadTasks(agentID: string, options: { silent?: boolean } = {}) {
   if (!agentID) {
     taskList.value = []
@@ -179,6 +214,15 @@ async function loadTasks(agentID: string, options: { silent?: boolean } = {}) {
     if (!options.silent) {
       taskLoading.value = false
     }
+  }
+}
+
+async function loadScriptOptions() {
+  try {
+    const response = await listAgentScripts({ page: 1, page_size: 200 })
+    scriptOptions.value = response.data
+  } catch {
+    scriptOptions.value = []
   }
 }
 
@@ -228,6 +272,9 @@ async function runAutoRefresh() {
     return
   }
   await loadAgents({ silent: true })
+  if (canManageAgent.value) {
+    await loadBootstrapConfig({ silent: true })
+  }
   if (detailVisible.value && detail.value?.id) {
     await loadDetail(detail.value.id, { silent: true })
     await loadTasks(detail.value.id, { silent: true })
@@ -339,7 +386,7 @@ async function handleDispatchTask() {
     if (failed.length) {
       throw new Error(extractHTTPErrorMessage(failed[0].reason, '任务下发失败'))
     }
-    message.success(`任务已下发到 ${selectedAgentIDs.value.length} 台 Agent`)
+    message.success(`任务已创建到 ${selectedAgentIDs.value.length} 台 Agent，点击执行后才会开始领取`)
     closeDispatchModal()
     await loadAgents({ silent: true })
   } catch (error) {
@@ -370,7 +417,7 @@ async function handleSave() {
     detail.value = response.data
     message.success(isEditing ? 'Agent 已更新' : 'Agent 已创建')
     if (!isEditing) {
-      message.info('系统已自动生成 Agent Token，请在详情中复制配置文件到目标主机。')
+      message.info('现在统一使用平台接入 Token 自动注册，部署时直接复制接入配置即可。')
       await openDetail(response.data)
     } else if (detailVisible.value && detail.value?.id === response.data.id) {
       await openDetail(response.data)
@@ -399,6 +446,32 @@ async function handleChangeStatus(record: AgentInstance, target: AgentStatus) {
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, 'Agent 状态更新失败'))
   }
+}
+
+function handleDeleteAgent(record: AgentInstance) {
+  Modal.confirm({
+    title: '删除 Agent',
+    content: `删除后会移除 Agent 实例本身，常驻任务会一并清理，历史临时任务会保留日志但不再绑定这台 Agent。此操作不可恢复，确认继续吗？`,
+    okText: '确认删除',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    async onOk() {
+      deletingAgentID.value = record.id
+      try {
+        await deleteAgent(record.id)
+        selectedAgentIDs.value = selectedAgentIDs.value.filter((item) => item !== record.id)
+        if (detailVisible.value && detail.value?.id === record.id) {
+          closeDetail()
+        }
+        await loadAgents()
+        message.success('Agent 已删除')
+      } catch (error) {
+        message.error(extractHTTPErrorMessage(error, 'Agent 删除失败'))
+      } finally {
+        deletingAgentID.value = ''
+      }
+    },
+  })
 }
 
 function runtimeTagColor(state: AgentRuntimeState) {
@@ -470,6 +543,27 @@ function taskModeText(taskMode?: AgentTaskMode) {
   return taskMode === 'resident' ? '常驻任务' : '临时任务'
 }
 
+function getTemporaryTaskAgentText(task: AgentTask) {
+  const targetAgentIDs = task.target_agent_ids || []
+  if (!targetAgentIDs.length) {
+    return '未绑定'
+  }
+  return `绑定 ${targetAgentIDs.length} 台 Agent`
+}
+
+function showBoundAgentsModal(task: AgentTask) {
+  currentBoundTask.value = task
+  boundAgentModalVisible.value = true
+}
+
+function getBoundAgentList(task: AgentTask | null) {
+  if (!task) return []
+  const targetAgentIDs = task.target_agent_ids || []
+  return targetAgentIDs
+    .map((id) => dataSource.value.find((item) => item.id === id))
+    .filter((item): item is AgentInstance => Boolean(item))
+}
+
 function residentRuntimeText(task: AgentTask) {
   if (task.status === 'running') {
     return '执行中'
@@ -517,6 +611,8 @@ function residentSuccessPercent(task: AgentTask) {
 
 function taskStatusColor(status: AgentTask['status']) {
   switch (status) {
+    case 'draft':
+      return 'cyan'
     case 'success':
       return 'green'
     case 'failed':
@@ -536,6 +632,8 @@ function taskStatusColor(status: AgentTask['status']) {
 
 function taskStatusText(status: AgentTask['status']) {
   switch (status) {
+    case 'draft':
+      return '待执行'
     case 'pending':
       return '待领取'
     case 'queued':
@@ -592,32 +690,46 @@ async function copyText(value: string, successText: string) {
   }
 }
 
-function copyToken(token?: string) {
-  void copyText(token || '', 'Token 已复制')
-}
-
 function copyConfigYAML(configYAML?: string) {
   void copyText(configYAML || '', '配置文件已复制')
 }
 
-async function handleResetToken() {
+function canExecuteTemporaryTask(task: AgentTask) {
+  return task.task_mode !== 'resident' && ['draft', 'success', 'failed', 'cancelled'].includes(String(task.status || ''))
+}
+
+function executeActionText(task: AgentTask) {
+  return task.run_count > 0 ? '重新执行' : '执行'
+}
+
+async function handleResetBootstrapToken() {
+  resettingBootstrapToken.value = true
+  try {
+    const response = await resetAgentBootstrapToken()
+    bootstrapConfig.value = response.data
+    if (detailVisible.value && detail.value?.id) {
+      await loadDetail(detail.value.id, { silent: true, includeConfig: true })
+    }
+    message.success('接入 Token 已重置，后续新部署请使用新的配置文件')
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '接入 Token 重置失败'))
+  } finally {
+    resettingBootstrapToken.value = false
+  }
+}
+
+async function handleExecuteTemporaryTask(task: AgentTask) {
   if (!detail.value) {
     return
   }
-  resettingToken.value = true
   try {
-    const response = await resetAgentToken(detail.value.id)
-    detail.value = response.data
-    installConfig.value = null
-    configLoading.value = true
-    const configResponse = await getAgentConfig(detail.value.id)
-    installConfig.value = configResponse.data
-    message.success('Token 已重置，请重新分发配置文件到目标主机')
+    await executeAgentTask(detail.value.id, task.id)
+    message.success(task.run_count > 0 ? '任务已重新进入执行队列' : '任务已进入执行队列')
+    await loadTasks(detail.value.id)
+    await loadDetail(detail.value.id, { silent: true })
+    await loadAgents({ silent: true })
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, 'Token 重置失败'))
-  } finally {
-    resettingToken.value = false
-    configLoading.value = false
+    message.error(extractHTTPErrorMessage(error, '任务执行失败'))
   }
 }
 
@@ -683,8 +795,59 @@ async function handleDeleteResidentTask(task: AgentTask) {
   })
 }
 
+const editResidentTaskVisible = ref(false)
+const editResidentTaskSaving = ref(false)
+const editResidentTaskForm = reactive<CreateAgentTaskPayload>({
+  name: '',
+  task_mode: 'resident',
+  task_type: 'shell_task',
+  shell_type: 'sh',
+  work_dir: '',
+  script_id: '',
+  script_path: '',
+  script_text: '',
+  variables: {},
+  timeout_sec: 300,
+})
+const editResidentTaskID = ref('')
+
+function handleEditResidentTask(task: AgentTask) {
+  editResidentTaskID.value = task.id
+  editResidentTaskForm.name = task.name
+  editResidentTaskForm.task_mode = task.task_mode
+  editResidentTaskForm.task_type = task.task_type
+  editResidentTaskForm.shell_type = task.shell_type
+  editResidentTaskForm.work_dir = task.work_dir
+  editResidentTaskForm.script_id = task.script_id
+  editResidentTaskForm.script_path = task.script_path
+  editResidentTaskForm.script_text = task.script_text
+  editResidentTaskForm.variables = { ...task.variables }
+  editResidentTaskForm.timeout_sec = task.timeout_sec
+  editResidentTaskVisible.value = true
+}
+
+async function handleSaveEditResidentTask() {
+  if (!detail.value) return
+  editResidentTaskSaving.value = true
+  try {
+    if (!editResidentTaskForm.script_id) {
+      throw new Error('请选择脚本')
+    }
+    await updateAgentTask(detail.value.id, editResidentTaskID.value, editResidentTaskForm)
+    message.success('常驻任务已更新')
+    editResidentTaskVisible.value = false
+    await loadTasks(detail.value.id)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '更新任务失败'))
+  } finally {
+    editResidentTaskSaving.value = false
+  }
+}
+
 onMounted(() => {
   void loadAgents()
+  void loadBootstrapConfig()
+  void loadScriptOptions()
   startAutoRefresh()
 })
 
@@ -698,7 +861,7 @@ onBeforeUnmount(() => {
     <div class="page-header-card page-header">
         <div class="page-header-copy">
           <div class="page-title">Agent 管理</div>
-          <div class="page-subtitle">管理生产侧 Agent 心跳、接单状态与最近执行信息；任务下发与常驻任务管理已统一迁移到任务管理。</div>
+          <div class="page-subtitle">统一管理 Agent 心跳、接单状态与接入配置</div>
         </div>
         <a-space>
           <a-button @click="loadAgents" :loading="loading">
@@ -718,6 +881,52 @@ onBeforeUnmount(() => {
           </a-button>
         </a-space>
     </div>
+
+    <a-card v-if="canManageAgent" class="filter-card bootstrap-card" :bordered="false">
+      <div class="bootstrap-card-head">
+        <div>
+          <div class="task-panel-title">Agent 接入配置</div>
+          <div class="task-panel-subtitle">平台统一生成接入 Token，目标主机只需要这份配置文件即可启动并自动注册。</div>
+        </div>
+        <a-space>
+          <a-button @click="loadBootstrapConfig" :loading="bootstrapConfigLoading">
+            <template #icon><ReloadOutlined /></template>
+            刷新配置
+          </a-button>
+          <a-button @click="copyConfigYAML(bootstrapConfig?.config_yaml)">
+            <template #icon><CopyOutlined /></template>
+            复制配置
+          </a-button>
+          <a-button :loading="resettingBootstrapToken" @click="handleResetBootstrapToken">
+            <template #icon><KeyOutlined /></template>
+            重置接入 Token
+          </a-button>
+        </a-space>
+      </div>
+      <a-spin :spinning="bootstrapConfigLoading">
+        <div class="config-meta bootstrap-meta">
+          <div>
+            <div class="config-label">一键安装</div>
+            <pre v-if="bootstrapConfig" class="config-preview">wget -qO- https://gc-oa.oss-cn-shanghai.aliyuncs.com/tempUpdate/install_gos_agent.sh | sudo bash -s -- \
+  --server-url {{ bootstrapConfig.resolved_server_url }} \
+  --token {{ bootstrapConfig.registration_token }} \
+  --work-dir /etc/gos-agent \
+  --name prod-xxxx \
+  --tags production,web</pre>
+            <pre v-else class="config-preview">接入配置生成中…</pre>
+          </div>
+          <div>
+            <div class="config-label">建议路径</div>
+            <pre class="config-preview">{{ bootstrapConfig?.suggested_path || '-' }}</pre>
+          </div>
+          <div>
+            <div class="config-label">启动命令</div>
+            <pre class="config-preview">{{ bootstrapConfig?.launch_command ? 'nohup ' + bootstrapConfig.launch_command + ' > agent.log 2>&1 &' : '-' }}</pre>
+          </div>
+        </div>
+        <pre class="config-preview">{{ bootstrapConfig?.config_yaml || '接入配置生成中…' }}</pre>
+      </a-spin>
+    </a-card>
 
     <a-card class="filter-card" :bordered="false">
       <a-form layout="inline" class="filter-form">
@@ -815,6 +1024,15 @@ onBeforeUnmount(() => {
                 查看
               </a-button>
               <a-button v-if="canManageAgent" type="link" @click="openEdit(record)">编辑</a-button>
+              <a-button
+                v-if="canManageAgent"
+                type="link"
+                danger
+                :loading="deletingAgentID === record.id"
+                @click="handleDeleteAgent(record)"
+              >
+                删除
+              </a-button>
               <a-dropdown v-if="canManageAgent">
                 <a class="ant-dropdown-link" @click.prevent>状态</a>
                 <template #overlay>
@@ -897,15 +1115,9 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="detail-item detail-item-full">
-              <div class="detail-label">Token</div>
+              <div class="detail-label">接入方式</div>
               <div class="detail-value token-row">
-                <span class="muted-text">已隐藏，请通过安装配置获取当前 Token</span>
-                <a-space>
-                  <a-button v-if="canManageAgent" size="small" :loading="resettingToken" @click="handleResetToken">
-                    <template #icon><KeyOutlined /></template>
-                    重置 Token
-                  </a-button>
-                </a-space>
+                <span class="muted-text">当前 Agent 使用平台统一接入 Token 自动注册，运行凭据由系统维护，无需手工配置单机 Token。</span>
               </div>
             </div>
             <div class="detail-item detail-item-full">
@@ -924,6 +1136,7 @@ onBeforeUnmount(() => {
                 <a-spin :spinning="configLoading">
                   <pre class="config-preview">{{ installConfig?.config_yaml || '配置生成中…' }}</pre>
                 </a-spin>
+                <div class="muted-text">这份配置会带上平台接入 Token，并自动回填当前 Agent 的名称、环境和工作目录。</div>
                 <div class="config-actions">
                   <a-button size="small" @click="copyConfigYAML(installConfig?.config_yaml)">
                     <template #icon><CopyOutlined /></template>
@@ -962,6 +1175,13 @@ onBeforeUnmount(() => {
                           </div>
                           <a-space>
                             <a-tag :color="residentRuntimeColor(item)">{{ residentRuntimeText(item) }}</a-tag>
+                            <a-button
+                              v-if="canManageAgent && item.status !== 'running' && item.status !== 'claimed'"
+                              size="small"
+                              @click="handleEditResidentTask(item)"
+                            >
+                              编辑
+                            </a-button>
                             <a-button
                               v-if="canManageAgent && item.status !== 'cancelled'"
                               size="small"
@@ -1041,8 +1261,24 @@ onBeforeUnmount(() => {
                               <a-tag>{{ taskTypeText(item.task_type) }}</a-tag>
                             </div>
                             <div class="muted-text">{{ item.script_name || item.script_path || '-' }} · {{ formatTime(item.created_at) }}</div>
+                            <div v-if="item.target_agent_ids && item.target_agent_ids.length" class="muted-text">
+                              <a class="agent-link" @click="showBoundAgentsModal(item)">
+                                {{ getTemporaryTaskAgentText(item) }}
+                              </a>
+                            </div>
                           </div>
-                          <a-tag :color="taskStatusColor(item.status)">{{ taskStatusText(item.status) }}</a-tag>
+                          <a-space>
+                            <a-button
+                              v-if="canManageAgent && canExecuteTemporaryTask(item)"
+                              type="link"
+                              size="small"
+                              @click="handleExecuteTemporaryTask(item)"
+                            >
+                              <template #icon><CaretRightOutlined /></template>
+                              {{ executeActionText(item) }}
+                            </a-button>
+                            <a-tag :color="taskStatusColor(item.status)">{{ taskStatusText(item.status) }}</a-tag>
+                          </a-space>
                         </div>
                         <div class="task-meta">
                           <span>目录：{{ item.work_dir }}</span>
@@ -1187,6 +1423,107 @@ onBeforeUnmount(() => {
         </div>
       </a-form>
     </a-modal>
+
+    <a-modal
+      v-model:open="boundAgentModalVisible"
+      :title="currentBoundTask ? `${currentBoundTask.name} - 绑定 Agent 列表` : '绑定 Agent 列表'"
+      :footer="null"
+      :width="720"
+    >
+      <a-table
+        :columns="[
+          { title: 'Agent 名称', dataIndex: 'name', key: 'name', ellipsis: true },
+          { title: 'Agent Code', dataIndex: 'agent_code', key: 'agent_code', width: 180, ellipsis: true },
+          { title: '环境', dataIndex: 'environment_code', key: 'environment_code', width: 100 },
+          { title: '状态', key: 'runtime_state', width: 100 },
+        ]"
+        :data-source="getBoundAgentList(currentBoundTask)"
+        :pagination="false"
+        size="small"
+        row-key="id"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.dataIndex === 'name'">
+            {{ record.name || record.agent_code }}
+          </template>
+          <template v-if="column.dataIndex === 'environment_code'">
+            {{ record.environment_code || '-' }}
+          </template>
+          <template v-if="column.key === 'runtime_state'">
+            <a-tag :color="{ online: 'green', offline: 'default', busy: 'orange', disabled: 'red', maintenance: 'blue' }[record.runtime_state] || 'default'">
+              {{ { online: '在线', offline: '离线', busy: '忙碌', disabled: '禁用', maintenance: '维护' }[record.runtime_state] || record.runtime_state }}
+            </a-tag>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
+
+    <a-modal
+      v-model:open="editResidentTaskVisible"
+      title="编辑常驻任务"
+      :width="860"
+      :confirm-loading="editResidentTaskSaving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="handleSaveEditResidentTask"
+      @cancel="() => { editResidentTaskVisible = false }"
+    >
+      <a-form layout="vertical" class="task-create-form">
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="任务名称" required>
+              <a-input v-model:value="editResidentTaskForm.name" placeholder="例如：版本检查、下载产物" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="任务模式">
+              <a-select v-model:value="editResidentTaskForm.task_mode">
+                <a-select-option value="resident">常驻任务</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="选择脚本" required>
+          <a-select
+            :value="editResidentTaskForm.script_id || undefined"
+            allow-clear
+            show-search
+            placeholder="请选择脚本管理中的脚本"
+            :filter-option="(input: string, option: any) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
+            :options="scriptOptions.map((item) => ({ value: item.id, label: `${item.name} · ${taskTypeText(item.task_type as AgentTaskType)}${item.script_path ? ` · ${item.script_path}` : ''}` }))"
+            @update:value="(value) => { editResidentTaskForm.script_id = String(value || ''); const s = scriptOptions.find(x => x.id === value); if (s) { editResidentTaskForm.task_type = s.task_type as any; editResidentTaskForm.shell_type = s.shell_type; editResidentTaskForm.script_text = s.script_text; editResidentTaskForm.script_path = s.script_path; editResidentTaskForm.script_name = s.name } }"
+          />
+        </a-form-item>
+
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="脚本类型">
+              <a-input :value="taskTypeText(editResidentTaskForm.task_type)" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="Shell 类型">
+              <a-input :value="editResidentTaskForm.shell_type || '-'" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="超时时间（秒）">
+              <a-input-number v-model:value="editResidentTaskForm.timeout_sec" :min="10" :max="3600" style="width: 100%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="工作目录">
+              <a-input v-model:value="editResidentTaskForm.work_dir" placeholder="留空则使用 Agent 工作目录" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="脚本内容">
+          <a-textarea v-model:value="editResidentTaskForm.script_text" :rows="8" readonly />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -1196,6 +1533,17 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+
+.agent-link {
+  color: #1890ff;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.agent-link:hover {
+  color: #40a9ff;
+  text-decoration: underline;
 }
 
 .agent-primary {
@@ -1250,6 +1598,27 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.bootstrap-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.task-panel-title {
+  color: var(--color-text-main);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.task-panel-subtitle {
+  margin-top: 6px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .config-card {
   display: flex;
   flex-direction: column;
@@ -1292,6 +1661,10 @@ onBeforeUnmount(() => {
 .config-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.bootstrap-meta {
+  margin-bottom: 12px;
 }
 
 .tasks-header {
@@ -1454,6 +1827,7 @@ onBeforeUnmount(() => {
 
 @media (max-width: 900px) {
   .page-header,
+  .bootstrap-card-head,
   .task-item-head,
   .tasks-header,
   .token-row {

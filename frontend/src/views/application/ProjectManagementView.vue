@@ -138,7 +138,7 @@ onMounted(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">项目管理</h2>
-        <p class="page-subtitle">先建立项目，再让应用归属到项目，后续应用、模板和发布会更容易按业务域收拢。</p>
+        <p class="page-subtitle">先建立项目，再让应用归属到项目，后续应用、模板和发布会更容易按业务域收拢</p>
       </div>
       <a-button type="primary" @click="openCreate">
         <template #icon><PlusOutlined /></template>

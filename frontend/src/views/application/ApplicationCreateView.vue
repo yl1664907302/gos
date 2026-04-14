@@ -91,7 +91,7 @@ onMounted(() => {
         </a-button>
         <div class="page-header-copy">
           <h2 class="page-title">新增应用</h2>
-          <p class="page-subtitle">创建新的应用档案，补齐基础信息后即可继续绑定管线、配置模板并进入发布链路。</p>
+          <p class="page-subtitle">创建新的应用档案，补齐基础信息后即可继续绑定管线、配置模板并进入发布链路</p>
         </div>
       </div>
     </div>

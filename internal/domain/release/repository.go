@@ -95,17 +95,18 @@ type Repository interface {
 }
 
 type ListFilter struct {
-	ApplicationID          string
-	ApplicationIDs         []string
-	VisibleToUserID        string
-	ApprovalApproverUserID string
-	CreatorUserID          string
-	BindingID              string
-	EnvCode                string
-	Status                 OrderStatus
-	TriggerType            TriggerType
-	Page                   int
-	PageSize               int
+	ApplicationID               string
+	ApplicationIDs              []string
+	VisibleApplicationEnvScopes []ApplicationEnvScope
+	VisibleToUserID             string
+	ApprovalApproverUserID      string
+	CreatorUserID               string
+	BindingID                   string
+	EnvCode                     string
+	Status                      OrderStatus
+	TriggerType                 TriggerType
+	Page                        int
+	PageSize                    int
 }
 
 type StepUpdateInput struct {
@@ -135,10 +136,16 @@ type TemplateListFilter struct {
 }
 
 type ApprovalRecordListFilter struct {
-	ApplicationID   string
-	ApplicationIDs  []string
-	VisibleToUserID string
-	OperatorUserID  string
-	Page            int
-	PageSize        int
+	ApplicationID               string
+	ApplicationIDs              []string
+	VisibleApplicationEnvScopes []ApplicationEnvScope
+	VisibleToUserID             string
+	OperatorUserID              string
+	Page                        int
+	PageSize                    int
+}
+
+type ApplicationEnvScope struct {
+	ApplicationID string
+	EnvCode       string
 }

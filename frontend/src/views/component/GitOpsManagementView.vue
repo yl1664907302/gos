@@ -243,7 +243,7 @@ onUnmounted(() => {
       <div class="toolbar">
         <div class="page-header-copy">
           <div class="page-title">GitOps管理</div>
-          <div class="page-subtitle">统一维护多个 GitOps 实例，并将它们关联到不同的 ArgoCD 集群。</div>
+          <div class="page-subtitle">统一维护多个 GitOps 实例，并将它们关联到不同的 ArgoCD 集群</div>
         </div>
         <a-space>
           <a-button v-if="canManageGitOps" type="primary" @click="openCreateInstance">

@@ -33,16 +33,16 @@ var templateBuiltinSourceKeys = map[string]struct{}{
 }
 
 type ReleaseTemplateManager struct {
-	repo         releasedomain.Repository
-	appRepo      appdomain.Repository
-	pipelineRepo pipelinedomain.Repository
-	paramRepo    pipelineparamdomain.Repository
-	platformRepo platformparamdomain.Repository
-	argocdRepo   argocddomain.Repository
-	agentRepo    agentdomain.Repository
+	repo             releasedomain.Repository
+	appRepo          appdomain.Repository
+	pipelineRepo     pipelinedomain.Repository
+	paramRepo        pipelineparamdomain.Repository
+	platformRepo     platformparamdomain.Repository
+	argocdRepo       argocddomain.Repository
+	agentRepo        agentdomain.Repository
 	notificationRepo notificationdomain.Repository
-	gitopsReader ReleaseTemplateGitOpsFieldCandidateReader
-	now          func() time.Time
+	gitopsReader     ReleaseTemplateGitOpsFieldCandidateReader
+	now              func() time.Time
 }
 
 type ReleaseTemplateGitOpsFieldCandidateReader interface {
@@ -119,6 +119,7 @@ type ReleaseTemplateHookInput struct {
 	Name             string
 	TriggerCondition releasedomain.TemplateHookTriggerCondition
 	FailurePolicy    releasedomain.TemplateHookFailurePolicy
+	EnvCodes         []string
 	TargetID         string
 	WebhookMethod    string
 	WebhookURL       string
@@ -885,6 +886,24 @@ func normalizeStringIDs(values []string) []string {
 	return result
 }
 
+func normalizeHookEnvCodes(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func (uc *ReleaseTemplateManager) buildTemplateHooks(
 	ctx context.Context,
 	inputs []ReleaseTemplateHookInput,
@@ -938,6 +957,7 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			Name:             name,
 			TriggerCondition: triggerCondition,
 			FailurePolicy:    failurePolicy,
+			EnvCodes:         normalizeHookEnvCodes(input.EnvCodes),
 			SortNo:           idx + 1,
 			Note:             strings.TrimSpace(input.Note),
 		}
@@ -954,6 +974,9 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			task, err := uc.agentRepo.GetTaskByID(ctx, taskID)
 			if err != nil {
 				return nil, err
+			}
+			if task.TaskMode != agentdomain.TaskModeTemporary {
+				return nil, fmt.Errorf("%w: agent hook must reference a temporary task; release will dispatch to agents bound on that task", ErrInvalidInput)
 			}
 			item.TargetID = task.ID
 			item.TargetName = firstNonEmpty(strings.TrimSpace(task.Name), task.ID)

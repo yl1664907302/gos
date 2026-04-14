@@ -131,6 +131,9 @@ func (uc *TrackReleaseExecution) listRunningOrders(ctx context.Context) ([]domai
 }
 
 func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.ReleaseOrder) (bool, bool, error) {
+	if order.Status == domain.OrderStatusCancelled {
+		return uc.syncCancelledOrder(ctx, order)
+	}
 	if err := uc.manager.touchExecutionLocks(ctx, order); err != nil {
 		return false, false, err
 	}
@@ -651,6 +654,62 @@ func (uc *TrackReleaseExecution) failRemainingExecutions(
 		}
 	}
 	return updated || true, nil
+}
+
+func (uc *TrackReleaseExecution) syncCancelledOrder(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+) (bool, bool, error) {
+	executions, err := uc.manager.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+	steps, err := uc.manager.ListSteps(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+
+	now := uc.now()
+	updated := false
+	for _, execution := range executions {
+		if execution.Status.IsTerminal() {
+			continue
+		}
+		if _, err := uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     domain.ExecutionStatusCancelled,
+			QueueURL:   execution.QueueURL,
+			BuildURL:   execution.BuildURL,
+			StartedAt:  execution.StartedAt,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		}); err != nil && !errors.Is(err, domain.ErrExecutionNotFound) {
+			return false, false, err
+		} else if err == nil {
+			updated = true
+		}
+	}
+
+	for _, step := range steps {
+		if !shouldFinishStepOnCancel(step) {
+			continue
+		}
+		if ok, err := uc.finishStep(ctx, order.ID, step.StepCode, domain.StepStatusFailed, "发布已取消"); err != nil {
+			return false, false, err
+		} else if ok {
+			updated = true
+		}
+	}
+
+	if order.FinishedAt == nil {
+		if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusCancelled, order.StartedAt, &now, now); err != nil {
+			return false, false, err
+		}
+		updated = true
+	}
+	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+		return false, false, err
+	}
+	return updated, false, nil
 }
 
 func (uc *TrackReleaseExecution) finishStep(

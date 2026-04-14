@@ -622,6 +622,15 @@ func (c *Client) getJobParamSet(ctx context.Context, fullName string) (pipelinep
 			return pipelineparamdomain.JenkinsJobParamSet{}, err
 		}
 	}
+	if len(params) == 0 {
+		fallbackParams, fallbackErr := c.loadScriptParamFallback(ctx, fullName)
+		if fallbackErr == nil {
+			params = append(params, fallbackParams...)
+			for _, item := range fallbackParams {
+				seen[item.Name] = struct{}{}
+			}
+		}
+	}
 
 	if fallback, err := c.loadExtendedChoiceFallback(ctx, fullName); err == nil {
 		for idx, item := range params {
@@ -645,6 +654,14 @@ func (c *Client) getJobParamSet(ctx context.Context, fullName string) (pipelinep
 		JobFullName: fullName,
 		Params:      params,
 	}, nil
+}
+
+func (c *Client) loadScriptParamFallback(ctx context.Context, fullName string) ([]pipelineparamdomain.JenkinsParamSnapshot, error) {
+	script, err := c.GetPipelineScript(ctx, fullName)
+	if err != nil {
+		return nil, err
+	}
+	return parsePipelineScriptParamSnapshots(script.Script), nil
 }
 
 func appendParsedJenkinsParams(
@@ -717,6 +734,708 @@ func parseJenkinsParamDefinition(raw json.RawMessage, sortNo int) (pipelineparam
 		RawMeta:      rawMeta,
 		SortNo:       sortNo,
 	}, true, nil
+}
+
+func parsePipelineScriptParamSnapshots(script string) []pipelineparamdomain.JenkinsParamSnapshot {
+	block, ok := extractGroovyNamedBlock(script, "parameters")
+	if !ok {
+		return nil
+	}
+
+	calls := extractGroovyTopLevelCalls(block)
+	result := make([]pipelineparamdomain.JenkinsParamSnapshot, 0, len(calls))
+	for index, item := range calls {
+		param, ok := parsePipelineScriptParamCall(item.name, item.args, index+1)
+		if !ok {
+			continue
+		}
+		result = append(result, param)
+	}
+	return result
+}
+
+type groovyTopLevelCall struct {
+	name string
+	args string
+}
+
+func extractGroovyNamedBlock(script string, keyword string) (string, bool) {
+	source := script
+	for idx := 0; idx < len(source); idx++ {
+		pos := strings.Index(source[idx:], keyword)
+		if pos < 0 {
+			return "", false
+		}
+		pos += idx
+		if (pos > 0 && isGroovyIdentByte(source[pos-1])) ||
+			(pos+len(keyword) < len(source) && isGroovyIdentByte(source[pos+len(keyword)])) {
+			idx = pos + len(keyword)
+			continue
+		}
+		next := skipGroovySpaces(source, pos+len(keyword))
+		if next >= len(source) || source[next] != '{' {
+			idx = pos + len(keyword)
+			continue
+		}
+		end, ok := findGroovyMatching(source, next, '{', '}')
+		if !ok || end <= next {
+			return "", false
+		}
+		return source[next+1 : end], true
+	}
+	return "", false
+}
+
+func extractGroovyTopLevelCalls(block string) []groovyTopLevelCall {
+	result := make([]groovyTopLevelCall, 0)
+	for idx := 0; idx < len(block); {
+		idx = skipGroovyNoise(block, idx)
+		if idx >= len(block) {
+			break
+		}
+		if !isGroovyIdentStart(block[idx]) {
+			idx++
+			continue
+		}
+		start := idx
+		idx++
+		for idx < len(block) && isGroovyIdentByte(block[idx]) {
+			idx++
+		}
+		name := strings.TrimSpace(block[start:idx])
+		argStart := skipGroovySpaces(block, idx)
+		if argStart >= len(block) {
+			break
+		}
+
+		if block[argStart] == '(' {
+			end, ok := findGroovyMatching(block, argStart, '(', ')')
+			if !ok {
+				break
+			}
+			result = append(result, groovyTopLevelCall{
+				name: name,
+				args: strings.TrimSpace(block[argStart+1 : end]),
+			})
+			idx = end + 1
+			continue
+		}
+
+		statementEnd := findGroovyStatementEnd(block, argStart)
+		args := strings.TrimSpace(block[argStart:statementEnd])
+		if strings.Contains(args, ":") {
+			result = append(result, groovyTopLevelCall{name: name, args: args})
+		}
+		idx = statementEnd + 1
+	}
+	return result
+}
+
+func parsePipelineScriptParamCall(name string, args string, sortNo int) (pipelineparamdomain.JenkinsParamSnapshot, bool) {
+	argsMap := parseGroovyNamedArgs(args)
+	paramName := strings.TrimSpace(parseGroovyStringLike(argsMap["name"]))
+	if paramName == "" {
+		return pipelineparamdomain.JenkinsParamSnapshot{}, false
+	}
+
+	description := strings.TrimSpace(parseGroovyStringLike(argsMap["description"]))
+	defaultValue := strings.TrimSpace(parseGroovyStringLike(argsMap["defaultValue"]))
+	lowerName := strings.ToLower(strings.TrimSpace(name))
+	switch lowerName {
+	case "choice":
+		choices := parseGroovyChoices(argsMap["choices"], ",")
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeChoice,
+			true,
+			sortNo,
+			map[string]any{
+				"_class":  "hudson.model.ChoiceParameterDefinition",
+				"type":    "ChoiceParameterDefinition",
+				"choices": choices,
+			},
+		), true
+	case "gitparameter":
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeChoice,
+			true,
+			sortNo,
+			map[string]any{
+				"_class": "net.uaznia.lukanus.hudson.plugins.gitparameter.GitParameterDefinition",
+				"type":   "GitParameterDefinition",
+			},
+		), true
+	case "extendedchoice":
+		typeName := strings.TrimSpace(parseGroovyStringLike(argsMap["type"]))
+		delimiter := strings.TrimSpace(parseGroovyStringLike(argsMap["multiSelectDelimiter"]))
+		if delimiter == "" {
+			delimiter = ","
+		}
+		choices := parseGroovyChoices(argsMap["value"], delimiter)
+		if defaultValue == "" {
+			defaultValue = strings.TrimSpace(parseGroovyStringLike(argsMap["defaultValue"]))
+		}
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeChoice,
+			!looksLikeGroovyMultiSelect(typeName),
+			sortNo,
+			map[string]any{
+				"_class":               "com.cwctravel.hudson.plugins.extended_choice_parameter.ExtendedChoiceParameterDefinition",
+				"type":                 defaultGroovyString(typeName, "PT_SINGLE_SELECT"),
+				"choices":              choices,
+				"multiSelectDelimiter": delimiter,
+			},
+		), true
+	case "text":
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeString,
+			false,
+			sortNo,
+			map[string]any{
+				"_class": "hudson.model.TextParameterDefinition",
+				"type":   "TextParameterDefinition",
+			},
+		), true
+	case "string":
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeString,
+			false,
+			sortNo,
+			map[string]any{
+				"_class": "hudson.model.StringParameterDefinition",
+				"type":   "StringParameterDefinition",
+			},
+		), true
+	case "booleanparam":
+		return buildScriptParamSnapshot(
+			paramName,
+			description,
+			defaultValue,
+			pipelineparamdomain.ParamTypeBool,
+			false,
+			sortNo,
+			map[string]any{
+				"_class": "hudson.model.BooleanParameterDefinition",
+				"type":   "BooleanParameterDefinition",
+			},
+		), true
+	default:
+		return pipelineparamdomain.JenkinsParamSnapshot{}, false
+	}
+}
+
+func buildScriptParamSnapshot(
+	name string,
+	description string,
+	defaultValue string,
+	paramType pipelineparamdomain.ParamType,
+	singleSelect bool,
+	sortNo int,
+	meta map[string]any,
+) pipelineparamdomain.JenkinsParamSnapshot {
+	meta["name"] = name
+	if description != "" {
+		meta["description"] = description
+	}
+	if defaultValue != "" {
+		meta["defaultValue"] = defaultValue
+	}
+	rawMetaBytes, err := json.Marshal(meta)
+	rawMeta := "{}"
+	if err == nil {
+		rawMeta = string(rawMetaBytes)
+	}
+	return pipelineparamdomain.JenkinsParamSnapshot{
+		Name:         name,
+		ParamType:    paramType,
+		SingleSelect: singleSelect,
+		Required:     false,
+		DefaultValue: defaultValue,
+		Description:  description,
+		RawMeta:      rawMeta,
+		SortNo:       sortNo,
+	}
+}
+
+func parseGroovyNamedArgs(args string) map[string]string {
+	result := make(map[string]string)
+	for _, part := range splitGroovyTopLevel(args, ',') {
+		key, value, ok := splitGroovyNamedArg(part)
+		if !ok {
+			continue
+		}
+		result[strings.TrimSpace(key)] = strings.TrimSpace(value)
+	}
+	return result
+}
+
+func splitGroovyNamedArg(part string) (string, string, bool) {
+	text := strings.TrimSpace(part)
+	if text == "" {
+		return "", "", false
+	}
+	for idx := 0; idx < len(text); idx++ {
+		if text[idx] != ':' {
+			continue
+		}
+		if hasGroovyOpeners(text[:idx]) || hasGroovyQuotes(text[:idx]) {
+			continue
+		}
+		return text[:idx], text[idx+1:], true
+	}
+	return "", "", false
+}
+
+func splitGroovyTopLevel(text string, sep byte) []string {
+	result := make([]string, 0)
+	start := 0
+	var (
+		parenDepth   int
+		bracketDepth int
+		braceDepth   int
+		inSingle     bool
+		inDouble     bool
+		inLineCmt    bool
+		inBlockCmt   bool
+	)
+	for idx := 0; idx < len(text); idx++ {
+		ch := text[idx]
+		next := byte(0)
+		if idx+1 < len(text) {
+			next = text[idx+1]
+		}
+		if inLineCmt {
+			if ch == '\n' {
+				inLineCmt = false
+			}
+			continue
+		}
+		if inBlockCmt {
+			if ch == '*' && next == '/' {
+				inBlockCmt = false
+				idx++
+			}
+			continue
+		}
+		if inSingle {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineCmt = true
+			idx++
+		case ch == '/' && next == '*':
+			inBlockCmt = true
+			idx++
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case ch == sep && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0:
+			result = append(result, text[start:idx])
+			start = idx + 1
+		}
+	}
+	if start <= len(text) {
+		result = append(result, text[start:])
+	}
+	return result
+}
+
+func parseGroovyChoices(raw string, delimiter string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		inner := strings.TrimSpace(raw[1 : len(raw)-1])
+		if inner == "" {
+			return nil
+		}
+		items := splitGroovyTopLevel(inner, ',')
+		values := make([]string, 0, len(items))
+		for _, item := range items {
+			value := strings.TrimSpace(parseGroovyStringLike(item))
+			if value != "" {
+				values = append(values, value)
+			}
+		}
+		return normalizeChoiceValues(values)
+	}
+	return splitChoiceValueByDelimiter(parseGroovyStringLike(raw), delimiter)
+}
+
+func parseGroovyStringLike(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+	if len(text) >= 2 {
+		if (text[0] == '\'' && text[len(text)-1] == '\'') || (text[0] == '"' && text[len(text)-1] == '"') {
+			text = text[1 : len(text)-1]
+		}
+	}
+	text = strings.ReplaceAll(text, "\\'", "'")
+	text = strings.ReplaceAll(text, "\\\"", "\"")
+	text = strings.ReplaceAll(text, "\\n", "\n")
+	text = strings.ReplaceAll(text, "\\r", "\r")
+	return strings.TrimSpace(text)
+}
+
+func looksLikeGroovyMultiSelect(typeName string) bool {
+	lower := strings.ToLower(strings.TrimSpace(typeName))
+	return strings.Contains(lower, "checkbox") || strings.Contains(lower, "multi")
+}
+
+func skipGroovyNoise(text string, idx int) int {
+	for idx < len(text) {
+		switch {
+		case text[idx] == ' ' || text[idx] == '\t' || text[idx] == '\n' || text[idx] == '\r':
+			idx++
+		case text[idx] == '/' && idx+1 < len(text) && text[idx+1] == '/':
+			idx += 2
+			for idx < len(text) && text[idx] != '\n' {
+				idx++
+			}
+		case text[idx] == '/' && idx+1 < len(text) && text[idx+1] == '*':
+			idx += 2
+			for idx+1 < len(text) && !(text[idx] == '*' && text[idx+1] == '/') {
+				idx++
+			}
+			if idx+1 < len(text) {
+				idx += 2
+			}
+		default:
+			return idx
+		}
+	}
+	return idx
+}
+
+func skipGroovySpaces(text string, idx int) int {
+	for idx < len(text) && (text[idx] == ' ' || text[idx] == '\t' || text[idx] == '\n' || text[idx] == '\r') {
+		idx++
+	}
+	return idx
+}
+
+func findGroovyStatementEnd(text string, start int) int {
+	var (
+		parenDepth   int
+		bracketDepth int
+		braceDepth   int
+		inSingle     bool
+		inDouble     bool
+		inLineCmt    bool
+		inBlockCmt   bool
+	)
+	for idx := start; idx < len(text); idx++ {
+		ch := text[idx]
+		next := byte(0)
+		if idx+1 < len(text) {
+			next = text[idx+1]
+		}
+		if inLineCmt {
+			if ch == '\n' {
+				return idx
+			}
+			continue
+		}
+		if inBlockCmt {
+			if ch == '*' && next == '/' {
+				inBlockCmt = false
+				idx++
+			}
+			continue
+		}
+		if inSingle {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineCmt = true
+			idx++
+		case ch == '/' && next == '*':
+			inBlockCmt = true
+			idx++
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == '(':
+			parenDepth++
+		case ch == ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ch == '[':
+			bracketDepth++
+		case ch == ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case ch == '{':
+			braceDepth++
+		case ch == '}':
+			if braceDepth == 0 && parenDepth == 0 && bracketDepth == 0 {
+				return idx
+			}
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		case (ch == '\n' || ch == ';') && parenDepth == 0 && bracketDepth == 0 && braceDepth == 0:
+			return idx
+		}
+	}
+	return len(text)
+}
+
+func findGroovyMatching(text string, start int, open byte, close byte) (int, bool) {
+	var (
+		depth      int
+		inSingle   bool
+		inDouble   bool
+		inLineCmt  bool
+		inBlockCmt bool
+	)
+	for idx := start; idx < len(text); idx++ {
+		ch := text[idx]
+		next := byte(0)
+		if idx+1 < len(text) {
+			next = text[idx+1]
+		}
+		if inLineCmt {
+			if ch == '\n' {
+				inLineCmt = false
+			}
+			continue
+		}
+		if inBlockCmt {
+			if ch == '*' && next == '/' {
+				inBlockCmt = false
+				idx++
+			}
+			continue
+		}
+		if inSingle {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch {
+		case ch == '/' && next == '/':
+			inLineCmt = true
+			idx++
+		case ch == '/' && next == '*':
+			inBlockCmt = true
+			idx++
+		case ch == '\'':
+			inSingle = true
+		case ch == '"':
+			inDouble = true
+		case ch == open:
+			depth++
+		case ch == close:
+			depth--
+			if depth == 0 {
+				return idx, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func isGroovyIdentStart(ch byte) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_'
+}
+
+func isGroovyIdentByte(ch byte) bool {
+	return isGroovyIdentStart(ch) || (ch >= '0' && ch <= '9')
+}
+
+func hasGroovyOpeners(text string) bool {
+	var (
+		parenDepth   int
+		bracketDepth int
+		braceDepth   int
+		inSingle     bool
+		inDouble     bool
+	)
+	for idx := 0; idx < len(text); idx++ {
+		ch := text[idx]
+		if inSingle {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch ch {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '(':
+			parenDepth++
+		case '[':
+			bracketDepth++
+		case '{':
+			braceDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+		}
+	}
+	return parenDepth > 0 || bracketDepth > 0 || braceDepth > 0
+}
+
+func hasGroovyQuotes(text string) bool {
+	var (
+		inSingle bool
+		inDouble bool
+	)
+	for idx := 0; idx < len(text); idx++ {
+		ch := text[idx]
+		if inSingle {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '\'' {
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			if ch == '\\' && idx+1 < len(text) {
+				idx++
+				continue
+			}
+			if ch == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		if ch == '\'' {
+			inSingle = true
+			continue
+		}
+		if ch == '"' {
+			inDouble = true
+		}
+	}
+	return inSingle || inDouble
+}
+
+func defaultGroovyString(value string, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value != "" {
+		return value
+	}
+	return fallback
 }
 
 func readJSONString(raw json.RawMessage) string {

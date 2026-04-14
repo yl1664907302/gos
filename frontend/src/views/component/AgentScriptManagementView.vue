@@ -175,7 +175,7 @@ void loadScripts()
     <div class="page-header-card page-header">
         <div class="page-header-copy">
           <div class="page-title">脚本管理</div>
-          <div class="page-subtitle">维护可复用的 Shell 脚本与脚本文件模板，供 Agent 任务快速引用。</div>
+          <div class="page-subtitle">维护可复用的 Shell 脚本与脚本文件模板，供 Agent 任务快速引用</div>
         </div>
         <a-space>
           <a-button @click="loadScripts" :loading="loading">

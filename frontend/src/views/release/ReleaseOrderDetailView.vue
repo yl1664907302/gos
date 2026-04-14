@@ -154,6 +154,11 @@ const scopeLogStates = reactive<Record<ReleasePipelineScope, ScopeLogState>>({
 });
 
 const orderID = computed(() => String(route.params.id || "").trim());
+const fastExecuteRequested = computed(() => {
+  const value = String(route.query.fast_execute || "").trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+});
+const fastExecuteTriggered = ref(false);
 const currentBusinessStatus = computed<ReleaseOrderBusinessStatus>(() => {
   if (!order.value) {
     return "pending_execution";
@@ -194,14 +199,18 @@ const canViewParamSnapshot = computed(() =>
   authStore.hasPermission("release.param_snapshot.view"),
 );
 const currentUserID = computed(() => String(authStore.profile?.id || "").trim());
-const canSubmitApprovalPermission = computed(() =>
-  order.value
-    ? authStore.hasApplicationPermission("release.approval.submit", order.value.application_id)
-    : false,
+const isCurrentUserCreator = computed(() =>
+  Boolean(order.value) &&
+  String(order.value?.creator_user_id || "").trim() === currentUserID.value,
 );
 const canExecutePermission = computed(() =>
   order.value
-    ? String(order.value.creator_user_id || "").trim() === currentUserID.value
+    ? String(order.value.creator_user_id || "").trim() === currentUserID.value &&
+      authStore.hasApplicationPermission(
+        "release.execute",
+        order.value.application_id,
+        order.value.env_code,
+      )
     : false,
 );
 const isCurrentUserApprover = computed(() => {
@@ -249,7 +258,7 @@ const canSubmitApproval = computed(
   () =>
     Boolean(order.value?.approval_required) &&
     currentBusinessStatus.value === "pending_approval" &&
-    canSubmitApprovalPermission.value,
+    isCurrentUserCreator.value,
 );
 const canApproveOrder = computed(
   () =>
@@ -265,12 +274,18 @@ const canRejectOrder = computed(
 );
 const canCancel = computed(
   () =>
-    currentBusinessStatus.value === "pending_execution" ||
-    currentBusinessStatus.value === "pending_approval" ||
-    currentBusinessStatus.value === "approving" ||
-    currentBusinessStatus.value === "approved" ||
-    currentBusinessStatus.value === "queued" ||
-    currentBusinessStatus.value === "deploying",
+    Boolean(order.value) &&
+    authStore.hasApplicationPermission(
+      "release.cancel",
+      order.value?.application_id || "",
+      order.value?.env_code || "",
+    ) &&
+    (currentBusinessStatus.value === "pending_execution" ||
+      currentBusinessStatus.value === "pending_approval" ||
+      currentBusinessStatus.value === "approving" ||
+      currentBusinessStatus.value === "approved" ||
+      currentBusinessStatus.value === "queued" ||
+      currentBusinessStatus.value === "deploying"),
 );
 const precheckBlocked = computed(
   () => Boolean(precheck.value) && !precheck.value?.executable,
@@ -285,6 +300,12 @@ const canExecute = computed(
 );
 const canRollback = computed(
   () =>
+    Boolean(order.value) &&
+    authStore.hasApplicationPermission(
+      "release.create",
+      order.value?.application_id || "",
+      order.value?.env_code || "",
+    ) &&
     currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
@@ -292,6 +313,12 @@ const canRollback = computed(
 );
 const canReplay = computed(
   () =>
+    Boolean(order.value) &&
+    authStore.hasApplicationPermission(
+      "release.create",
+      order.value?.application_id || "",
+      order.value?.env_code || "",
+    ) &&
     currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
@@ -673,6 +700,50 @@ const stepGroups = computed(() => {
   return groups;
 });
 
+function sanitizeHookMessage(messageText: string) {
+  const sanitized = String(messageText || "")
+    .replace(/(?:^|[，,\s])(?:task_id|source_task_id|batch_id)=[A-Za-z0-9-]+/g, "")
+    .replace(/[，,\s]{2,}/g, " ")
+    .replace(/[，,]\s*[，,]/g, "，")
+    .trim()
+    .replace(/[，,]\s*$/, "");
+  return sanitized;
+}
+
+function hookExecutionSummaryText(item: ReleaseOrderStep) {
+  const taskSummaryText = String(item.related_task_summary || "").trim();
+  if (taskSummaryText) {
+    return taskSummaryText;
+  }
+  const messageText = sanitizeHookMessage(String(item.message || "").trim());
+  if (messageText) {
+    return messageText;
+  }
+  if (item.status === "pending") {
+    return "等待主发布流程结束后触发当前 Hook。";
+  }
+  return "当前 Hook 暂无补充执行内容。";
+}
+
+function hookExecutionLogText(item: ReleaseOrderStep) {
+  const detailLogText = String(item.detail_log || "").trim();
+  if (detailLogText) {
+    return detailLogText;
+  }
+  const taskSummaryText = String(item.related_task_summary || "").trim();
+  if (taskSummaryText) {
+    return taskSummaryText;
+  }
+  const messageText = sanitizeHookMessage(String(item.message || "").trim());
+  if (messageText) {
+    return messageText;
+  }
+  if (item.status === "pending") {
+    return "等待主发布流程结束后触发当前 Hook。";
+  }
+  return "当前 Hook 暂无补充执行内容。";
+}
+
 const hookProgressItems = computed(() => {
   const allHookSteps = steps.value
     .filter((item) =>
@@ -688,15 +759,26 @@ const hookProgressItems = computed(() => {
       .toLowerCase();
     return code !== "hook:prepare" && code !== "hook:summary";
   });
-  return (businessHookSteps.length > 0 ? businessHookSteps : allHookSteps).map(
-    (item, index) => ({
-      ...item,
-      order_index: index + 1,
-      summary:
-        String(item.message || "").trim() ||
-        (item.status === "pending" ? "等待主发布流程结束后执行 Hook。" : ""),
-    }),
-  );
+  const items = businessHookSteps.length > 0 ? businessHookSteps : allHookSteps;
+
+  // 过滤掉因环境不匹配被跳过的 hook
+  return items
+    .filter((item) => {
+      const message = String(item.message || "").trim();
+      const status = String(item.status || "").trim();
+      // 如果 message 包含"未命中 Hook 执行环境"或"已按环境条件跳过"，说明是环境跳过
+      if (message.includes("未命中 Hook 执行环境") || message.includes("已按环境条件跳过")) {
+        return false;
+      }
+      return true;
+    })
+    .map(
+      (item, index) => ({
+        ...item,
+        order_index: index + 1,
+        summary: hookExecutionLogText(item),
+      }),
+    );
 });
 
 type HookProgressType = "agent_task" | "notification_hook" | "webhook_notification" | "generic";
@@ -748,14 +830,7 @@ function hookExecutionUnitTitle(type: HookProgressType) {
 }
 
 function hookExecutionContentText(item: ReleaseOrderStep) {
-  const messageText = String(item.message || "").trim();
-  if (messageText) {
-    return messageText;
-  }
-  if (item.status === "pending") {
-    return "等待主发布流程结束后触发当前 Hook。";
-  }
-  return "当前 Hook 暂无补充执行内容。";
+  return hookExecutionSummaryText(item);
 }
 
 function hookGroupSummaryText(group: {
@@ -1943,14 +2018,10 @@ async function loadDetail(options?: { silent?: boolean }) {
   }
   try {
     const previousStatus = order.value?.status || "";
-    const [
-      orderResp,
-      executionsResp,
-      paramsResp,
-      valueProgressResp,
-      stepsResp,
-    ] = await Promise.all([
-      getReleaseOrderByID(orderID.value),
+    const orderResp = await getReleaseOrderByID(orderID.value);
+    order.value = orderResp.data;
+
+    const detailResults = await Promise.allSettled([
       listReleaseOrderExecutions(orderID.value),
       canViewParamSnapshot.value
         ? listReleaseOrderParams(orderID.value)
@@ -1960,13 +2031,53 @@ async function loadDetail(options?: { silent?: boolean }) {
         : Promise.resolve({ data: [] }),
       listReleaseOrderSteps(orderID.value),
     ]);
-    order.value = orderResp.data;
-    executions.value = [...executionsResp.data].sort(
-      (a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope),
-    );
-    params.value = paramsResp.data;
-    valueProgress.value = valueProgressResp.data;
-    steps.value = stepsResp.data;
+
+    const detailErrors: string[] = [];
+
+    const executionsResult = detailResults[0];
+    if (executionsResult.status === "fulfilled") {
+      executions.value = [...executionsResult.value.data].sort(
+        (a, b) => scopeSort(a.pipeline_scope) - scopeSort(b.pipeline_scope),
+      );
+    } else {
+      detailErrors.push(
+        `执行单元：${extractHTTPErrorMessage(
+          executionsResult.reason,
+          "加载失败",
+        )}`,
+      );
+    }
+
+    const paramsResult = detailResults[1];
+    if (paramsResult.status === "fulfilled") {
+      params.value = paramsResult.value.data;
+    } else {
+      detailErrors.push(
+        `参数快照：${extractHTTPErrorMessage(paramsResult.reason, "加载失败")}`,
+      );
+    }
+
+    const valueProgressResult = detailResults[2];
+    if (valueProgressResult.status === "fulfilled") {
+      valueProgress.value = valueProgressResult.value.data;
+    } else {
+      detailErrors.push(
+        `值传递进度：${extractHTTPErrorMessage(
+          valueProgressResult.reason,
+          "加载失败",
+        )}`,
+      );
+    }
+
+    const stepsResult = detailResults[3];
+    if (stepsResult.status === "fulfilled") {
+      steps.value = stepsResult.value.data;
+    } else {
+      detailErrors.push(
+        `步骤时间线：${extractHTTPErrorMessage(stepsResult.reason, "加载失败")}`,
+      );
+    }
+
     await loadApprovalRecords({ silent: true });
     if (orderResp.data.is_concurrent) {
       await loadConcurrentBatchProgress({ silent });
@@ -1993,6 +2104,9 @@ async function loadDetail(options?: { silent?: boolean }) {
     }
 
     syncVisibleLogStreams();
+    if (!silent && detailErrors.length > 0) {
+      message.warning(`部分详情刷新失败：${detailErrors.join("；")}`);
+    }
   } catch (error) {
     if (!silent) {
       message.error(extractHTTPErrorMessage(error, "发布单详情加载失败"));
@@ -2004,6 +2118,18 @@ async function loadDetail(options?: { silent?: boolean }) {
       loading.value = false;
     }
   }
+}
+
+async function clearFastExecuteQuery() {
+  if (!fastExecuteRequested.value) {
+    return;
+  }
+  const nextQuery = { ...route.query };
+  delete nextQuery.fast_execute;
+  await router.replace({
+    path: route.path,
+    query: nextQuery,
+  });
 }
 
 async function loadConcurrentBatchProgress(options?: { silent?: boolean }) {
@@ -2189,10 +2315,23 @@ async function handleCancel() {
 }
 
 async function handleExecute() {
+  await executeCurrentOrder();
+}
+
+async function executeCurrentOrder(options?: {
+  skipPrecheck?: boolean;
+  successMessage?: string;
+  errorMessage?: string;
+}) {
   if (!order.value || executeLocked.value) {
     return;
   }
-  if (!canExecute.value) {
+  const skipPrecheck = Boolean(options?.skipPrecheck);
+  const allowExecuteByStatus =
+    canExecutePermission.value &&
+    (currentBusinessStatus.value === "pending_execution" ||
+      currentBusinessStatus.value === "approved");
+  if (!allowExecuteByStatus) {
     message.warning(
       precheckSummaryMessage.value ||
         "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
@@ -2202,8 +2341,10 @@ async function handleExecute() {
   executeLocked.value = true;
   executing.value = true;
   try {
-    await loadPrecheck({ silent: true });
-    if (precheckBlocked.value) {
+    if (!skipPrecheck) {
+      await loadPrecheck({ silent: true });
+    }
+    if (!skipPrecheck && precheckBlocked.value) {
       message.warning(
         precheckSummaryMessage.value ||
           "当前发布单未通过执行前预检，请先处理阻塞项",
@@ -2212,14 +2353,34 @@ async function handleExecute() {
     }
     const response = await executeReleaseOrder(order.value.id);
     order.value = response.data;
-    message.success("发布已提交，正在调度执行");
+    message.success(options?.successMessage || "发布已提交，正在调度执行");
     await loadDetail({ silent: true });
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, "发布执行失败"));
+    message.error(extractHTTPErrorMessage(error, options?.errorMessage || "发布执行失败"));
   } finally {
     executing.value = false;
     executeLocked.value = false;
   }
+}
+
+async function tryAutoExecuteFastRelease() {
+  if (!fastExecuteRequested.value || fastExecuteTriggered.value) {
+    return;
+  }
+  fastExecuteTriggered.value = true;
+  await clearFastExecuteQuery();
+  if (!order.value) {
+    return;
+  }
+  if (order.value.approval_required) {
+    message.warning("当前模板启用了审批，极速发布已自动取消");
+    return;
+  }
+  await executeCurrentOrder({
+    skipPrecheck: true,
+    successMessage: "极速发布已自动开始执行",
+    errorMessage: "极速发布自动执行失败",
+  });
 }
 
 async function handleApprovalAction() {
@@ -2324,6 +2485,8 @@ function closeAllLogStreams() {
 
 onMounted(async () => {
   await loadDetail();
+  await nextTick();
+  await tryAutoExecuteFastRelease();
   startAutoRefresh();
 });
 
@@ -2346,7 +2509,7 @@ onBeforeUnmount(() => {
         <div class="page-header-copy">
           <h2 class="page-title">发布单详情</h2>
           <p class="page-subtitle">
-            按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度。
+            按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度
           </p>
         </div>
       </div>
@@ -3144,6 +3307,9 @@ onBeforeUnmount(() => {
                       </div>
                       <div class="hook-progress-row-meta">
                         <span>{{ item.step_code }}</span>
+                        <span v-if="item.related_task_count > 0"
+                          >Agent 任务：{{ item.related_task_count }} 个</span
+                        >
                         <span>开始：{{ formatTime(item.started_at) }}</span>
                         <span>结束：{{ formatTime(item.finished_at) }}</span>
                       </div>
@@ -3194,8 +3360,7 @@ onBeforeUnmount(() => {
                     >
                       <div class="hook-progress-panel-title">执行日志</div>
                       <pre class="hook-progress-log">{{
-                        item.summary ||
-                        "暂无独立日志输出，当前 Hook 仍在等待后端日志链路接入。"
+                        hookExecutionLogText(item)
                       }}</pre>
                     </div>
                   </div>

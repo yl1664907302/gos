@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -49,6 +51,9 @@ type fileConfig struct {
 	Agent struct {
 		Code              string   `yaml:"code"`
 		Token             string   `yaml:"token"`
+		RegistrationToken string   `yaml:"registration_token"`
+		Name              string   `yaml:"name"`
+		EnvironmentCode   string   `yaml:"environment_code"`
 		WorkDir           string   `yaml:"work_dir"`
 		HeartbeatInterval string   `yaml:"heartbeat_interval"`
 		PollInterval      string   `yaml:"poll_interval"`
@@ -61,11 +66,48 @@ type runtimeConfig struct {
 	BaseURL           string
 	AgentCode         string
 	Token             string
+	RegistrationToken string
+	AgentName         string
+	EnvironmentCode   string
 	WorkDir           string
 	Version           string
 	Tags              []string
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
+}
+
+type registerRequest struct {
+	RegistrationToken string   `json:"registration_token"`
+	MachineID         string   `json:"machine_id"`
+	Name              string   `json:"name"`
+	EnvironmentCode   string   `json:"environment_code"`
+	Hostname          string   `json:"hostname"`
+	HostIP            string   `json:"host_ip"`
+	AgentVersion      string   `json:"agent_version"`
+	OS                string   `json:"os"`
+	Arch              string   `json:"arch"`
+	WorkDir           string   `json:"work_dir"`
+	Tags              []string `json:"tags"`
+}
+
+type registerResponse struct {
+	Data *registerOutput `json:"data"`
+}
+
+type registerOutput struct {
+	AgentID    string `json:"agent_id"`
+	AgentCode  string `json:"agent_code"`
+	Token      string `json:"token"`
+	Name       string `json:"name"`
+	WorkDir    string `json:"work_dir"`
+	Registered bool   `json:"registered"`
+}
+
+type agentLocalState struct {
+	MachineID string `json:"machine_id"`
+	AgentCode string `json:"agent_code"`
+	Token     string `json:"token"`
+	UpdatedAt string `json:"updated_at,omitempty"`
 }
 
 type taskOutput struct {
@@ -158,15 +200,18 @@ func (s *runtimeState) markFinished(status, summary string, finishedAt time.Time
 
 func main() {
 	var (
-		configPath = flag.String("config", strings.TrimSpace(os.Getenv("GOS_AGENT_CONFIG")), "agent config file path")
-		baseURL    = flag.String("base-url", envOrDefault("GOS_AGENT_BASE_URL", ""), "GOS server base url")
-		agentCode  = flag.String("agent-code", envOrDefault("GOS_AGENT_CODE", ""), "agent code")
-		token      = flag.String("token", envOrDefault("GOS_AGENT_TOKEN", ""), "agent token")
-		workDir    = flag.String("work-dir", envOrDefault("GOS_AGENT_WORK_DIR", currentDir()), "agent work dir")
-		version    = flag.String("version", envOrDefault("GOS_AGENT_VERSION", "dev"), "agent version")
-		tagsRaw    = flag.String("tags", envOrDefault("GOS_AGENT_TAGS", ""), "comma separated tags")
-		hbInterval = flag.Duration("heartbeat-interval", envDurationOrDefault("GOS_AGENT_HEARTBEAT_INTERVAL", 15*time.Second), "heartbeat interval")
-		pollIntvl  = flag.Duration("poll-interval", envDurationOrDefault("GOS_AGENT_POLL_INTERVAL", 5*time.Second), "task poll interval")
+		configPath        = flag.String("config", strings.TrimSpace(os.Getenv("GOS_AGENT_CONFIG")), "agent config file path")
+		baseURL           = flag.String("base-url", envOrDefault("GOS_AGENT_BASE_URL", ""), "GOS server base url")
+		agentCode         = flag.String("agent-code", envOrDefault("GOS_AGENT_CODE", ""), "agent code")
+		token             = flag.String("token", envOrDefault("GOS_AGENT_TOKEN", ""), "agent token")
+		registrationToken = flag.String("registration-token", envOrDefault("GOS_AGENT_REGISTRATION_TOKEN", ""), "agent bootstrap registration token")
+		agentName         = flag.String("name", envOrDefault("GOS_AGENT_NAME", ""), "agent display name")
+		environmentCode   = flag.String("environment-code", envOrDefault("GOS_AGENT_ENVIRONMENT_CODE", ""), "agent environment code")
+		workDir           = flag.String("work-dir", envOrDefault("GOS_AGENT_WORK_DIR", currentDir()), "agent work dir")
+		version           = flag.String("version", envOrDefault("GOS_AGENT_VERSION", "dev"), "agent version")
+		tagsRaw           = flag.String("tags", envOrDefault("GOS_AGENT_TAGS", ""), "comma separated tags")
+		hbInterval        = flag.Duration("heartbeat-interval", envDurationOrDefault("GOS_AGENT_HEARTBEAT_INTERVAL", 15*time.Second), "heartbeat interval")
+		pollIntvl         = flag.Duration("poll-interval", envDurationOrDefault("GOS_AGENT_POLL_INTERVAL", 5*time.Second), "task poll interval")
 	)
 	flag.Parse()
 
@@ -174,6 +219,9 @@ func main() {
 		BaseURL:           strings.TrimSpace(*baseURL),
 		AgentCode:         strings.TrimSpace(*agentCode),
 		Token:             strings.TrimSpace(*token),
+		RegistrationToken: strings.TrimSpace(*registrationToken),
+		AgentName:         strings.TrimSpace(*agentName),
+		EnvironmentCode:   strings.TrimSpace(*environmentCode),
 		WorkDir:           strings.TrimSpace(*workDir),
 		Version:           strings.TrimSpace(*version),
 		Tags:              parseTags(*tagsRaw),
@@ -190,7 +238,17 @@ func main() {
 
 	hostname, _ := os.Hostname()
 	hostIP := discoverHostIP()
+	cfg.AgentName = resolveAgentName(cfg.AgentName, hostname, hostIP)
 	client := &http.Client{Timeout: 15 * time.Second}
+	statePath := agentStateFilePath(cfg.WorkDir)
+	localState, err := loadAgentLocalState(statePath)
+	if err != nil {
+		log.Printf("load local state failed: %v", err)
+	}
+	cfg, err = bootstrapRuntimeCredentials(client, cfg, hostname, hostIP, statePath, localState)
+	if err != nil {
+		log.Fatal(err)
+	}
 	hbTicker := time.NewTicker(cfg.HeartbeatInterval)
 	pollTicker := time.NewTicker(cfg.PollInterval)
 	defer hbTicker.Stop()
@@ -204,8 +262,8 @@ func main() {
 	taskExecuting := false
 
 	log.Printf(
-		"gos-agent starting: code=%s base_url=%s work_dir=%s heartbeat=%s poll=%s",
-		cfg.AgentCode, cfg.BaseURL, cfg.WorkDir, cfg.HeartbeatInterval.String(), cfg.PollInterval.String(),
+		"gos-agent starting: name=%s code=%s base_url=%s work_dir=%s heartbeat=%s poll=%s",
+		cfg.AgentName, cfg.AgentCode, cfg.BaseURL, cfg.WorkDir, cfg.HeartbeatInterval.String(), cfg.PollInterval.String(),
 	)
 	if err := sendHeartbeat(client, cfg, hostname, hostIP, state); err != nil {
 		log.Printf("initial heartbeat failed: %v", err)
@@ -270,6 +328,15 @@ func loadRuntimeConfig(configPath string, fallback runtimeConfig) (runtimeConfig
 		if strings.TrimSpace(fileCfg.Agent.Token) != "" {
 			cfg.Token = strings.TrimSpace(fileCfg.Agent.Token)
 		}
+		if strings.TrimSpace(fileCfg.Agent.RegistrationToken) != "" {
+			cfg.RegistrationToken = strings.TrimSpace(fileCfg.Agent.RegistrationToken)
+		}
+		if strings.TrimSpace(fileCfg.Agent.Name) != "" {
+			cfg.AgentName = strings.TrimSpace(fileCfg.Agent.Name)
+		}
+		if strings.TrimSpace(fileCfg.Agent.EnvironmentCode) != "" {
+			cfg.EnvironmentCode = strings.TrimSpace(fileCfg.Agent.EnvironmentCode)
+		}
 		if strings.TrimSpace(fileCfg.Agent.WorkDir) != "" {
 			cfg.WorkDir = strings.TrimSpace(fileCfg.Agent.WorkDir)
 		}
@@ -297,6 +364,9 @@ func loadRuntimeConfig(configPath string, fallback runtimeConfig) (runtimeConfig
 	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	cfg.AgentCode = strings.TrimSpace(cfg.AgentCode)
 	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.RegistrationToken = strings.TrimSpace(cfg.RegistrationToken)
+	cfg.AgentName = strings.TrimSpace(cfg.AgentName)
+	cfg.EnvironmentCode = strings.TrimSpace(cfg.EnvironmentCode)
 	cfg.WorkDir = strings.TrimSpace(cfg.WorkDir)
 	cfg.Version = strings.TrimSpace(cfg.Version)
 	cfg.Tags = normalizeTags(cfg.Tags)
@@ -315,11 +385,11 @@ func loadRuntimeConfig(configPath string, fallback runtimeConfig) (runtimeConfig
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 5 * time.Second
 	}
-	if cfg.AgentCode == "" {
-		return runtimeConfig{}, fmt.Errorf("agent code is required")
+	if cfg.AgentCode != "" && cfg.Token == "" {
+		return runtimeConfig{}, fmt.Errorf("agent token is required when agent code is configured")
 	}
-	if cfg.Token == "" {
-		return runtimeConfig{}, fmt.Errorf("agent token is required")
+	if cfg.AgentCode == "" && cfg.Token != "" {
+		return runtimeConfig{}, fmt.Errorf("agent code is required when agent token is configured")
 	}
 	return cfg, nil
 }
@@ -334,6 +404,124 @@ func readConfigFile(path string) (fileConfig, error) {
 		return fileConfig{}, fmt.Errorf("parse config failed: %w", err)
 	}
 	return cfg, nil
+}
+
+func bootstrapRuntimeCredentials(client *http.Client, cfg runtimeConfig, hostname, hostIP, statePath string, localState agentLocalState) (runtimeConfig, error) {
+	localState.MachineID = strings.TrimSpace(localState.MachineID)
+	if localState.MachineID == "" {
+		localState.MachineID = generateMachineID()
+	}
+	if cfg.AgentCode == "" {
+		cfg.AgentCode = strings.TrimSpace(localState.AgentCode)
+	}
+	if cfg.Token == "" {
+		cfg.Token = strings.TrimSpace(localState.Token)
+	}
+	if cfg.AgentCode != "" && cfg.Token != "" {
+		if err := saveAgentLocalState(statePath, agentLocalState{
+			MachineID: localState.MachineID,
+			AgentCode: cfg.AgentCode,
+			Token:     cfg.Token,
+		}); err != nil {
+			log.Printf("save local state failed: %v", err)
+		}
+		return cfg, nil
+	}
+	if cfg.RegistrationToken == "" {
+		return runtimeConfig{}, fmt.Errorf("agent registration_token is required")
+	}
+	output, err := registerAgent(client, cfg, hostname, hostIP, localState.MachineID)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	cfg.AgentCode = strings.TrimSpace(output.AgentCode)
+	cfg.Token = strings.TrimSpace(output.Token)
+	if err := saveAgentLocalState(statePath, agentLocalState{
+		MachineID: localState.MachineID,
+		AgentCode: cfg.AgentCode,
+		Token:     cfg.Token,
+	}); err != nil {
+		log.Printf("save local state failed: %v", err)
+	}
+	return cfg, nil
+}
+
+func registerAgent(client *http.Client, cfg runtimeConfig, hostname, hostIP, machineID string) (*registerOutput, error) {
+	var response registerResponse
+	err := postJSON(client, cfg.BaseURL+"/agent/register", registerRequest{
+		RegistrationToken: cfg.RegistrationToken,
+		MachineID:         strings.TrimSpace(machineID),
+		Name:              cfg.AgentName,
+		EnvironmentCode:   cfg.EnvironmentCode,
+		Hostname:          strings.TrimSpace(hostname),
+		HostIP:            strings.TrimSpace(hostIP),
+		AgentVersion:      cfg.Version,
+		OS:                runtime.GOOS,
+		Arch:              runtime.GOARCH,
+		WorkDir:           cfg.WorkDir,
+		Tags:              cfg.Tags,
+	}, &response)
+	if err != nil {
+		return nil, err
+	}
+	if response.Data == nil || strings.TrimSpace(response.Data.AgentCode) == "" || strings.TrimSpace(response.Data.Token) == "" {
+		return nil, fmt.Errorf("agent register returned empty runtime credentials")
+	}
+	return response.Data, nil
+}
+
+func agentStateFilePath(workDir string) string {
+	return filepath.Join(strings.TrimSpace(workDir), ".gos-agent", "state.json")
+}
+
+func loadAgentLocalState(path string) (agentLocalState, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return agentLocalState{}, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return agentLocalState{}, nil
+		}
+		return agentLocalState{}, err
+	}
+	var state agentLocalState
+	if err := json.Unmarshal(content, &state); err != nil {
+		return agentLocalState{}, err
+	}
+	state.MachineID = strings.TrimSpace(state.MachineID)
+	state.AgentCode = strings.TrimSpace(state.AgentCode)
+	state.Token = strings.TrimSpace(state.Token)
+	return state, nil
+}
+
+func saveAgentLocalState(path string, state agentLocalState) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	state.MachineID = strings.TrimSpace(state.MachineID)
+	state.AgentCode = strings.TrimSpace(state.AgentCode)
+	state.Token = strings.TrimSpace(state.Token)
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	content, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	content = append(content, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, content, 0o600)
+}
+
+func generateMachineID() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("machine-%d", time.Now().UTC().UnixNano())
+	}
+	return "machine-" + hex.EncodeToString(buf)
 }
 
 func sendHeartbeat(client *http.Client, cfg runtimeConfig, hostname, hostIP string, state *runtimeState) error {
@@ -738,6 +926,38 @@ func scriptFileName(shellType string) string {
 		return "run.bash"
 	}
 	return "run.sh"
+}
+
+func resolveAgentName(configuredName, hostname, hostIP string) string {
+	if value := strings.TrimSpace(configuredName); value != "" {
+		return value
+	}
+	hostPart := strings.TrimSpace(hostname)
+	ipPart := formatAgentNameIP(hostIP)
+	switch {
+	case hostPart != "" && ipPart != "":
+		return hostPart + "-" + ipPart
+	case hostPart != "":
+		return hostPart
+	case ipPart != "":
+		return "agent-" + ipPart
+	default:
+		return "agent"
+	}
+}
+
+func formatAgentNameIP(hostIP string) string {
+	value := strings.TrimSpace(hostIP)
+	if value == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer(".", "-", ":", "-")
+	value = replacer.Replace(value)
+	for strings.Contains(value, "--") {
+		value = strings.ReplaceAll(value, "--", "-")
+	}
+	value = strings.Trim(value, "-")
+	return value
 }
 
 func discoverHostIP() string {

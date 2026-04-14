@@ -371,18 +371,22 @@ type ReleaseExecutionLock struct {
 }
 
 type ReleaseOrderStep struct {
-	ID             string
-	ReleaseOrderID string
-	StepScope      StepScope
-	ExecutionID    string
-	StepCode       string
-	StepName       string
-	Status         StepStatus
-	Message        string
-	SortNo         int
-	StartedAt      *time.Time
-	FinishedAt     *time.Time
-	CreatedAt      time.Time
+	ID                 string
+	ReleaseOrderID     string
+	StepScope          StepScope
+	ExecutionID        string
+	StepCode           string
+	StepName           string
+	Status             StepStatus
+	Message            string
+	DetailLog          string
+	RelatedTaskSummary string
+	RelatedTaskIDs     []string
+	RelatedTaskCount   int
+	SortNo             int
+	StartedAt          *time.Time
+	FinishedAt         *time.Time
+	CreatedAt          time.Time
 }
 
 type PipelineStageStatus string
@@ -661,6 +665,7 @@ type ReleaseTemplateHook struct {
 	Name             string
 	TriggerCondition TemplateHookTriggerCondition
 	FailurePolicy    TemplateHookFailurePolicy
+	EnvCodes         []string
 	TargetID         string
 	TargetName       string
 	WebhookMethod    string

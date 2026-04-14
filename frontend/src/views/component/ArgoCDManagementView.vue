@@ -502,7 +502,7 @@ onMounted(() => {
       <div class="toolbar">
         <div class="page-header-copy">
           <div class="page-title">ArgoCD 管理</div>
-          <div class="page-subtitle">统一维护多个 ArgoCD 实例、环境绑定和平台同步到本地的 Application 快照。</div>
+          <div class="page-subtitle">统一维护多个 ArgoCD 实例、环境绑定和平台同步到本地的 Application 快照</div>
         </div>
         <a-space>
           <a-button @click="refreshVisibleData">

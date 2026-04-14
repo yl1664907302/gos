@@ -3,12 +3,13 @@ import { SaveOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
 import { computed, onMounted, ref } from 'vue'
-import { listApplications } from '../../api/application'
+import { listApplicationOptions } from '../../api/application'
+import { getReleaseSettings } from '../../api/system'
 import {
   grantUserPermissions,
   listPermissions,
+  listUserOptions,
   listUserPermissions,
-  listUsers,
   revokeUserPermissions,
 } from '../../api/user'
 import type { PermissionMeta, UserPermission } from '../../types/user'
@@ -34,11 +35,20 @@ const userPermissions = ref<UserPermission[]>([])
 const checkedPermissionCodes = ref<string[]>([])
 const savingPermissions = ref(false)
 const applicationOptions = ref<SelectOption[]>([])
-const applicationPermissionMap = ref<Record<string, boolean>>({})
+const releaseEnvOptions = ref<SelectOption[]>([])
+const applicationPermissionMap = ref<Record<string, string[]>>({})
 const applicationViewScopedCodes = new Set(['application.view'])
 const applicationReleaseScopedCodes = new Set(['release.view', 'release.create', 'release.execute', 'release.cancel'])
 const applicationScopedCodes = Array.from(new Set([...applicationViewScopedCodes, ...applicationReleaseScopedCodes]))
-const hiddenPermissionCodes = new Set(['release.param_config.view', 'application.view', 'release.view'])
+const hiddenPermissionCodes = new Set([
+  'release.param_config.view',
+  'application.view',
+  'release.view',
+  'release.approval.view',
+  'release.approval.submit',
+  'release.approval.approve',
+  'release.approval.reject',
+])
 
 const permissionGroupOrder = ['application', 'pipeline', 'platform_param', 'pipeline_param', 'component', 'release', 'system']
 
@@ -78,7 +88,7 @@ const groupedPermissions = computed(() => {
 
 const applicationPermissionColumns: TableColumnsType<ApplicationPermissionRow> = [
   { title: '应用', dataIndex: 'application_name', key: 'application_name', width: 360 },
-  { title: '允许展示与发布', key: 'enabled', width: 180 },
+  { title: '允许发布环境', key: 'env_codes', width: 420 },
 ]
 
 const applicationPermissionRows = computed<ApplicationPermissionRow[]>(() =>
@@ -94,6 +104,38 @@ function isPermissionChecked(code: string) {
 
 function normalizeScopeType(value: string) {
   return String(value || '').trim().toLowerCase()
+}
+
+function parseApplicationEnvScopeValue(value: string) {
+  const raw = String(value || '').trim()
+  if (!raw) {
+    return null
+  }
+  const parts = raw.split('::')
+  if (parts.length !== 2) {
+    return null
+  }
+  const applicationID = String(parts[0] || '').trim()
+  const envCode = String(parts[1] || '').trim()
+  if (!applicationID || !envCode) {
+    return null
+  }
+  return { applicationID, envCode }
+}
+
+function buildApplicationEnvScopeValue(applicationID: string, envCode: string) {
+  return `${String(applicationID || '').trim()}::${String(envCode || '').trim()}`
+}
+
+function normalizeEnvCodes(values: string[]) {
+  const allowedEnvCodes = new Set(releaseEnvOptions.value.map((item) => item.value))
+  return Array.from(
+    new Set(
+      values
+        .map((item) => String(item || '').trim())
+        .filter((item) => item && allowedEnvCodes.has(item)),
+    ),
+  )
 }
 
 function handlePermissionToggle(code: string, checked: boolean) {
@@ -120,8 +162,9 @@ function moduleLabel(module: string) {
 }
 
 function syncApplicationPermissionMap() {
-  const nextMap: Record<string, boolean> = {}
-  const grantedScopeValues = new Set(
+  const nextMap: Record<string, string[]> = {}
+  const currentEnvCodes = releaseEnvOptions.value.map((item) => item.value)
+  const legacyGrantedScopeValues = new Set(
     userPermissions.value
       .filter(
         (item) =>
@@ -132,35 +175,55 @@ function syncApplicationPermissionMap() {
       )
       .map((item) => String(item.scope_value || '').trim()),
   )
-
+  const envGrantedMap = new Map<string, Set<string>>()
+  userPermissions.value.forEach((item) => {
+    if (
+      !item.enabled ||
+      !applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()) ||
+      normalizeScopeType(item.scope_type) !== 'application_env'
+    ) {
+      return
+    }
+    const parsed = parseApplicationEnvScopeValue(item.scope_value)
+    if (!parsed || !currentEnvCodes.includes(parsed.envCode)) {
+      return
+    }
+    if (!envGrantedMap.has(parsed.applicationID)) {
+      envGrantedMap.set(parsed.applicationID, new Set<string>())
+    }
+    envGrantedMap.get(parsed.applicationID)?.add(parsed.envCode)
+  })
   for (const item of applicationOptions.value) {
-    nextMap[item.value] = grantedScopeValues.has(item.value)
+    const envCodes = Array.from(envGrantedMap.get(item.value) || [])
+    if (envCodes.length === 0 && legacyGrantedScopeValues.has(item.value)) {
+      nextMap[item.value] = [...currentEnvCodes]
+      continue
+    }
+    nextMap[item.value] = normalizeEnvCodes(envCodes)
   }
   applicationPermissionMap.value = nextMap
 }
 
-function isApplicationReleaseEnabled(applicationID: string) {
-  return Boolean(applicationPermissionMap.value[String(applicationID || '').trim()])
+function selectedApplicationEnvCodes(applicationID: string) {
+  const id = String(applicationID || '').trim()
+  return applicationPermissionMap.value[id] || []
 }
 
-function handleApplicationReleaseToggle(applicationID: string, enabled: boolean) {
+function handleApplicationReleaseChange(applicationID: string, values: string[]) {
   const id = String(applicationID || '').trim()
   if (!id) {
     return
   }
   applicationPermissionMap.value = {
     ...applicationPermissionMap.value,
-    [id]: Boolean(enabled),
+    [id]: normalizeEnvCodes(values),
   }
 }
 
 async function loadUsers() {
   usersLoading.value = true
   try {
-    const response = await listUsers({
-      page: 1,
-      page_size: 200,
-    })
+    const response = await listUserOptions()
     userOptions.value = response.data.map((item) => ({
       label: `${item.display_name} (${item.username})`,
       value: item.id,
@@ -192,7 +255,7 @@ async function loadPermissionMeta() {
 
 async function loadApplicationOptions() {
   try {
-    const response = await listApplications({ page: 1, page_size: 200 })
+    const response = await listApplicationOptions()
     applicationOptions.value = response.data.map((item) => ({
       label: `${item.name} (${item.key})`,
       value: item.id,
@@ -200,6 +263,19 @@ async function loadApplicationOptions() {
     syncApplicationPermissionMap()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用下拉加载失败'))
+  }
+}
+
+async function loadReleaseEnvOptions() {
+  try {
+    const response = await getReleaseSettings()
+    releaseEnvOptions.value = (response.data.env_options || []).map((item) => ({
+      label: item,
+      value: item,
+    }))
+    syncApplicationPermissionMap()
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '发布环境加载失败'))
   }
 }
 
@@ -215,7 +291,13 @@ async function loadUserPermissions() {
     const response = await listUserPermissions(selectedUserID.value)
     userPermissions.value = response.data
     checkedPermissionCodes.value = response.data
-      .filter((item) => item.enabled && normalizeScopeType(item.scope_type) === 'global')
+      .filter(
+        (item) =>
+          item.enabled &&
+          normalizeScopeType(item.scope_type) === 'global' &&
+          !hiddenPermissionCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
+          !applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()),
+      )
       .map((item) => item.permission_code)
     syncApplicationPermissionMap()
   } catch (error) {
@@ -252,6 +334,7 @@ async function handleSavePermissions() {
           (item) =>
             item.enabled &&
             normalizeScopeType(item.scope_type) === 'global' &&
+            !hiddenPermissionCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
             !applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()),
         )
         .map((item) => item.permission_code),
@@ -292,37 +375,50 @@ async function handleSavePermissions() {
         })),
       })
     }
-    const appCurrent = new Set(
-      Object.entries(applicationPermissionMap.value)
-        .filter(([, enabled]) => Boolean(enabled))
-        .map(([applicationID]) => String(applicationID || '').trim())
-        .filter(Boolean),
+    const currentAppEnvSelections = Object.entries(applicationPermissionMap.value).flatMap(([applicationID, envCodes]) =>
+      normalizeEnvCodes(envCodes).map((envCode) => ({
+        application_id: String(applicationID || '').trim(),
+        env_code: envCode,
+      })),
     )
 
-    const beforeItems = userPermissions.value
+    const beforeManagedItems = userPermissions.value
       .filter(
         (item) =>
           item.enabled &&
-          applicationScopedCodes.includes(String(item.permission_code || '').trim().toLowerCase()) &&
-          normalizeScopeType(item.scope_type) === 'application' &&
+          (
+            (applicationViewScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
+              normalizeScopeType(item.scope_type) === 'application') ||
+            (applicationReleaseScopedCodes.has(String(item.permission_code || '').trim().toLowerCase()) &&
+              (normalizeScopeType(item.scope_type) === 'application' ||
+                normalizeScopeType(item.scope_type) === 'application_env'))
+          ) &&
           String(item.scope_value || '').trim() !== '',
       )
       .map((item) => ({
         permission_code: String(item.permission_code || '').trim().toLowerCase(),
-        scope_type: 'application',
+        scope_type: normalizeScopeType(item.scope_type),
         scope_value: String(item.scope_value || '').trim(),
       }))
 
     const beforeKeySet = new Set(
-      beforeItems.map((item) => `${item.permission_code}::${item.scope_type}::${item.scope_value}`),
+      beforeManagedItems.map((item) => `${item.permission_code}::${item.scope_type}::${item.scope_value}`),
     )
-    const currentItems = Array.from(appCurrent).flatMap((applicationID) =>
-      applicationScopedCodes.map((code) => ({
+    const currentAppViewItems = Array.from(
+      new Set(currentAppEnvSelections.map((item) => item.application_id).filter(Boolean)),
+    ).map((applicationID) => ({
+      permission_code: 'application.view',
+      scope_type: 'application',
+      scope_value: applicationID,
+    }))
+    const currentReleaseItems = currentAppEnvSelections.flatMap((item) =>
+      Array.from(applicationReleaseScopedCodes).map((code) => ({
         permission_code: code,
-        scope_type: 'application',
-        scope_value: applicationID,
+        scope_type: 'application_env',
+        scope_value: buildApplicationEnvScopeValue(item.application_id, item.env_code),
       })),
     )
+    const currentItems = [...currentAppViewItems, ...currentReleaseItems]
     const currentKeySet = new Set(
       currentItems.map((item) => `${item.permission_code}::${item.scope_type}::${item.scope_value}`),
     )
@@ -330,7 +426,7 @@ async function handleSavePermissions() {
     const appToGrant = currentItems.filter(
       (item) => !beforeKeySet.has(`${item.permission_code}::${item.scope_type}::${item.scope_value}`),
     )
-    const appToRevoke = beforeItems.filter(
+    const appToRevoke = beforeManagedItems.filter(
       (item) => !currentKeySet.has(`${item.permission_code}::${item.scope_type}::${item.scope_value}`),
     )
 
@@ -349,6 +445,23 @@ async function handleSavePermissions() {
         items: legacyGlobalReleasePermissions,
       })
     }
+    const legacyHiddenPermissions = userPermissions.value
+      .filter(
+        (item) =>
+          item.enabled &&
+          normalizeScopeType(item.scope_type) === 'global' &&
+          hiddenPermissionCodes.has(String(item.permission_code || '').trim().toLowerCase()),
+      )
+      .map((item) => ({
+        permission_code: item.permission_code,
+        scope_type: 'global',
+        scope_value: '',
+      }))
+    if (legacyHiddenPermissions.length > 0) {
+      await revokeUserPermissions(selectedUserID.value, {
+        items: legacyHiddenPermissions,
+      })
+    }
 
     message.success('权限授权已保存')
     await loadUserPermissions()
@@ -360,7 +473,7 @@ async function handleSavePermissions() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadUsers(), loadPermissionMeta(), loadApplicationOptions()])
+  await Promise.all([loadUsers(), loadPermissionMeta(), loadApplicationOptions(), loadReleaseEnvOptions()])
   await loadSelectedUserAuthorization()
 })
 </script>
@@ -370,7 +483,7 @@ onMounted(async () => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">权限授权</h2>
-        <p class="page-subtitle">按用户授权模块权限与应用权限。</p>
+        <p class="page-subtitle">按用户授权模块权限，并按发布环境细化应用发布权限</p>
       </div>
       <a-space>
         <a-select
@@ -426,15 +539,21 @@ onMounted(async () => {
         :scroll="{ x: 620 }"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'enabled'">
-            <a-switch
-              :checked="isApplicationReleaseEnabled(record.application_id)"
-              @change="handleApplicationReleaseToggle(record.application_id, Boolean($event))"
+          <template v-if="column.key === 'env_codes'">
+            <a-select
+              mode="multiple"
+              size="small"
+              class="app-env-select"
+              allow-clear
+              :options="releaseEnvOptions"
+              :value="selectedApplicationEnvCodes(record.application_id)"
+              placeholder="请选择允许发布的环境"
+              @change="handleApplicationReleaseChange(record.application_id, $event as string[])"
             />
           </template>
         </template>
       </a-table>
-      <p class="save-tip">提示：本区域修改后，点击页面顶部“保存权限设置”统一生效。</p>
+      <p class="save-tip">提示：可选环境始终跟随系统设置里的发布环境配置，变更后这里会自动收敛并按最新环境保存。</p>
     </a-card>
   </div>
 </template>
@@ -482,6 +601,10 @@ onMounted(async () => {
 
 .permission-code {
   color: var(--color-text-soft);
+}
+
+.app-env-select {
+  width: 100%;
 }
 
 .save-tip {

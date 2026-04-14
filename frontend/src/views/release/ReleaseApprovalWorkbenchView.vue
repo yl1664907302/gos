@@ -332,7 +332,7 @@ onMounted(async () => {
     <div class="page-header-card page-header">
       <div>
         <h2 class="page-title">审批工作台</h2>
-        <p class="page-subtitle">把待我处理、我已处理和当前可见的审批记录收在一个地方，方便我们快速推进发布审批。</p>
+        <p class="page-subtitle">把待我处理、我已处理和当前可见的审批记录收在一个地方，方便我们快速推进发布审批</p>
       </div>
       <a-button @click="reloadAll">
         <template #icon><ReloadOutlined /></template>

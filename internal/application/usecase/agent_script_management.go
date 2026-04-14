@@ -133,6 +133,9 @@ func (uc *AgentScriptManager) Update(ctx context.Context, id string, input Updat
 	if err != nil {
 		return AgentScriptOutput{}, err
 	}
+	if err := uc.syncBoundTasks(ctx, updated); err != nil {
+		return AgentScriptOutput{}, err
+	}
 	return toAgentScriptOutput(updated), nil
 }
 
@@ -207,4 +210,37 @@ func toAgentScriptOutput(item agentdomain.Script) AgentScriptOutput {
 func isSupportedAgentScriptPath(path string) bool {
 	lowerExt := strings.ToLower(filepath.Ext(strings.TrimSpace(path)))
 	return lowerExt == ".sh" || lowerExt == ".bash"
+}
+
+func (uc *AgentScriptManager) syncBoundTasks(ctx context.Context, script agentdomain.Script) error {
+	if uc == nil || uc.repo == nil {
+		return fmt.Errorf("%w: agent script manager is not configured", ErrInvalidInput)
+	}
+	scriptID := strings.TrimSpace(script.ID)
+	if scriptID == "" {
+		return nil
+	}
+	const pageSize = 200
+	for page := 1; ; page++ {
+		items, total, err := uc.repo.ListTasks(ctx, agentdomain.TaskListFilter{
+			ScriptID: scriptID,
+			Page:     page,
+			PageSize: pageSize,
+		})
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if !applyManagedScriptSnapshot(&item, script) {
+				continue
+			}
+			if _, err := uc.repo.UpdateTask(ctx, item); err != nil {
+				return err
+			}
+		}
+		if int64(page*pageSize) >= total || len(items) == 0 {
+			break
+		}
+	}
+	return nil
 }

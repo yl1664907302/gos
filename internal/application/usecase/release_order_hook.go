@@ -23,6 +23,9 @@ import (
 )
 
 var hookTaskIDPattern = regexp.MustCompile(`task_id=([A-Za-z0-9-]+)`)
+var hookTaskLabelPattern = regexp.MustCompile(`任务号[:：]\s*([A-Za-z0-9-]+)`)
+var hookSourceTaskIDPattern = regexp.MustCompile(`source_task_id=([A-Za-z0-9-]+)`)
+var hookDispatchBatchIDPattern = regexp.MustCompile(`batch_id=([A-Za-z0-9-]+)`)
 var templateWebhookHTTPTimeout = 10 * time.Second
 
 func (uc *ReleaseOrderManager) syncHooksAfterRelease(
@@ -77,6 +80,16 @@ func (uc *ReleaseOrderManager) syncHooksAfterRelease(
 				updated = true
 			}
 			blockingHookFailed = true
+			continue
+		}
+
+		if !hookMatchesOrderEnv(hookCfg.EnvCodes, order.EnvCode) {
+			if step.Status != domain.StepStatusSuccess {
+				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, buildTemplateHookEnvSkipMessage(hookCfg.EnvCodes, order.EnvCode)); err != nil {
+					return updated, false, order.Status, "", err
+				}
+				updated = true
+			}
 			continue
 		}
 
@@ -209,6 +222,41 @@ func shouldTriggerTemplateHook(condition domain.TemplateHookTriggerCondition, ma
 	}
 }
 
+func hookMatchesOrderEnv(envCodes []string, orderEnvCode string) bool {
+	if len(envCodes) == 0 {
+		return true
+	}
+	normalizedOrderEnv := strings.TrimSpace(orderEnvCode)
+	if normalizedOrderEnv == "" {
+		return false
+	}
+	for _, item := range envCodes {
+		if strings.EqualFold(strings.TrimSpace(item), normalizedOrderEnv) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildTemplateHookEnvSkipMessage(envCodes []string, orderEnvCode string) string {
+	normalizedOrderEnv := strings.TrimSpace(orderEnvCode)
+	if normalizedOrderEnv == "" {
+		return "已按环境条件跳过"
+	}
+	filtered := make([]string, 0, len(envCodes))
+	for _, item := range envCodes {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		filtered = append(filtered, value)
+	}
+	if len(filtered) == 0 {
+		return "已按环境条件跳过"
+	}
+	return fmt.Sprintf("当前环境 %s 未命中 Hook 执行环境（%s），已跳过", normalizedOrderEnv, strings.Join(filtered, " / "))
+}
+
 func (uc *ReleaseOrderManager) loadTemplateHooksForOrder(ctx context.Context, order domain.ReleaseOrder) ([]domain.ReleaseTemplateHook, error) {
 	templateID := strings.TrimSpace(order.TemplateID)
 	if templateID == "" {
@@ -261,9 +309,12 @@ func (uc *ReleaseOrderManager) dispatchAgentTaskHookStep(
 	if err != nil {
 		return false, err
 	}
-	agentInstance, err := uc.resolveHookTargetAgent(ctx, order, sourceTask)
+	sourceTask, err = syncManagedScriptSnapshotForTask(ctx, uc.agentRepo, sourceTask, nil)
 	if err != nil {
 		return false, err
+	}
+	if sourceTask.TaskMode != agentdomain.TaskModeTemporary {
+		return false, fmt.Errorf("%w: hook target task must be temporary", ErrInvalidInput)
 	}
 	variables, err := uc.buildHookTaskVariables(ctx, order, executions)
 	if err != nil {
@@ -278,38 +329,27 @@ func (uc *ReleaseOrderManager) dispatchAgentTaskHookStep(
 			variables[normalizedKey] = strings.TrimSpace(value)
 		}
 	}
-
+	targets, err := resolveTaskDispatchTargets(ctx, uc.agentRepo, sourceTask)
+	if err != nil {
+		return false, err
+	}
+	batchID := generateID("agbatch")
+	dispatchedTasks, err := dispatchTemporaryTaskBatch(
+		ctx,
+		uc.agentRepo,
+		sourceTask,
+		targets,
+		fmt.Sprintf("%s · %s", firstNonEmpty(strings.TrimSpace(hook.Name), "发布后 Hook"), strings.TrimSpace(order.OrderNo)),
+		variables,
+		"release_hook",
+		batchID,
+		uc.now,
+	)
+	if err != nil {
+		return false, err
+	}
 	now := uc.now()
-	nextStatus, err := uc.resolveHookTaskInitialStatus(ctx, agentInstance.ID)
-	if err != nil {
-		return false, err
-	}
-	workDir := firstNonEmpty(strings.TrimSpace(sourceTask.WorkDir), strings.TrimSpace(agentInstance.WorkDir))
-	createdTask, err := uc.agentRepo.CreateTask(ctx, agentdomain.Task{
-		ID:         generateID("agtask"),
-		AgentID:    agentInstance.ID,
-		AgentCode:  agentInstance.AgentCode,
-		Name:       fmt.Sprintf("%s · %s", firstNonEmpty(strings.TrimSpace(hook.Name), "发布后 Hook"), strings.TrimSpace(order.OrderNo)),
-		TaskMode:   agentdomain.TaskModeTemporary,
-		TaskType:   sourceTask.TaskType,
-		ShellType:  sourceTask.ShellType,
-		WorkDir:    workDir,
-		ScriptID:   sourceTask.ScriptID,
-		ScriptName: sourceTask.ScriptName,
-		ScriptPath: sourceTask.ScriptPath,
-		ScriptText: sourceTask.ScriptText,
-		Variables:  variables,
-		TimeoutSec: sourceTask.TimeoutSec,
-		Status:     nextStatus,
-		CreatedBy:  "release_hook",
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	})
-	if err != nil {
-		return false, err
-	}
-
-	message := buildHookTaskProgressMessage(hook, createdTask, agentInstance)
+	message := buildHookTaskBatchProgressMessage(hook, sourceTask, dispatchedTasks, batchID)
 	if step.Status == domain.StepStatusPending {
 		return true, uc.markStep(ctx, order.ID, step.StepCode, domain.StepStatusRunning, message, &now, nil)
 	}
@@ -531,6 +571,55 @@ func (uc *ReleaseOrderManager) syncRunningAgentTaskHookStep(
 	hook domain.ReleaseTemplateHook,
 	step domain.ReleaseOrderStep,
 ) (bool, bool, bool, error) {
+	sourceTaskID, batchID := parseHookTaskBatchIdentity(step.Message)
+	if sourceTaskID != "" && batchID != "" {
+		tasks, _, err := uc.agentRepo.ListTasks(ctx, agentdomain.TaskListFilter{
+			SourceTaskID:    sourceTaskID,
+			DispatchBatchID: batchID,
+			Page:            1,
+			PageSize:        500,
+		})
+		if err != nil {
+			return false, false, false, err
+		}
+		if len(tasks) == 0 {
+			failMessage := "Hook 任务批次不存在，无法继续追踪"
+			if hook.FailurePolicy == domain.TemplateHookFailurePolicyWarnOnly {
+				return true, true, false, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "Hook 执行失败已忽略："+failMessage)
+			}
+			return true, true, true, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, failMessage)
+		}
+		sourceTask, err := uc.agentRepo.GetTaskByID(ctx, sourceTaskID)
+		if err != nil {
+			sourceTask = agentdomain.Task{
+				ID:   sourceTaskID,
+				Name: firstNonEmpty(strings.TrimSpace(hook.TargetName), sourceTaskID),
+			}
+		}
+		progressMessage := buildHookTaskBatchProgressMessage(hook, sourceTask, tasks, batchID)
+		switch aggregateTaskBatchStatus(tasks) {
+		case agentdomain.TaskStatusPending, agentdomain.TaskStatusQueued, agentdomain.TaskStatusClaimed, agentdomain.TaskStatusRunning:
+			if strings.TrimSpace(progressMessage) != strings.TrimSpace(step.Message) {
+				return true, false, false, uc.markStep(ctx, order.ID, step.StepCode, domain.StepStatusRunning, progressMessage, step.StartedAt, nil)
+			}
+			return false, false, false, nil
+		case agentdomain.TaskStatusSuccess:
+			return true, true, false, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, buildHookTaskBatchTerminalMessage(hook, sourceTask, tasks, batchID, "执行成功"))
+		case agentdomain.TaskStatusCancelled:
+			if hook.FailurePolicy == domain.TemplateHookFailurePolicyWarnOnly {
+				return true, true, false, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "Hook 执行已取消并忽略："+buildHookTaskBatchTerminalMessage(hook, sourceTask, tasks, batchID, "已取消"))
+			}
+			return true, true, true, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, buildHookTaskBatchTerminalMessage(hook, sourceTask, tasks, batchID, "已取消"))
+		case agentdomain.TaskStatusFailed:
+			if hook.FailurePolicy == domain.TemplateHookFailurePolicyWarnOnly {
+				return true, true, false, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "Hook 执行失败已忽略："+buildHookTaskBatchTerminalMessage(hook, sourceTask, tasks, batchID, "执行失败"))
+			}
+			return true, true, true, uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, buildHookTaskBatchTerminalMessage(hook, sourceTask, tasks, batchID, "执行失败"))
+		default:
+			return false, false, false, nil
+		}
+	}
+
 	taskID := parseHookTaskID(step.Message)
 	if taskID == "" {
 		failMessage := "Hook 任务缺少任务号，无法继续追踪"
@@ -730,6 +819,12 @@ func buildHookTaskProgressMessage(hook domain.ReleaseTemplateHook, task agentdom
 	return fmt.Sprintf("任务：%s，目标 Agent：%s，当前状态：%s，task_id=%s", taskName, agentName, statusText, strings.TrimSpace(task.ID))
 }
 
+func buildHookTaskBatchProgressMessage(hook domain.ReleaseTemplateHook, sourceTask agentdomain.Task, tasks []agentdomain.Task, batchID string) string {
+	taskName := firstNonEmpty(strings.TrimSpace(hook.TargetName), strings.TrimSpace(sourceTask.Name), strings.TrimSpace(sourceTask.ScriptName), strings.TrimSpace(sourceTask.ID))
+	summary := buildTaskBatchSummary(fmt.Sprintf("任务：%s", taskName), tasks)
+	return fmt.Sprintf("%s，source_task_id=%s，batch_id=%s", summary, strings.TrimSpace(sourceTask.ID), strings.TrimSpace(batchID))
+}
+
 func buildHookTaskTerminalMessage(hook domain.ReleaseTemplateHook, task agentdomain.Task, prefix string) string {
 	taskName := firstNonEmpty(strings.TrimSpace(hook.TargetName), strings.TrimSpace(task.Name), strings.TrimSpace(task.ScriptName), strings.TrimSpace(task.ID))
 	summary := firstNonEmpty(strings.TrimSpace(task.LastRunSummary), strings.TrimSpace(task.FailureReason))
@@ -739,12 +834,35 @@ func buildHookTaskTerminalMessage(hook domain.ReleaseTemplateHook, task agentdom
 	return fmt.Sprintf("%s：%s，任务号：%s，摘要：%s", prefix, taskName, strings.TrimSpace(task.ID), summary)
 }
 
-func parseHookTaskID(message string) string {
-	matches := hookTaskIDPattern.FindStringSubmatch(strings.TrimSpace(message))
-	if len(matches) < 2 {
-		return ""
+func buildHookTaskBatchTerminalMessage(hook domain.ReleaseTemplateHook, sourceTask agentdomain.Task, tasks []agentdomain.Task, batchID string, prefix string) string {
+	taskName := firstNonEmpty(strings.TrimSpace(hook.TargetName), strings.TrimSpace(sourceTask.Name), strings.TrimSpace(sourceTask.ScriptName), strings.TrimSpace(sourceTask.ID))
+	summary := buildTaskBatchSummary("", tasks)
+	if summary == "" {
+		return fmt.Sprintf("%s：%s，source_task_id=%s，batch_id=%s", prefix, taskName, strings.TrimSpace(sourceTask.ID), strings.TrimSpace(batchID))
 	}
-	return strings.TrimSpace(matches[1])
+	return fmt.Sprintf("%s：%s，%s，source_task_id=%s，batch_id=%s", prefix, taskName, summary, strings.TrimSpace(sourceTask.ID), strings.TrimSpace(batchID))
+}
+
+func parseHookTaskID(message string) string {
+	trimmed := strings.TrimSpace(message)
+	matches := hookTaskIDPattern.FindStringSubmatch(trimmed)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	matches = hookTaskLabelPattern.FindStringSubmatch(trimmed)
+	if len(matches) >= 2 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
+
+func parseHookTaskBatchIdentity(message string) (string, string) {
+	sourceMatches := hookSourceTaskIDPattern.FindStringSubmatch(strings.TrimSpace(message))
+	batchMatches := hookDispatchBatchIDPattern.FindStringSubmatch(strings.TrimSpace(message))
+	if len(sourceMatches) < 2 || len(batchMatches) < 2 {
+		return "", ""
+	}
+	return strings.TrimSpace(sourceMatches[1]), strings.TrimSpace(batchMatches[1])
 }
 
 func deriveAgentRuntimeState(item agentdomain.Instance) agentdomain.RuntimeState {

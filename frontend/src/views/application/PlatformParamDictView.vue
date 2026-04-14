@@ -301,7 +301,7 @@ onMounted(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">平台字段中心</h2>
-        <p class="page-subtitle">沉淀发布链路中的标准字段，让 CI 映射、GitOps 定位与 CD 填值始终使用同一套语言。</p>
+        <p class="page-subtitle">沉淀发布链路中的标准字段，让 CI 映射、GitOps 定位与 CD 填值始终使用同一套语言</p>
       </div>
       <a-button type="primary" @click="openCreateModal">
         <template #icon>

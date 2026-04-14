@@ -138,7 +138,7 @@ onMounted(async () => {
         </a-button>
         <div class="page-header-copy">
           <h2 class="page-title">编辑应用</h2>
-          <p class="page-subtitle">维护应用基础信息与归属配置，修改完成后会立即影响后续模板绑定与发布入口展示。</p>
+          <p class="page-subtitle">维护应用基础信息与归属配置，修改完成后会立即影响后续模板绑定与发布入口展示</p>
         </div>
       </div>
     </div>

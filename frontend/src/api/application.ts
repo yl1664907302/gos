@@ -3,6 +3,7 @@ import type {
   ApplicationDataResponse,
   ApplicationListParams,
   ApplicationListResponse,
+  ApplicationOptionListResponse,
   ApplicationPayload,
 } from '../types/application'
 
@@ -13,6 +14,11 @@ export async function listApplications(params: ApplicationListParams): Promise<A
 
 export async function getApplicationByID(id: string): Promise<ApplicationDataResponse> {
   const response = await http.get<ApplicationDataResponse>(`/applications/${id}`)
+  return response.data
+}
+
+export async function listApplicationOptions(): Promise<ApplicationOptionListResponse> {
+  const response = await http.get<ApplicationOptionListResponse>('/applications/options')
   return response.data
 }
 

@@ -28,6 +28,7 @@ func (h *AgentHandler) RegisterPublicRoutes(router gin.IRouter) {
 	if h == nil {
 		return
 	}
+	router.POST("/agent/register", h.Register)
 	router.POST("/agent/heartbeat", h.Heartbeat)
 	router.POST("/agent/tasks/poll", h.PollTask)
 	router.POST("/agent/tasks/:id/start", h.StartTask)
@@ -39,6 +40,7 @@ func (h *AgentHandler) RegisterRoutes(router gin.IRouter) {
 		return
 	}
 	router.GET("/agents", h.List)
+	router.GET("/agents/bootstrap-config", h.BootstrapConfig)
 	router.GET("/agents/:id", h.Get)
 	router.GET("/agents/:id/config", h.Config)
 	router.GET("/agent-tasks", h.ListAllTasks)
@@ -47,15 +49,23 @@ func (h *AgentHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/agent-scripts/:id", h.GetScript)
 	router.POST("/agents", h.Create)
 	router.PUT("/agents/:id", h.Update)
+	router.DELETE("/agents/:id", h.Delete)
 	router.POST("/agent-tasks", h.CreateUnassignedTask)
+	router.POST("/agent-tasks/:taskID/execute", h.ExecuteStandaloneTask)
 	router.POST("/agents/:id/tasks", h.CreateTask)
+	router.POST("/agents/:id/tasks/:taskID/execute", h.ExecuteTask)
 	router.POST("/agents/:id/tasks/:taskID/stop", h.StopTask)
 	router.POST("/agents/:id/tasks/:taskID/resume", h.ResumeTask)
 	router.DELETE("/agents/:id/tasks/:taskID", h.DeleteTask)
 	router.PUT("/agents/:id/tasks/:taskID", h.UpdateTask)
+	router.PUT("/agent-tasks/:taskID", h.UpdateTemporaryTask)
+	router.DELETE("/agent-tasks/:taskID", h.DeleteTemporaryTask)
+	router.PUT("/resident-tasks/:taskID", h.UpdateResidentTask)
+	router.DELETE("/resident-tasks/:taskID", h.DeleteResidentTask)
 	router.POST("/agent-scripts", h.CreateScript)
 	router.PUT("/agent-scripts/:id", h.UpdateScript)
 	router.DELETE("/agent-scripts/:id", h.DeleteScript)
+	router.POST("/agents/bootstrap-token/reset", h.ResetBootstrapToken)
 	router.POST("/agents/:id/reset-token", h.ResetToken)
 	router.POST("/agents/:id/enable", h.Enable)
 	router.POST("/agents/:id/disable", h.Disable)
@@ -71,6 +81,10 @@ type AgentListResponse struct {
 
 type AgentDataResponse struct {
 	Data usecase.AgentOutput `json:"data"`
+}
+
+type AgentRegisterDataResponse struct {
+	Data usecase.AgentRegisterOutput `json:"data"`
 }
 
 type AgentConfigResponse struct {
@@ -128,17 +142,32 @@ type agentHeartbeatRequest struct {
 	LastTaskFinishedAt string   `json:"last_task_finished_at"`
 }
 
+type agentRegisterRequest struct {
+	RegistrationToken string   `json:"registration_token"`
+	MachineID         string   `json:"machine_id"`
+	Name              string   `json:"name"`
+	EnvironmentCode   string   `json:"environment_code"`
+	Hostname          string   `json:"hostname"`
+	HostIP            string   `json:"host_ip"`
+	AgentVersion      string   `json:"agent_version"`
+	OS                string   `json:"os"`
+	Arch              string   `json:"arch"`
+	WorkDir           string   `json:"work_dir"`
+	Tags              []string `json:"tags"`
+}
+
 type createAgentTaskRequest struct {
-	Name       string            `json:"name"`
-	TaskMode   string            `json:"task_mode"`
-	TaskType   string            `json:"task_type"`
-	ShellType  string            `json:"shell_type"`
-	WorkDir    string            `json:"work_dir"`
-	ScriptID   string            `json:"script_id"`
-	ScriptPath string            `json:"script_path"`
-	ScriptText string            `json:"script_text"`
-	Variables  map[string]string `json:"variables"`
-	TimeoutSec int               `json:"timeout_sec"`
+	Name           string            `json:"name"`
+	TaskMode       string            `json:"task_mode"`
+	TaskType       string            `json:"task_type"`
+	ShellType      string            `json:"shell_type"`
+	WorkDir        string            `json:"work_dir"`
+	ScriptID       string            `json:"script_id"`
+	ScriptPath     string            `json:"script_path"`
+	ScriptText     string            `json:"script_text"`
+	Variables      map[string]string `json:"variables"`
+	TargetAgentIDs []string          `json:"target_agent_ids"`
+	TimeoutSec     int               `json:"timeout_sec"`
 }
 
 type upsertAgentScriptRequest struct {
@@ -276,6 +305,21 @@ func (h *AgentHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": output})
 }
 
+func (h *AgentHandler) Delete(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not configured"})
+		return
+	}
+	if err := h.manager.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func (h *AgentHandler) Config(c *gin.Context) {
 	if !ensureAnyPermission(c, h.authz, "component.agent.view", "component.agent.manage") {
 		return
@@ -285,6 +329,38 @@ func (h *AgentHandler) Config(c *gin.Context) {
 		return
 	}
 	output, err := h.manager.BuildInstallConfig(c.Request.Context(), c.Param("id"), resolveAgentBaseURL(c))
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) BootstrapConfig(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not configured"})
+		return
+	}
+	output, err := h.manager.BuildBootstrapConfig(c.Request.Context(), resolveAgentBaseURL(c))
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) ResetBootstrapToken(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not configured"})
+		return
+	}
+	output, err := h.manager.ResetBootstrapToken(c.Request.Context(), resolveAgentBaseURL(c))
 	if err != nil {
 		writeAgentHTTPError(c, err)
 		return
@@ -446,18 +522,19 @@ func (h *AgentHandler) CreateTask(c *gin.Context) {
 		}
 	}
 	output, err := h.taskManager.Create(c.Request.Context(), usecase.CreateAgentTaskInput{
-		AgentID:    c.Param("id"),
-		Name:       req.Name,
-		TaskMode:   req.TaskMode,
-		TaskType:   req.TaskType,
-		ShellType:  req.ShellType,
-		WorkDir:    req.WorkDir,
-		ScriptID:   req.ScriptID,
-		ScriptPath: req.ScriptPath,
-		ScriptText: req.ScriptText,
-		Variables:  req.Variables,
-		TimeoutSec: req.TimeoutSec,
-		CreatedBy:  createdBy,
+		AgentID:        c.Param("id"),
+		TargetAgentIDs: req.TargetAgentIDs,
+		Name:           req.Name,
+		TaskMode:       req.TaskMode,
+		TaskType:       req.TaskType,
+		ShellType:      req.ShellType,
+		WorkDir:        req.WorkDir,
+		ScriptID:       req.ScriptID,
+		ScriptPath:     req.ScriptPath,
+		ScriptText:     req.ScriptText,
+		Variables:      req.Variables,
+		TimeoutSec:     req.TimeoutSec,
+		CreatedBy:      createdBy,
 	})
 	if err != nil {
 		writeAgentHTTPError(c, err)
@@ -490,17 +567,18 @@ func (h *AgentHandler) CreateUnassignedTask(c *gin.Context) {
 		}
 	}
 	output, err := h.taskManager.Create(c.Request.Context(), usecase.CreateAgentTaskInput{
-		Name:       req.Name,
-		TaskMode:   req.TaskMode,
-		TaskType:   req.TaskType,
-		ShellType:  req.ShellType,
-		WorkDir:    req.WorkDir,
-		ScriptID:   req.ScriptID,
-		ScriptPath: req.ScriptPath,
-		ScriptText: req.ScriptText,
-		Variables:  req.Variables,
-		TimeoutSec: req.TimeoutSec,
-		CreatedBy:  createdBy,
+		TargetAgentIDs: req.TargetAgentIDs,
+		Name:           req.Name,
+		TaskMode:       req.TaskMode,
+		TaskType:       req.TaskType,
+		ShellType:      req.ShellType,
+		WorkDir:        req.WorkDir,
+		ScriptID:       req.ScriptID,
+		ScriptPath:     req.ScriptPath,
+		ScriptText:     req.ScriptText,
+		Variables:      req.Variables,
+		TimeoutSec:     req.TimeoutSec,
+		CreatedBy:      createdBy,
 	})
 	if err != nil {
 		writeAgentHTTPError(c, err)
@@ -531,6 +609,40 @@ func (h *AgentHandler) UpdateTask(c *gin.Context) {
 		Variables:  req.Variables,
 		TimeoutSec: req.TimeoutSec,
 	})
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) ExecuteTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	output, err := h.taskManager.Execute(c.Request.Context(), c.Param("taskID"), usecase.ExecuteAgentTaskInput{
+		AgentID: c.Param("id"),
+	})
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) ExecuteStandaloneTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	output, err := h.taskManager.Execute(c.Request.Context(), c.Param("taskID"), usecase.ExecuteAgentTaskInput{})
 	if err != nil {
 		writeAgentHTTPError(c, err)
 		return
@@ -585,6 +697,92 @@ func (h *AgentHandler) DeleteTask(c *gin.Context) {
 	if err := h.taskManager.Delete(c.Request.Context(), c.Param("taskID"), usecase.StopAgentTaskInput{
 		AgentID: c.Param("id"),
 	}); err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *AgentHandler) UpdateTemporaryTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	var req createAgentTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	output, err := h.taskManager.UpdateTemporaryTask(c.Request.Context(), c.Param("taskID"), usecase.UpdateAgentTaskInput{
+		Name:       req.Name,
+		TaskMode:   req.TaskMode,
+		WorkDir:    req.WorkDir,
+		ScriptID:   req.ScriptID,
+		Variables:  req.Variables,
+		TimeoutSec: req.TimeoutSec,
+	})
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) DeleteTemporaryTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	if err := h.taskManager.DeleteTemporaryTask(c.Request.Context(), c.Param("taskID")); err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *AgentHandler) UpdateResidentTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	var req createAgentTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	output, err := h.taskManager.UpdateResidentTask(c.Request.Context(), c.Param("taskID"), usecase.UpdateAgentTaskInput{
+		Name:       req.Name,
+		TaskMode:   req.TaskMode,
+		WorkDir:    req.WorkDir,
+		ScriptID:   req.ScriptID,
+		Variables:  req.Variables,
+		TimeoutSec: req.TimeoutSec,
+	})
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
+func (h *AgentHandler) DeleteResidentTask(c *gin.Context) {
+	if !ensurePermission(c, h.authz, "component.agent.manage", "", "") {
+		return
+	}
+	if h.taskManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent task manager is not configured"})
+		return
+	}
+	if err := h.taskManager.DeleteResidentTask(c.Request.Context(), c.Param("taskID")); err != nil {
 		writeAgentHTTPError(c, err)
 		return
 	}
@@ -813,6 +1011,36 @@ func (h *AgentHandler) Heartbeat(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": output})
 }
 
+func (h *AgentHandler) Register(c *gin.Context) {
+	if h.manager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "agent manager is not configured"})
+		return
+	}
+	var req agentRegisterRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	output, err := h.manager.Register(c.Request.Context(), usecase.AgentRegisterInput{
+		RegistrationToken: req.RegistrationToken,
+		MachineID:         req.MachineID,
+		Name:              req.Name,
+		EnvironmentCode:   req.EnvironmentCode,
+		Hostname:          req.Hostname,
+		HostIP:            req.HostIP,
+		AgentVersion:      req.AgentVersion,
+		OS:                req.OS,
+		Arch:              req.Arch,
+		WorkDir:           req.WorkDir,
+		Tags:              req.Tags,
+	})
+	if err != nil {
+		writeAgentHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
+}
+
 func parseOptionalTime(raw string) *time.Time {
 	text := strings.TrimSpace(raw)
 	if text == "" {
@@ -832,11 +1060,13 @@ func writeAgentHTTPError(c *gin.Context, err error) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, agentdomain.ErrInstanceNotFound), errors.Is(err, agentdomain.ErrTaskNotFound), errors.Is(err, agentdomain.ErrScriptNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, agentdomain.ErrInstanceDeleteBlocked):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, agentdomain.ErrTaskNotClaimable):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, agentdomain.ErrAgentCodeDuplicated):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-	case errors.Is(err, agentdomain.ErrHeartbeatAuthRejected), errors.Is(err, agentdomain.ErrInvalidAgentToken):
+	case errors.Is(err, agentdomain.ErrHeartbeatAuthRejected), errors.Is(err, agentdomain.ErrInvalidAgentToken), errors.Is(err, agentdomain.ErrBootstrapTokenInvalid):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})

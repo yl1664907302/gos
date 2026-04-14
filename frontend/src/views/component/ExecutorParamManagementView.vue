@@ -101,7 +101,7 @@ const { columns } = useResizableColumns(initialColumns, { minWidth: 90, maxWidth
 
 const pageSubtitle = computed(() => {
   if (!selectedApplication.value) {
-    return '请选择应用后查看其已绑定 Jenkins 管线的真实参数。'
+    return '请选择应用后查看其已绑定 Jenkins 管线的真实参数'
   }
   if (selectedPipelineLabel.value !== '-') {
     return `当前应用：${selectedApplication.value.name}（${selectedApplication.value.key}） · 所属执行器：${selectedPipelineLabel.value}`

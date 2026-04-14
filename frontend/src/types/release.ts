@@ -139,6 +139,10 @@ export interface ReleaseOrderStep {
   step_name: string;
   status: ReleaseStepStatus;
   message: string;
+  detail_log: string;
+  related_task_summary: string;
+  related_task_ids: string[];
+  related_task_count: number;
   sort_no: number;
   started_at: string | null;
   finished_at: string | null;
@@ -469,6 +473,7 @@ export interface ReleaseTemplateHook {
   name: string;
   trigger_condition: ReleaseTemplateHookTriggerCondition;
   failure_policy: ReleaseTemplateHookFailurePolicy;
+  env_codes: string[];
   target_id: string;
   target_name: string;
   webhook_method: string;
@@ -485,6 +490,7 @@ export interface ReleaseTemplateHookPayload {
   name: string;
   trigger_condition: ReleaseTemplateHookTriggerCondition;
   failure_policy: ReleaseTemplateHookFailurePolicy;
+  env_codes?: string[];
   target_id?: string;
   webhook_method?: string;
   webhook_url?: string;

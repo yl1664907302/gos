@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowLeftOutlined } from '@ant-design/icons-vue'
+import { ArrowLeftOutlined, ThunderboltFilled } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { FormInstance } from 'ant-design-vue'
 import type { Rule } from 'ant-design-vue/es/form'
@@ -108,15 +108,9 @@ const allowedApplicationIDs = computed(() => {
     return null
   }
   return new Set(
-    authStore.permissions
-      .filter(
-        (item) =>
-          item.enabled &&
-          String(item.permission_code || '').trim().toLowerCase() === 'release.create' &&
-          String(item.scope_type || '').trim().toLowerCase() === 'application' &&
-          String(item.scope_value || '').trim() !== '',
-      )
-      .map((item) => String(item.scope_value || '').trim()),
+    allApplicationOptions.value
+      .filter((item) => authStore.hasApplicationPermission('release.create', item.value))
+      .map((item) => item.value),
   )
 })
 
@@ -126,6 +120,20 @@ const applicationOptions = computed<SelectOption[]>(() => {
     return allApplicationOptions.value
   }
   return allApplicationOptions.value.filter((item) => allowed.has(item.value))
+})
+
+const authorizedEnvOptions = computed<SelectOption[]>(() => {
+  if (authStore.isAdmin || !formState.application_id.trim()) {
+    return envOptions.value
+  }
+  const allowedEnvCodes = new Set(
+    authStore.listApplicationPermissionEnvCodes(
+      'release.create',
+      formState.application_id.trim(),
+      envOptions.value.map((item) => item.value),
+    ),
+  )
+  return envOptions.value.filter((item) => allowedEnvCodes.has(item.value))
 })
 
 const currentUserDisplayName = computed(() => {
@@ -181,6 +189,19 @@ const scopeCardList = computed(() =>
 const hasScopeErrors = computed(() => visibleScopes.value.some((scope) => Boolean(scopeStates[scope].error)))
 const isParamLoading = computed(() => loadingTemplateDetail.value || visibleScopes.value.some((scope) => scopeStates[scope].loading))
 const canSubmitRelease = computed(() => Boolean(formState.application_id && formState.template_id && selectedTemplate.value) && !hasScopeErrors.value && !isParamLoading.value)
+const fastReleaseDisabledReason = computed(() => {
+  if (!selectedTemplate.value) {
+    return ''
+  }
+  if (
+    Boolean(selectedTemplate.value.approval_enabled) &&
+    (selectedTemplate.value.approval_approver_ids || []).length > 0
+  ) {
+    return '当前模板已配置审批人，极速发布不可用'
+  }
+  return ''
+})
+const canFastSubmitRelease = computed(() => canSubmitRelease.value && !fastReleaseDisabledReason.value)
 
 function resetParamValues() {
   Object.keys(paramValues).forEach((key) => {
@@ -256,9 +277,7 @@ async function loadEnvOptions() {
       label: item,
       value: item,
     }))
-    if (!formState.env_code && envOptions.value.length === 1 && envOptions.value[0]) {
-      formState.env_code = envOptions.value[0].value
-    }
+    syncSelectedEnvCode()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '环境选项加载失败'))
   } finally {
@@ -266,12 +285,24 @@ async function loadEnvOptions() {
   }
 }
 
+function syncSelectedEnvCode() {
+  const availableEnvCodes = authorizedEnvOptions.value.map((item) => item.value)
+  if (formState.env_code && !availableEnvCodes.includes(formState.env_code)) {
+    formState.env_code = ''
+  }
+  if (!formState.env_code && availableEnvCodes.length === 1) {
+    formState.env_code = availableEnvCodes[0] || ''
+  }
+}
+
 function resetSelectionIfUnauthorized() {
   const hasCurrentApplication = applicationOptions.value.some((item) => item.value === formState.application_id)
   if (hasCurrentApplication) {
+    syncSelectedEnvCode()
     return
   }
   formState.application_id = ''
+  formState.env_code = ''
   resetTemplateState()
 }
 
@@ -444,6 +475,7 @@ async function handleApplicationChange(value: string | undefined) {
   formState.application_id = String(value || '')
   preferredTemplateID.value = ''
   preferredBindingID.value = ''
+  syncSelectedEnvCode()
   formState.git_ref = ''
   if (releaseBranchOptions.value.length === 1 && releaseBranchOptions.value[0]) {
     formState.git_ref = releaseBranchOptions.value[0].value
@@ -794,7 +826,7 @@ function buildParamsPayload(): CreateReleaseOrderParamPayload[] {
   return payload
 }
 
-async function handleSubmit() {
+async function submitRelease(options?: { fast?: boolean }) {
   try {
     await formRef.value?.validate()
   } catch {
@@ -826,6 +858,7 @@ async function handleSubmit() {
 
   submitting.value = true
   try {
+    const fast = Boolean(options?.fast)
     const response = await createReleaseOrder({
       application_id: formState.application_id.trim(),
       template_id: formState.template_id.trim(),
@@ -836,6 +869,16 @@ async function handleSubmit() {
       remark: formState.remark.trim() || undefined,
       params: paramsPayload.length > 0 ? paramsPayload : undefined,
     })
+    if (fast) {
+      message.success('极速发布单创建成功，正在进入详情并自动开始发布')
+      void router.push({
+        path: `/releases/${response.data.id}`,
+        query: {
+          fast_execute: '1',
+        },
+      })
+      return
+    }
     message.success('发布单创建成功')
     void router.push(`/releases/${response.data.id}`)
   } catch (error) {
@@ -843,6 +886,20 @@ async function handleSubmit() {
   } finally {
     submitting.value = false
   }
+}
+
+async function handleSubmit() {
+  await submitRelease()
+}
+
+async function handleFastSubmit() {
+  if (!canFastSubmitRelease.value) {
+    if (fastReleaseDisabledReason.value) {
+      message.warning(fastReleaseDisabledReason.value)
+    }
+    return
+  }
+  await submitRelease({ fast: true })
 }
 
 function scopeHint(scope: ReleasePipelineScope) {
@@ -882,7 +939,7 @@ onMounted(async () => {
         </a-button>
         <div class="page-header-copy">
           <h2 class="page-title">新建发布单</h2>
-          <p class="page-subtitle">先选择发布模板，再按模板拆分填写 CI / CD 参数；平台会自动按模板结构执行发布。</p>
+          <p class="page-subtitle">先选择发布模板，再按模板拆分填写 CI / CD 参数；平台会自动按模板结构执行发布</p>
         </div>
       </div>
     </div>
@@ -937,7 +994,7 @@ onMounted(async () => {
             <a-form-item label="环境" name="env_code">
               <a-select
                 v-model:value="formState.env_code"
-                :options="envOptions"
+                :options="authorizedEnvOptions"
                 :loading="loadingEnvOptions"
                 placeholder="请选择环境"
                 allow-clear
@@ -979,7 +1036,7 @@ onMounted(async () => {
           type="success"
           show-icon
           :message="`当前模板：${selectedTemplate.name}`"
-          :description="`已启用 ${visibleScopes.map((scope) => scope.toUpperCase()).join(' + ')} 执行单元${templateParams.length > 0 ? `，共 ${templateParams.length} 个额外参数` : ''}`"
+          :description="`${selectedTemplate.approval_enabled && selectedTemplate.approval_approver_ids.length > 0 ? '当前模板已启用审批，暂不支持极速发布；' : ''}已启用 ${visibleScopes.map((scope) => scope.toUpperCase()).join(' + ')} 执行单元${templateParams.length > 0 ? `，共 ${templateParams.length} 个额外参数` : ''}`"
         />
         <a-alert
           v-else-if="templateWarning"
@@ -1071,6 +1128,18 @@ onMounted(async () => {
       <div class="action-area">
         <a-space>
           <a-button @click="toList">取消</a-button>
+          <a-button
+            class="fast-submit-button"
+            :class="{ 'fast-submit-button-disabled': !canFastSubmitRelease }"
+            :loading="submitting"
+            :aria-disabled="!canFastSubmitRelease"
+            @click="handleFastSubmit"
+          >
+            <template #icon>
+              <ThunderboltFilled />
+            </template>
+            极速发布
+          </a-button>
           <a-button type="primary" :loading="submitting" :disabled="!canSubmitRelease" @click="handleSubmit">创建发布单</a-button>
         </a-space>
       </div>
@@ -1213,6 +1282,51 @@ onMounted(async () => {
 
 .param-value-control {
   width: 100%;
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button) {
+  color: #7f1d1d !important;
+  font-weight: 600;
+  border-color: #c08497;
+  background: #f3e7eb;
+  box-shadow: 0 10px 22px rgba(190, 24, 93, 0.12);
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button > span),
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button .anticon) {
+  color: inherit !important;
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button:hover) {
+  color: #6b1111 !important;
+  border-color: #be6b82;
+  background: #edd8de;
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button:focus) {
+  color: #6b1111 !important;
+  border-color: #be6b82;
+  background: #edd8de;
+  box-shadow:
+    0 0 0 3px rgba(190, 24, 93, 0.14),
+    0 10px 22px rgba(190, 24, 93, 0.14);
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button.fast-submit-button-disabled) {
+  color: #7f1d1d !important;
+  border-color: #c08497 !important;
+  background: #f3e7eb !important;
+  box-shadow: none;
+  opacity: 0.62 !important;
+  cursor: not-allowed;
+}
+
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button.fast-submit-button-disabled:hover),
+.page-wrapper :deep(.ant-btn.ant-btn-default.fast-submit-button.fast-submit-button-disabled:focus) {
+  color: #7f1d1d !important;
+  border-color: #c08497 !important;
+  background: #f3e7eb !important;
+  box-shadow: none !important;
 }
 
 .create-form :deep(.ant-input),

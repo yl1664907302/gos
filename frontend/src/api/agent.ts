@@ -25,6 +25,11 @@ export async function getAgent(id: string): Promise<AgentDataResponse> {
   return response.data
 }
 
+export async function getAgentBootstrapConfig(): Promise<AgentConfigResponse> {
+  const response = await http.get<AgentConfigResponse>('/agents/bootstrap-config')
+  return response.data
+}
+
 export async function getAgentConfig(id: string): Promise<AgentConfigResponse> {
   const response = await http.get<AgentConfigResponse>(`/agents/${id}/config`)
   return response.data
@@ -40,8 +45,18 @@ export async function updateAgent(id: string, payload: UpsertAgentPayload): Prom
   return response.data
 }
 
+export async function deleteAgent(id: string): Promise<{ ok: boolean }> {
+  const response = await http.delete<{ ok: boolean }>(`/agents/${id}`)
+  return response.data
+}
+
 export async function resetAgentToken(id: string): Promise<AgentDataResponse> {
   const response = await http.post<AgentDataResponse>(`/agents/${id}/reset-token`)
+  return response.data
+}
+
+export async function resetAgentBootstrapToken(): Promise<AgentConfigResponse> {
+  const response = await http.post<AgentConfigResponse>('/agents/bootstrap-token/reset')
   return response.data
 }
 
@@ -75,6 +90,16 @@ export async function stopAgentTask(agentID: string, taskID: string): Promise<Ag
   return response.data
 }
 
+export async function executeAgentTask(agentID: string, taskID: string): Promise<AgentTaskDataResponse> {
+  const response = await http.post<AgentTaskDataResponse>(`/agents/${agentID}/tasks/${taskID}/execute`)
+  return response.data
+}
+
+export async function executeStandaloneAgentTask(taskID: string): Promise<AgentTaskDataResponse> {
+  const response = await http.post<AgentTaskDataResponse>(`/agent-tasks/${taskID}/execute`)
+  return response.data
+}
+
 export async function resumeAgentTask(agentID: string, taskID: string): Promise<AgentTaskDataResponse> {
   const response = await http.post<AgentTaskDataResponse>(`/agents/${agentID}/tasks/${taskID}/resume`)
   return response.data
@@ -82,6 +107,26 @@ export async function resumeAgentTask(agentID: string, taskID: string): Promise<
 
 export async function deleteAgentTask(agentID: string, taskID: string): Promise<{ ok: boolean }> {
   const response = await http.delete<{ ok: boolean }>(`/agents/${agentID}/tasks/${taskID}`)
+  return response.data
+}
+
+export async function updateTemporaryAgentTask(taskID: string, payload: CreateAgentTaskPayload): Promise<AgentTaskDataResponse> {
+  const response = await http.put<AgentTaskDataResponse>(`/agent-tasks/${taskID}`, payload)
+  return response.data
+}
+
+export async function deleteTemporaryAgentTask(taskID: string): Promise<{ ok: boolean }> {
+  const response = await http.delete<{ ok: boolean }>(`/agent-tasks/${taskID}`)
+  return response.data
+}
+
+export async function updateResidentAgentTask(taskID: string, payload: CreateAgentTaskPayload): Promise<AgentTaskDataResponse> {
+  const response = await http.put<AgentTaskDataResponse>(`/resident-tasks/${taskID}`, payload)
+  return response.data
+}
+
+export async function deleteResidentAgentTask(taskID: string): Promise<{ ok: boolean }> {
+  const response = await http.delete<{ ok: boolean }>(`/resident-tasks/${taskID}`)
   return response.data
 }
 

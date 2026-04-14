@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	agentdomain "gos/internal/domain/agent"
 	notificationdomain "gos/internal/domain/notification"
 	domain "gos/internal/domain/release"
 )
@@ -81,6 +82,102 @@ func TestShouldTriggerTemplateHook(t *testing.T) {
 				t.Fatalf("shouldTriggerTemplateHook(%q, %q) = %v, want %v", tc.condition, tc.status, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestHookMatchesOrderEnv(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		envCodes  []string
+		orderEnv  string
+		wantMatch bool
+	}{
+		{
+			name:      "empty hook envs means all envs",
+			envCodes:  nil,
+			orderEnv:  "prod",
+			wantMatch: true,
+		},
+		{
+			name:      "single env match",
+			envCodes:  []string{"prod"},
+			orderEnv:  "prod",
+			wantMatch: true,
+		},
+		{
+			name:      "case insensitive match",
+			envCodes:  []string{"Prod"},
+			orderEnv:  "prod",
+			wantMatch: true,
+		},
+		{
+			name:      "env not matched",
+			envCodes:  []string{"prod"},
+			orderEnv:  "dev",
+			wantMatch: false,
+		},
+		{
+			name:      "blank order env does not match filtered hook",
+			envCodes:  []string{"prod"},
+			orderEnv:  "",
+			wantMatch: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hookMatchesOrderEnv(tc.envCodes, tc.orderEnv); got != tc.wantMatch {
+				t.Fatalf("hookMatchesOrderEnv(%v, %q) = %v, want %v", tc.envCodes, tc.orderEnv, got, tc.wantMatch)
+			}
+		})
+	}
+}
+
+func TestBuildTemplateHookEnvSkipMessage(t *testing.T) {
+	t.Parallel()
+
+	got := buildTemplateHookEnvSkipMessage([]string{"prod", "pre"}, "dev")
+	want := "当前环境 dev 未命中 Hook 执行环境（prod / pre），已跳过"
+	if got != want {
+		t.Fatalf("buildTemplateHookEnvSkipMessage mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestParseHookTaskBatchIdentity(t *testing.T) {
+	t.Parallel()
+
+	message := buildHookTaskBatchProgressMessage(
+		domain.ReleaseTemplateHook{Name: "发布后校验", TargetName: "发布后校验"},
+		agentdomain.Task{ID: "agtask-source", Name: "发布后校验"},
+		[]agentdomain.Task{
+			{ID: "agtask-1", Status: agentdomain.TaskStatusPending},
+			{ID: "agtask-2", Status: agentdomain.TaskStatusRunning},
+		},
+		"agbatch-1",
+	)
+	sourceTaskID, batchID := parseHookTaskBatchIdentity(message)
+	if sourceTaskID != "agtask-source" {
+		t.Fatalf("sourceTaskID = %q, want %q", sourceTaskID, "agtask-source")
+	}
+	if batchID != "agbatch-1" {
+		t.Fatalf("batchID = %q, want %q", batchID, "agbatch-1")
+	}
+}
+
+func TestParseHookTaskIDFromTerminalMessage(t *testing.T) {
+	t.Parallel()
+
+	message := buildHookTaskTerminalMessage(
+		domain.ReleaseTemplateHook{Name: "发布后校验", TargetName: "发布后校验"},
+		agentdomain.Task{ID: "agtask-123", Name: "发布后校验", LastRunSummary: "执行完成"},
+		"执行成功",
+	)
+	if got := parseHookTaskID(message); got != "agtask-123" {
+		t.Fatalf("parseHookTaskID(%q) = %q, want %q", message, got, "agtask-123")
 	}
 }
 

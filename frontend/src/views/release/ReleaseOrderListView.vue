@@ -16,6 +16,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { listApplications } from "../../api/application";
 import { listPipelineBindings } from "../../api/pipeline";
+import { getReleaseSettings } from "../../api/system";
 import {
   batchExecuteReleaseOrders,
   cancelReleaseOrder,
@@ -99,8 +100,10 @@ const selectedOrderIDs = ref<string[]>([]);
 
 const applicationsLoading = ref(false);
 const bindingOptionsLoading = ref(false);
+const envOptionsLoading = ref(false);
 const applicationOptions = ref<SelectOption[]>([]);
 const bindingOptions = ref<SelectOption[]>([]);
+const releaseEnvOptions = ref<SelectOption[]>([]);
 
 const executePreviewVisible = ref(false);
 const executePreviewLoading = ref(false);
@@ -190,15 +193,15 @@ const hasFilter = computed(() => {
 const canCreateRelease = computed(() =>
   authStore.hasPermission("release.create"),
 );
-const canCancelRelease = computed(() =>
-  authStore.hasPermission("release.cancel"),
-);
 const canLoadApplications = computed(
   () =>
     authStore.hasPermission("application.view") ||
-    authStore.hasPermission("application.manage"),
+    authStore.hasPermission("application.manage") ||
+    authStore.hasPermission("release.create"),
 );
 const currentUserID = computed(() => String(authStore.profile?.id || "").trim());
+const currentEnvFilter = computed(() => filters.env_code || activeQuery.env_code || "");
+const envShortcutOptions = computed(() => releaseEnvOptions.value);
 
 function canCurrentUserExecute(record: ReleaseOrder) {
   if (!currentUserID.value) {
@@ -336,7 +339,6 @@ const hasAdvancedFilter = computed(() =>
   Boolean(
     filters.application_id ||
     filters.binding_id ||
-    filters.env_code ||
     filters.trigger_type,
   ),
 );
@@ -346,7 +348,6 @@ const showAdvancedSearch = computed(
     Boolean(
       activeQuery.application_id ||
       activeQuery.binding_id ||
-      activeQuery.env_code ||
       activeQuery.trigger_type,
     ) ||
     hasAdvancedFilter.value,
@@ -685,7 +686,11 @@ function approvalFlowSummary(record: ReleaseOrder) {
 function canCancel(record: ReleaseOrder) {
   const businessStatus = orderBusinessStatus(record);
   return (
-    canCancelRelease.value &&
+    authStore.hasApplicationPermission(
+      "release.cancel",
+      record.application_id,
+      record.env_code,
+    ) &&
     (businessStatus === "pending_execution" ||
       businessStatus === "approved" ||
       businessStatus === "queued" ||
@@ -696,13 +701,22 @@ function canCancel(record: ReleaseOrder) {
 function canExecute(record: ReleaseOrder) {
   return (
     canCurrentUserExecute(record) &&
+    authStore.hasApplicationPermission(
+      "release.execute",
+      record.application_id,
+      record.env_code,
+    ) &&
     ["pending_execution", "approved"].includes(orderBusinessStatus(record))
   );
 }
 
 function canRollback(record: ReleaseOrder) {
   return (
-    canCreateRelease.value &&
+    authStore.hasApplicationPermission(
+      "release.create",
+      record.application_id,
+      record.env_code,
+    ) &&
     orderBusinessStatus(record) === "deploy_success" &&
     String(record.cd_provider || "")
       .trim()
@@ -712,7 +726,11 @@ function canRollback(record: ReleaseOrder) {
 
 function canReplay(record: ReleaseOrder) {
   return (
-    canCreateRelease.value &&
+    authStore.hasApplicationPermission(
+      "release.create",
+      record.application_id,
+      record.env_code,
+    ) &&
     orderBusinessStatus(record) === "deploy_success" &&
     String(record.cd_provider || "")
       .trim()
@@ -838,6 +856,34 @@ async function loadBindingOptions() {
   }
 }
 
+async function loadReleaseEnvOptions() {
+  envOptionsLoading.value = true;
+  try {
+    const response = await getReleaseSettings();
+    releaseEnvOptions.value = (response.data.env_options || []).map((item) => ({
+      label: item,
+      value: item,
+    }));
+    const currentEnvCodes = new Set(releaseEnvOptions.value.map((item) => item.value));
+    if (filters.env_code && !currentEnvCodes.has(filters.env_code)) {
+      filters.env_code = "";
+    }
+    if (activeQuery.env_code && !currentEnvCodes.has(activeQuery.env_code)) {
+      activeQuery.env_code = "";
+    }
+  } catch (error) {
+    releaseEnvOptions.value = [];
+    message.error(extractHTTPErrorMessage(error, "发布环境加载失败"));
+  } finally {
+    envOptionsLoading.value = false;
+  }
+}
+
+function handleEnvQuickFilter(envCode: string) {
+  filters.env_code = String(envCode || "").trim();
+  handleSearch();
+}
+
 async function loadReleaseOrders(options?: { silent?: boolean }) {
   if (querying.value) {
     return;
@@ -916,6 +962,12 @@ function toCreate() {
     query.binding_id = filters.binding_id;
   }
   void router.push({ path: "/releases/new", query });
+}
+
+async function handleRefresh() {
+  await loadReleaseEnvOptions();
+  applyActiveQueryFromFilters();
+  await loadReleaseOrders();
 }
 
 function toDetail(id: string) {
@@ -1315,6 +1367,7 @@ function startAutoRefresh() {
 onMounted(async () => {
   applyRouteQuery();
   advancedSearchExpanded.value = hasAdvancedFilter.value;
+  await loadReleaseEnvOptions();
   await loadApplicationOptions();
   await loadBindingOptions();
   applyActiveQueryFromFilters();
@@ -1332,10 +1385,10 @@ onBeforeUnmount(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">发布单</h2>
-        <p class="page-subtitle">管理发布任务，追踪执行状态与结果。</p>
+        <p class="page-subtitle">管理发布任务，追踪执行状态与结果</p>
       </div>
       <a-space>
-        <a-button @click="loadReleaseOrders">
+        <a-button @click="handleRefresh">
           <template #icon>
             <ReloadOutlined />
           </template>
@@ -1421,6 +1474,21 @@ onBeforeUnmount(() => {
         </a-button>
       </div>
 
+      <div v-if="envShortcutOptions.length > 0" class="quick-env-row">
+        <span class="quick-env-label">环境快捷筛选</span>
+        <a-space wrap :size="[8, 8]">
+          <a-button
+            v-for="item in envShortcutOptions"
+            :key="item.value"
+            class="quick-env-button"
+            :type="currentEnvFilter === item.value ? 'primary' : 'default'"
+            @click="handleEnvQuickFilter(item.value)"
+          >
+            {{ item.label }}
+          </a-button>
+        </a-space>
+      </div>
+
       <div v-if="showAdvancedSearch" class="filter-advanced-panel">
         <a-form layout="vertical" class="filter-grid">
           <a-form-item
@@ -1452,13 +1520,6 @@ onBeforeUnmount(() => {
               placeholder="全部"
               :loading="bindingOptionsLoading"
               :options="bindingOptions"
-            />
-          </a-form-item>
-          <a-form-item label="环境" class="filter-grid-item">
-            <a-input
-              v-model:value="filters.env_code"
-              allow-clear
-              placeholder="如 dev / test / prod"
             />
           </a-form-item>
           <a-form-item label="触发方式" class="filter-grid-item">
@@ -2232,6 +2293,59 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
 }
 
+.quick-env-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  flex-wrap: wrap;
+}
+
+.quick-env-label {
+  font-size: 13px;
+  color: var(--color-text-soft);
+  white-space: nowrap;
+}
+
+.quick-env-button {
+  border-radius: 999px;
+}
+
+.persistent-env-filter-row {
+  margin-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.96), rgba(255, 255, 255, 0.98));
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.persistent-env-filter-copy {
+  min-width: 0;
+}
+
+.persistent-env-filter-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.persistent-env-filter-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-soft);
+}
+
+.persistent-env-filter-select {
+  width: 220px;
+  flex: 0 0 auto;
+}
+
 .filter-advanced-panel {
   margin-top: 18px;
   padding: 18px;
@@ -2785,6 +2899,19 @@ onBeforeUnmount(() => {
   .filter-entry-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .quick-env-row {
+    align-items: flex-start;
+  }
+
+  .persistent-env-filter-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .persistent-env-filter-select {
+    width: 100%;
   }
 
   .advanced-toggle-button {

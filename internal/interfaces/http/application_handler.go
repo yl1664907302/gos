@@ -51,6 +51,7 @@ func NewApplicationHandler(
 
 func (h *ApplicationHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/applications", h.Create)
+	router.GET("/applications/options", h.ListOptions)
 	router.GET("/applications/:id", h.GetByID)
 	router.GET("/applications", h.List)
 	router.PUT("/applications/:id", h.Update)
@@ -116,6 +117,16 @@ type ApplicationListResponse struct {
 	Page     int                   `json:"page"`
 	PageSize int                   `json:"page_size"`
 	Total    int64                 `json:"total"`
+}
+
+type ApplicationOptionResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Key  string `json:"key"`
+}
+
+type ApplicationOptionListResponse struct {
+	Data []ApplicationOptionResponse `json:"data"`
 }
 
 type ErrorResponse struct {
@@ -264,6 +275,50 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 	})
 }
 
+func (h *ApplicationHandler) ListOptions(c *gin.Context) {
+	if !ensureAnyPermission(c, h.authz, "application.manage", "system.permission.manage") {
+		return
+	}
+
+	const pageSize = 100
+	page := 1
+	items := make([]domain.Application, 0)
+	for {
+		batch, total, err := h.query.List(c.Request.Context(), domain.ListFilter{
+			Page:     page,
+			PageSize: pageSize,
+		})
+		if err != nil {
+			writeHTTPError(c, err)
+			return
+		}
+		items = append(items, batch...)
+		if len(items) >= int(total) || len(batch) < pageSize {
+			break
+		}
+		page++
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		leftName := strings.TrimSpace(items[i].Name)
+		rightName := strings.TrimSpace(items[j].Name)
+		if leftName == rightName {
+			return strings.TrimSpace(items[i].Key) < strings.TrimSpace(items[j].Key)
+		}
+		return leftName < rightName
+	})
+
+	resp := make([]ApplicationOptionResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, ApplicationOptionResponse{
+			ID:   item.ID,
+			Name: item.Name,
+			Key:  item.Key,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": resp})
+}
+
 func ensureApplicationVisible(c *gin.Context, authz RequestAuthorizer, applicationID string) bool {
 	user, ok := getCurrentUser(c)
 	if !ok {
@@ -339,21 +394,20 @@ func resolveVisibleApplicationIDsForApplications(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return false, nil, false
 	}
-
-	seen := make(map[string]struct{})
-	result := make([]string, 0)
-	for _, item := range items {
-		if !item.Enabled {
-			continue
-		}
-		permissionCode := strings.ToLower(strings.TrimSpace(item.PermissionCode))
-		if permissionCode != "application.view" && permissionCode != "release.create" {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
-			continue
-		}
-		applicationID := strings.TrimSpace(item.ScopeValue)
+	accepted := map[string]struct{}{
+		"application.view": {},
+		"release.view":     {},
+		"release.create":   {},
+		"release.execute":  {},
+		"release.cancel":   {},
+	}
+	result, envScopes := collectApplicationScopesFromPermissions(items, accepted)
+	seen := make(map[string]struct{}, len(result)+len(envScopes))
+	for _, item := range result {
+		seen[item] = struct{}{}
+	}
+	for _, item := range envScopes {
+		applicationID := strings.TrimSpace(item.ApplicationID)
 		if applicationID == "" {
 			continue
 		}

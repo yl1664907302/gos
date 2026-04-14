@@ -267,6 +267,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	name VARCHAR(255) NOT NULL DEFAULT '',
 	trigger_condition VARCHAR(32) NOT NULL DEFAULT 'on_success',
 	failure_policy VARCHAR(32) NOT NULL DEFAULT 'warn_only',
+	env_codes_json TEXT NOT NULL,
 	target_id VARCHAR(64) NOT NULL DEFAULT '',
 	target_name VARCHAR(255) NOT NULL DEFAULT '',
 	webhook_method VARCHAR(16) NOT NULL DEFAULT '',
@@ -517,6 +518,7 @@ func releaseSchemaStatements(dbDriver string) ([]string, error) {
 	name TEXT NOT NULL DEFAULT '',
 	trigger_condition TEXT NOT NULL DEFAULT 'on_success',
 	failure_policy TEXT NOT NULL DEFAULT 'warn_only',
+	env_codes_json TEXT NOT NULL DEFAULT '[]',
 	target_id TEXT NOT NULL DEFAULT '',
 	target_name TEXT NOT NULL DEFAULT '',
 	webhook_method TEXT NOT NULL DEFAULT '',
@@ -665,6 +667,7 @@ func (r *ReleaseRepository) migrateSchema(ctx context.Context) error {
 			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value VARCHAR(500) NOT NULL DEFAULT '' AFTER source_param_name;`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key VARCHAR(100) NOT NULL DEFAULT '' AFTER source_from;`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name VARCHAR(100) NOT NULL DEFAULT '' AFTER locator_param_key;`},
+			{"release_template_hook", "env_codes_json", `ALTER TABLE release_template_hook ADD COLUMN env_codes_json TEXT NULL AFTER failure_policy;`},
 			{"release_template", "approval_enabled", `ALTER TABLE release_template ADD COLUMN approval_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER status;`},
 			{"release_template", "approval_mode", `ALTER TABLE release_template ADD COLUMN approval_mode VARCHAR(32) NOT NULL DEFAULT '' AFTER approval_enabled;`},
 			{"release_template", "approval_approver_ids_json", `ALTER TABLE release_template ADD COLUMN approval_approver_ids_json TEXT NOT NULL AFTER approval_mode;`},
@@ -798,6 +801,10 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 		if err != nil {
 			return err
 		}
+		_, err = r.db.ExecContext(ctx, `UPDATE release_template_hook SET env_codes_json = '[]' WHERE env_codes_json IS NULL OR TRIM(env_codes_json) = '';`)
+		if err != nil {
+			return err
+		}
 		_, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`)
 		if err != nil {
 			return err
@@ -903,6 +910,7 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 			{"release_template_param", "fixed_value", `ALTER TABLE release_template_param ADD COLUMN fixed_value TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_key", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_key TEXT NOT NULL DEFAULT '';`},
 			{"release_template_gitops_rule", "locator_param_name", `ALTER TABLE release_template_gitops_rule ADD COLUMN locator_param_name TEXT NOT NULL DEFAULT '';`},
+			{"release_template_hook", "env_codes_json", `ALTER TABLE release_template_hook ADD COLUMN env_codes_json TEXT NOT NULL DEFAULT '[]';`},
 			{"release_template", "approval_enabled", `ALTER TABLE release_template ADD COLUMN approval_enabled INTEGER NOT NULL DEFAULT 0;`},
 			{"release_template", "approval_mode", `ALTER TABLE release_template ADD COLUMN approval_mode TEXT NOT NULL DEFAULT '';`},
 			{"release_template", "approval_approver_ids_json", `ALTER TABLE release_template ADD COLUMN approval_approver_ids_json TEXT NOT NULL DEFAULT '[]';`},
@@ -1023,6 +1031,9 @@ WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
 			return err
 		}
 		if _, err = r.db.ExecContext(ctx, `UPDATE release_template SET approval_approver_names_json = '[]' WHERE approval_approver_names_json IS NULL OR TRIM(approval_approver_names_json) = '';`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `UPDATE release_template_hook SET env_codes_json = '[]' WHERE env_codes_json IS NULL OR TRIM(env_codes_json) = '';`); err != nil {
 			return err
 		}
 		if _, err = r.db.ExecContext(ctx, `UPDATE release_order SET approval_approver_ids_json = '[]' WHERE approval_approver_ids_json IS NULL OR TRIM(approval_approver_ids_json) = '';`); err != nil {
@@ -1282,7 +1293,11 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 		where = append(where, "trigger_type = ?")
 		args = append(args, string(filter.TriggerType))
 	}
-	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClause(filter.ApplicationIDs, filter.VisibleToUserID); visibilityClause != "" {
+	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClause(
+		filter.ApplicationIDs,
+		filter.VisibleApplicationEnvScopes,
+		filter.VisibleToUserID,
+	); visibilityClause != "" {
 		where = append(where, visibilityClause)
 		args = append(args, visibilityArgs...)
 	}
@@ -2692,7 +2707,12 @@ func (r *ReleaseRepository) ListApprovalRecordSummaries(ctx context.Context, fil
 		where = append(where, "ar.operator_user_id = ?")
 		args = append(args, value)
 	}
-	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClauseWithAlias("ro", filter.ApplicationIDs, filter.VisibleToUserID); visibilityClause != "" {
+	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClauseWithAlias(
+		"ro",
+		filter.ApplicationIDs,
+		filter.VisibleApplicationEnvScopes,
+		filter.VisibleToUserID,
+	); visibilityClause != "" {
 		where = append(where, visibilityClause)
 		args = append(args, visibilityArgs...)
 	}
@@ -2753,11 +2773,20 @@ INNER JOIN release_order ro ON ro.id = ar.release_order_id`
 	return items, total, nil
 }
 
-func buildReleaseOrderVisibilityClause(applicationIDs []string, viewerUserID string) (string, []any) {
-	return buildReleaseOrderVisibilityClauseWithAlias("", applicationIDs, viewerUserID)
+func buildReleaseOrderVisibilityClause(
+	applicationIDs []string,
+	applicationEnvScopes []domain.ApplicationEnvScope,
+	viewerUserID string,
+) (string, []any) {
+	return buildReleaseOrderVisibilityClauseWithAlias("", applicationIDs, applicationEnvScopes, viewerUserID)
 }
 
-func buildReleaseOrderVisibilityClauseWithAlias(alias string, applicationIDs []string, viewerUserID string) (string, []any) {
+func buildReleaseOrderVisibilityClauseWithAlias(
+	alias string,
+	applicationIDs []string,
+	applicationEnvScopes []domain.ApplicationEnvScope,
+	viewerUserID string,
+) (string, []any) {
 	qualified := func(column string) string {
 		if strings.TrimSpace(alias) == "" {
 			return column
@@ -2778,6 +2807,19 @@ func buildReleaseOrderVisibilityClauseWithAlias(alias string, applicationIDs []s
 	}
 	if len(placeholders) > 0 {
 		parts = append(parts, qualified("application_id")+" IN ("+strings.Join(placeholders, ", ")+")")
+	}
+	envParts := make([]string, 0, len(applicationEnvScopes))
+	for _, item := range applicationEnvScopes {
+		applicationID := strings.TrimSpace(item.ApplicationID)
+		envCode := strings.TrimSpace(item.EnvCode)
+		if applicationID == "" || envCode == "" {
+			continue
+		}
+		envParts = append(envParts, "("+qualified("application_id")+" = ? AND "+qualified("env_code")+" = ?)")
+		args = append(args, applicationID, envCode)
+	}
+	if len(envParts) > 0 {
+		parts = append(parts, "("+strings.Join(envParts, " OR ")+")")
 	}
 	if value := strings.TrimSpace(viewerUserID); value != "" {
 		parts = append(parts, qualified("creator_user_id")+" = ?")
@@ -2905,8 +2947,8 @@ func (r *ReleaseRepository) insertTemplateHooks(
 ) error {
 	const insertHook = `
 INSERT INTO release_template_hook (
-	id, template_id, hook_type, name, trigger_condition, failure_policy, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+	id, template_id, hook_type, name, trigger_condition, failure_policy, env_codes_json, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
 
 	for _, item := range hooks {
 		if _, err := tx.ExecContext(
@@ -2918,6 +2960,7 @@ INSERT INTO release_template_hook (
 			item.Name,
 			string(item.TriggerCondition),
 			string(item.FailurePolicy),
+			marshalStringSlice(item.EnvCodes),
 			item.TargetID,
 			item.TargetName,
 			item.WebhookMethod,
@@ -3029,7 +3072,7 @@ func (r *ReleaseRepository) listTemplateHooks(
 	templateID string,
 ) ([]domain.ReleaseTemplateHook, error) {
 	const q = `
-SELECT id, template_id, hook_type, name, trigger_condition, failure_policy, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
+SELECT id, template_id, hook_type, name, trigger_condition, failure_policy, env_codes_json, target_id, target_name, webhook_method, webhook_url, webhook_body, note, sort_no, created_at, updated_at
 FROM release_template_hook
 WHERE template_id = ?
 ORDER BY sort_no ASC, created_at ASC;`
@@ -3492,6 +3535,7 @@ func scanReleaseTemplateHook(s scanner) (domain.ReleaseTemplateHook, error) {
 		hookType         string
 		triggerCondition string
 		failurePolicy    string
+		envCodesJSON     string
 		createdAt        int64
 		updatedAt        int64
 	)
@@ -3502,6 +3546,7 @@ func scanReleaseTemplateHook(s scanner) (domain.ReleaseTemplateHook, error) {
 		&item.Name,
 		&triggerCondition,
 		&failurePolicy,
+		&envCodesJSON,
 		&item.TargetID,
 		&item.TargetName,
 		&item.WebhookMethod,
@@ -3517,6 +3562,7 @@ func scanReleaseTemplateHook(s scanner) (domain.ReleaseTemplateHook, error) {
 	item.HookType = domain.TemplateHookType(hookType)
 	item.TriggerCondition = domain.TemplateHookTriggerCondition(triggerCondition)
 	item.FailurePolicy = domain.TemplateHookFailurePolicy(failurePolicy)
+	item.EnvCodes = unmarshalStringSlice(envCodesJSON)
 	item.CreatedAt = time.Unix(0, createdAt).UTC()
 	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
 	return item, nil

@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -17,36 +18,39 @@ type AgentTaskManager struct {
 }
 
 type AgentTaskOutput struct {
-	ID             string                 `json:"id"`
-	AgentID        string                 `json:"agent_id"`
-	AgentCode      string                 `json:"agent_code"`
-	Name           string                 `json:"name"`
-	TaskMode       string                 `json:"task_mode"`
-	TaskType       string                 `json:"task_type"`
-	ShellType      string                 `json:"shell_type"`
-	WorkDir        string                 `json:"work_dir"`
-	ScriptID       string                 `json:"script_id"`
-	ScriptName     string                 `json:"script_name"`
-	ScriptPath     string                 `json:"script_path"`
-	ScriptText     string                 `json:"script_text"`
-	Variables      map[string]string      `json:"variables"`
-	TimeoutSec     int                    `json:"timeout_sec"`
-	Status         agentdomain.TaskStatus `json:"status"`
-	ClaimedAt      *time.Time             `json:"claimed_at,omitempty"`
-	StartedAt      *time.Time             `json:"started_at,omitempty"`
-	FinishedAt     *time.Time             `json:"finished_at,omitempty"`
-	ExitCode       int                    `json:"exit_code"`
-	StdoutText     string                 `json:"stdout_text"`
-	StderrText     string                 `json:"stderr_text"`
-	FailureReason  string                 `json:"failure_reason"`
-	RunCount       int                    `json:"run_count"`
-	SuccessCount   int                    `json:"success_count"`
-	FailureCount   int                    `json:"failure_count"`
-	LastRunStatus  string                 `json:"last_run_status"`
-	LastRunSummary string                 `json:"last_run_summary"`
-	CreatedBy      string                 `json:"created_by"`
-	CreatedAt      time.Time              `json:"created_at"`
-	UpdatedAt      time.Time              `json:"updated_at"`
+	ID              string                 `json:"id"`
+	AgentID         string                 `json:"agent_id"`
+	AgentCode       string                 `json:"agent_code"`
+	TargetAgentIDs  []string               `json:"target_agent_ids"`
+	SourceTaskID    string                 `json:"source_task_id"`
+	DispatchBatchID string                 `json:"dispatch_batch_id"`
+	Name            string                 `json:"name"`
+	TaskMode        string                 `json:"task_mode"`
+	TaskType        string                 `json:"task_type"`
+	ShellType       string                 `json:"shell_type"`
+	WorkDir         string                 `json:"work_dir"`
+	ScriptID        string                 `json:"script_id"`
+	ScriptName      string                 `json:"script_name"`
+	ScriptPath      string                 `json:"script_path"`
+	ScriptText      string                 `json:"script_text"`
+	Variables       map[string]string      `json:"variables"`
+	TimeoutSec      int                    `json:"timeout_sec"`
+	Status          agentdomain.TaskStatus `json:"status"`
+	ClaimedAt       *time.Time             `json:"claimed_at,omitempty"`
+	StartedAt       *time.Time             `json:"started_at,omitempty"`
+	FinishedAt      *time.Time             `json:"finished_at,omitempty"`
+	ExitCode        int                    `json:"exit_code"`
+	StdoutText      string                 `json:"stdout_text"`
+	StderrText      string                 `json:"stderr_text"`
+	FailureReason   string                 `json:"failure_reason"`
+	RunCount        int                    `json:"run_count"`
+	SuccessCount    int                    `json:"success_count"`
+	FailureCount    int                    `json:"failure_count"`
+	LastRunStatus   string                 `json:"last_run_status"`
+	LastRunSummary  string                 `json:"last_run_summary"`
+	CreatedBy       string                 `json:"created_by"`
+	CreatedAt       time.Time              `json:"created_at"`
+	UpdatedAt       time.Time              `json:"updated_at"`
 }
 
 type AgentTaskListOutput struct {
@@ -55,18 +59,19 @@ type AgentTaskListOutput struct {
 }
 
 type CreateAgentTaskInput struct {
-	AgentID    string
-	Name       string
-	TaskMode   string
-	TaskType   string
-	ShellType  string
-	WorkDir    string
-	ScriptID   string
-	ScriptPath string
-	ScriptText string
-	Variables  map[string]string
-	TimeoutSec int
-	CreatedBy  string
+	AgentID        string
+	TargetAgentIDs []string
+	Name           string
+	TaskMode       string
+	TaskType       string
+	ShellType      string
+	WorkDir        string
+	ScriptID       string
+	ScriptPath     string
+	ScriptText     string
+	Variables      map[string]string
+	TimeoutSec     int
+	CreatedBy      string
 }
 
 type UpdateAgentTaskInput struct {
@@ -84,6 +89,10 @@ type StopAgentTaskInput struct {
 }
 
 type ResumeAgentTaskInput struct {
+	AgentID string
+}
+
+type ExecuteAgentTaskInput struct {
 	AgentID string
 }
 
@@ -145,34 +154,42 @@ func (uc *AgentTaskManager) Create(ctx context.Context, input CreateAgentTaskInp
 	}
 	now := uc.now()
 	initialStatus := agentdomain.TaskStatusPending
-	if instance.ID != "" {
+	targetAgentIDs := normalizeTaskTargetAgentIDs(input.TargetAgentIDs)
+	if taskMode == agentdomain.TaskModeTemporary {
+		initialStatus = agentdomain.TaskStatusDraft
+		if len(targetAgentIDs) > 0 {
+			instance = agentdomain.Instance{}
+		}
+	} else if instance.ID != "" {
 		initialStatus, err = uc.resolveNewTaskStatus(ctx, instance.ID, "")
 		if err != nil {
 			return AgentTaskOutput{}, err
 		}
+		targetAgentIDs = nil
 	}
 	item := agentdomain.Task{
-		ID:            generateID("agtask"),
-		AgentID:       strings.TrimSpace(instance.ID),
-		AgentCode:     strings.TrimSpace(instance.AgentCode),
-		Name:          name,
-		TaskMode:      taskMode,
-		TaskType:      script.TaskType,
-		ShellType:     script.ShellType,
-		WorkDir:       workDir,
-		ScriptID:      script.ScriptID,
-		ScriptName:    script.ScriptName,
-		ScriptPath:    script.ScriptPath,
-		ScriptText:    script.ScriptText,
-		Variables:     normalizeTaskVariables(input.Variables),
-		TimeoutSec:    timeoutSec,
-		Status:        initialStatus,
-		CreatedBy:     strings.TrimSpace(input.CreatedBy),
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		StdoutText:    "",
-		StderrText:    "",
-		FailureReason: "",
+		ID:             generateID("agtask"),
+		AgentID:        strings.TrimSpace(instance.ID),
+		AgentCode:      strings.TrimSpace(instance.AgentCode),
+		TargetAgentIDs: targetAgentIDs,
+		Name:           name,
+		TaskMode:       taskMode,
+		TaskType:       script.TaskType,
+		ShellType:      script.ShellType,
+		WorkDir:        workDir,
+		ScriptID:       script.ScriptID,
+		ScriptName:     script.ScriptName,
+		ScriptPath:     script.ScriptPath,
+		ScriptText:     script.ScriptText,
+		Variables:      normalizeTaskVariables(input.Variables),
+		TimeoutSec:     timeoutSec,
+		Status:         initialStatus,
+		CreatedBy:      strings.TrimSpace(input.CreatedBy),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		StdoutText:     "",
+		StderrText:     "",
+		FailureReason:  "",
 	}
 	created, err := uc.repo.CreateTask(ctx, item)
 	if err != nil {
@@ -189,6 +206,10 @@ func (uc *AgentTaskManager) List(ctx context.Context, page, pageSize int) (Agent
 		Page:     page,
 		PageSize: pageSize,
 	})
+	if err != nil {
+		return AgentTaskListOutput{}, err
+	}
+	items, err = syncManagedScriptSnapshotsForTasks(ctx, uc.repo, items, nil)
 	if err != nil {
 		return AgentTaskListOutput{}, err
 	}
@@ -266,6 +287,10 @@ func (uc *AgentTaskManager) ListByAgent(ctx context.Context, agentID string, pag
 	if err != nil {
 		return AgentTaskListOutput{}, err
 	}
+	items, err = syncManagedScriptSnapshotsForTasks(ctx, uc.repo, items, nil)
+	if err != nil {
+		return AgentTaskListOutput{}, err
+	}
 	outputs := make([]AgentTaskOutput, 0, len(items))
 	for _, item := range items {
 		outputs = append(outputs, toAgentTaskOutput(item))
@@ -278,6 +303,10 @@ func (uc *AgentTaskManager) Get(ctx context.Context, taskID string) (AgentTaskOu
 		return AgentTaskOutput{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
 	}
 	item, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	item, err = syncManagedScriptSnapshotForTask(ctx, uc.repo, item, nil)
 	if err != nil {
 		return AgentTaskOutput{}, err
 	}
@@ -340,6 +369,55 @@ func (uc *AgentTaskManager) Resume(ctx context.Context, taskID string, input Res
 	return toAgentTaskOutput(updated), nil
 }
 
+func (uc *AgentTaskManager) Execute(ctx context.Context, taskID string, input ExecuteAgentTaskInput) (AgentTaskOutput, error) {
+	if uc == nil || uc.repo == nil {
+		return AgentTaskOutput{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	current, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	current, err = syncManagedScriptSnapshotForTask(ctx, uc.repo, current, nil)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	if strings.TrimSpace(input.AgentID) != "" && current.AgentID != strings.TrimSpace(input.AgentID) {
+		return AgentTaskOutput{}, agentdomain.ErrTaskNotFound
+	}
+	if current.TaskMode != agentdomain.TaskModeTemporary {
+		return AgentTaskOutput{}, fmt.Errorf("%w: only temporary task can be executed manually", ErrInvalidInput)
+	}
+	if len(current.TargetAgentIDs) > 0 {
+		updated, err := uc.executeBoundTemporaryTask(ctx, current)
+		if err != nil {
+			return AgentTaskOutput{}, err
+		}
+		return toAgentTaskOutput(updated), nil
+	}
+	if strings.TrimSpace(current.AgentID) == "" {
+		return AgentTaskOutput{}, fmt.Errorf("%w: task is not assigned to any agent", ErrInvalidInput)
+	}
+	instance, err := uc.repo.GetInstanceByID(ctx, current.AgentID)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	if instance.Status != agentdomain.StatusActive {
+		return AgentTaskOutput{}, fmt.Errorf("%w: target agent is not active", ErrInvalidInput)
+	}
+	nextStatus, err := uc.resolveNewTaskStatus(ctx, current.AgentID, current.ID)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	updated, err := uc.repo.ActivateTemporaryTask(ctx, current.ID, nextStatus, uc.now())
+	if err != nil {
+		if errors.Is(err, agentdomain.ErrTaskNotClaimable) {
+			return AgentTaskOutput{}, fmt.Errorf("%w: task is already queued or executing", ErrInvalidInput)
+		}
+		return AgentTaskOutput{}, err
+	}
+	return toAgentTaskOutput(updated), nil
+}
+
 func (uc *AgentTaskManager) Delete(ctx context.Context, taskID string, input StopAgentTaskInput) error {
 	if uc == nil || uc.repo == nil {
 		return fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
@@ -350,6 +428,144 @@ func (uc *AgentTaskManager) Delete(ctx context.Context, taskID string, input Sto
 	}
 	if strings.TrimSpace(input.AgentID) != "" && current.AgentID != strings.TrimSpace(input.AgentID) {
 		return agentdomain.ErrTaskNotFound
+	}
+	if current.TaskMode != agentdomain.TaskModeResident {
+		return fmt.Errorf("%w: only resident task can be deleted", ErrInvalidInput)
+	}
+	if current.Status == agentdomain.TaskStatusRunning || current.Status == agentdomain.TaskStatusClaimed {
+		return fmt.Errorf("%w: resident task is executing, please stop it first", ErrInvalidInput)
+	}
+	return uc.repo.DeleteTask(ctx, current.ID)
+}
+
+func (uc *AgentTaskManager) UpdateTemporaryTask(ctx context.Context, taskID string, input UpdateAgentTaskInput) (AgentTaskOutput, error) {
+	if uc == nil || uc.repo == nil {
+		return AgentTaskOutput{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	current, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	// 只允许编辑手动创建的临时任务（source_task_id 为空）
+	if current.TaskMode != agentdomain.TaskModeTemporary || current.SourceTaskID != "" {
+		return AgentTaskOutput{}, fmt.Errorf("%w: only manual temporary task can be edited", ErrInvalidInput)
+	}
+	if current.Status == agentdomain.TaskStatusRunning || current.Status == agentdomain.TaskStatusClaimed {
+		return AgentTaskOutput{}, fmt.Errorf("%w: temporary task is executing, please edit later", ErrInvalidInput)
+	}
+	script, err := uc.resolveTaskScript(ctx, input.ScriptID, current.TaskType, current.ShellType, current.ScriptPath, current.ScriptText)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = current.Name
+	}
+	workDir := strings.TrimSpace(input.WorkDir)
+	if workDir == "" {
+		workDir = current.WorkDir
+	}
+	timeoutSec := input.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = current.TimeoutSec
+	}
+	if timeoutSec > 3600 {
+		timeoutSec = 3600
+	}
+	current.Name = name
+	current.WorkDir = workDir
+	current.TaskType = script.TaskType
+	current.ShellType = script.ShellType
+	current.ScriptID = script.ScriptID
+	current.ScriptName = script.ScriptName
+	current.ScriptPath = script.ScriptPath
+	current.ScriptText = script.ScriptText
+	current.Variables = normalizeTaskVariables(input.Variables)
+	current.TimeoutSec = timeoutSec
+	current.UpdatedAt = uc.now()
+	updated, err := uc.repo.UpdateTask(ctx, current)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	return toAgentTaskOutput(updated), nil
+}
+
+func (uc *AgentTaskManager) DeleteTemporaryTask(ctx context.Context, taskID string) error {
+	if uc == nil || uc.repo == nil {
+		return fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	current, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return err
+	}
+	// 只允许删除手动创建的临时任务（source_task_id 为空）
+	if current.TaskMode != agentdomain.TaskModeTemporary || current.SourceTaskID != "" {
+		return fmt.Errorf("%w: only manual temporary task can be deleted", ErrInvalidInput)
+	}
+	if current.Status == agentdomain.TaskStatusRunning || current.Status == agentdomain.TaskStatusClaimed {
+		return fmt.Errorf("%w: temporary task is executing, please stop it first", ErrInvalidInput)
+	}
+	return uc.repo.DeleteTask(ctx, current.ID)
+}
+
+func (uc *AgentTaskManager) UpdateResidentTask(ctx context.Context, taskID string, input UpdateAgentTaskInput) (AgentTaskOutput, error) {
+	if uc == nil || uc.repo == nil {
+		return AgentTaskOutput{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	current, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	if current.TaskMode != agentdomain.TaskModeResident {
+		return AgentTaskOutput{}, fmt.Errorf("%w: only resident task can be edited", ErrInvalidInput)
+	}
+	if current.Status == agentdomain.TaskStatusRunning || current.Status == agentdomain.TaskStatusClaimed {
+		return AgentTaskOutput{}, fmt.Errorf("%w: resident task is executing, please edit later", ErrInvalidInput)
+	}
+	script, err := uc.resolveTaskScript(ctx, input.ScriptID, current.TaskType, current.ShellType, current.ScriptPath, current.ScriptText)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = current.Name
+	}
+	workDir := strings.TrimSpace(input.WorkDir)
+	if workDir == "" {
+		workDir = current.WorkDir
+	}
+	timeoutSec := input.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = current.TimeoutSec
+	}
+	if timeoutSec > 3600 {
+		timeoutSec = 3600
+	}
+	current.Name = name
+	current.WorkDir = workDir
+	current.TaskType = script.TaskType
+	current.ShellType = script.ShellType
+	current.ScriptID = script.ScriptID
+	current.ScriptName = script.ScriptName
+	current.ScriptPath = script.ScriptPath
+	current.ScriptText = script.ScriptText
+	current.Variables = normalizeTaskVariables(input.Variables)
+	current.TimeoutSec = timeoutSec
+	current.UpdatedAt = uc.now()
+	updated, err := uc.repo.UpdateTask(ctx, current)
+	if err != nil {
+		return AgentTaskOutput{}, err
+	}
+	return toAgentTaskOutput(updated), nil
+}
+
+func (uc *AgentTaskManager) DeleteResidentTask(ctx context.Context, taskID string) error {
+	if uc == nil || uc.repo == nil {
+		return fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	current, err := uc.repo.GetTaskByID(ctx, strings.TrimSpace(taskID))
+	if err != nil {
+		return err
 	}
 	if current.TaskMode != agentdomain.TaskModeResident {
 		return fmt.Errorf("%w: only resident task can be deleted", ErrInvalidInput)
@@ -374,6 +590,10 @@ func (uc *AgentTaskManager) Poll(ctx context.Context, input AgentTaskPollInput) 
 	}
 	if !claimed {
 		return nil, nil
+	}
+	task, err = syncManagedScriptSnapshotForTask(ctx, uc.repo, task, nil)
+	if err != nil {
+		return nil, err
 	}
 	output := toAgentTaskOutput(task)
 	return &output, nil
@@ -400,6 +620,11 @@ func (uc *AgentTaskManager) Start(ctx context.Context, agentCode, token, taskID 
 	}
 	if _, err = uc.repo.UpdateRuntimeTask(ctx, instance.ID, buildRunningRuntimeTaskPayload(updated)); err != nil {
 		return AgentTaskOutput{}, err
+	}
+	if strings.TrimSpace(updated.SourceTaskID) != "" && strings.TrimSpace(updated.DispatchBatchID) != "" {
+		if _, err = uc.syncSourceTemporaryTaskState(ctx, updated.SourceTaskID, updated.DispatchBatchID); err != nil {
+			return AgentTaskOutput{}, err
+		}
 	}
 	return toAgentTaskOutput(updated), nil
 }
@@ -446,7 +671,100 @@ func (uc *AgentTaskManager) Finish(ctx context.Context, input FinishAgentTaskInp
 	if _, err = uc.repo.UpdateRuntimeTask(ctx, instance.ID, buildFinishedRuntimeTaskPayload(updated)); err != nil {
 		return AgentTaskOutput{}, err
 	}
+	if strings.TrimSpace(updated.SourceTaskID) != "" && strings.TrimSpace(updated.DispatchBatchID) != "" {
+		if _, err = uc.syncSourceTemporaryTaskState(ctx, updated.SourceTaskID, updated.DispatchBatchID); err != nil {
+			return AgentTaskOutput{}, err
+		}
+	}
 	return toAgentTaskOutput(updated), nil
+}
+
+func (uc *AgentTaskManager) executeBoundTemporaryTask(ctx context.Context, sourceTask agentdomain.Task) (agentdomain.Task, error) {
+	if uc == nil || uc.repo == nil {
+		return agentdomain.Task{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	activeChildren, _, err := uc.repo.ListTasks(ctx, agentdomain.TaskListFilter{
+		SourceTaskID: strings.TrimSpace(sourceTask.ID),
+		Statuses:     activeDispatchTaskStatuses,
+		Page:         1,
+		PageSize:     500,
+	})
+	if err != nil {
+		return agentdomain.Task{}, err
+	}
+	if len(activeChildren) > 0 {
+		return agentdomain.Task{}, fmt.Errorf("%w: task already has an active dispatch batch", ErrInvalidInput)
+	}
+	targets, err := resolveTaskDispatchTargets(ctx, uc.repo, sourceTask)
+	if err != nil {
+		return agentdomain.Task{}, err
+	}
+	batchID := generateID("agbatch")
+	dispatched, err := dispatchTemporaryTaskBatch(
+		ctx,
+		uc.repo,
+		sourceTask,
+		targets,
+		strings.TrimSpace(sourceTask.Name),
+		sourceTask.Variables,
+		firstNonEmptyAgentString(strings.TrimSpace(sourceTask.CreatedBy), "manual_execute"),
+		batchID,
+		uc.now,
+	)
+	if err != nil {
+		return agentdomain.Task{}, err
+	}
+	nextStatus := aggregateTaskBatchStatus(dispatched)
+	sourceTask.Status = nextStatus
+	sourceTask.LastRunStatus = nextStatus
+	sourceTask.LastRunSummary = buildTaskBatchSummary("已下发执行批次", dispatched)
+	sourceTask.DispatchBatchID = batchID
+	sourceTask.RunCount++
+	sourceTask.UpdatedAt = uc.now()
+	return uc.repo.UpdateTask(ctx, sourceTask)
+}
+
+func (uc *AgentTaskManager) syncSourceTemporaryTaskState(ctx context.Context, sourceTaskID string, batchID string) (agentdomain.Task, error) {
+	if uc == nil || uc.repo == nil {
+		return agentdomain.Task{}, fmt.Errorf("%w: agent task manager is not configured", ErrInvalidInput)
+	}
+	sourceTaskID = strings.TrimSpace(sourceTaskID)
+	batchID = strings.TrimSpace(batchID)
+	if sourceTaskID == "" || batchID == "" {
+		return agentdomain.Task{}, fmt.Errorf("%w: source task batch identity is required", ErrInvalidInput)
+	}
+	source, err := uc.repo.GetTaskByID(ctx, sourceTaskID)
+	if err != nil {
+		return agentdomain.Task{}, err
+	}
+	items, _, err := uc.repo.ListTasks(ctx, agentdomain.TaskListFilter{
+		SourceTaskID:    sourceTaskID,
+		DispatchBatchID: batchID,
+		Page:            1,
+		PageSize:        500,
+	})
+	if err != nil {
+		return agentdomain.Task{}, err
+	}
+	if len(items) == 0 {
+		return source, nil
+	}
+	nextStatus := aggregateTaskBatchStatus(items)
+	previousBatchID := strings.TrimSpace(source.DispatchBatchID)
+	source.Status = nextStatus
+	source.LastRunStatus = nextStatus
+	source.LastRunSummary = buildTaskBatchSummary("最近一轮执行状态", items)
+	source.UpdatedAt = uc.now()
+	isTerminal := nextStatus == agentdomain.TaskStatusSuccess || nextStatus == agentdomain.TaskStatusFailed || nextStatus == agentdomain.TaskStatusCancelled
+	if isTerminal && previousBatchID == batchID {
+		if nextStatus == agentdomain.TaskStatusSuccess {
+			source.SuccessCount++
+		} else {
+			source.FailureCount++
+		}
+		source.DispatchBatchID = ""
+	}
+	return uc.repo.UpdateTask(ctx, source)
 }
 
 type resolvedTaskScript struct {
@@ -562,6 +880,8 @@ func (uc *AgentTaskManager) resolveNewTaskStatus(ctx context.Context, agentID, e
 
 func toAgentTaskOutput(item agentdomain.Task) AgentTaskOutput {
 	variables := make(map[string]string, len(item.Variables))
+	targetAgentIDs := make([]string, 0, len(item.TargetAgentIDs))
+	targetAgentIDs = append(targetAgentIDs, item.TargetAgentIDs...)
 	keys := make([]string, 0, len(item.Variables))
 	for key := range item.Variables {
 		keys = append(keys, key)
@@ -571,36 +891,39 @@ func toAgentTaskOutput(item agentdomain.Task) AgentTaskOutput {
 		variables[key] = item.Variables[key]
 	}
 	return AgentTaskOutput{
-		ID:             item.ID,
-		AgentID:        item.AgentID,
-		AgentCode:      item.AgentCode,
-		Name:           item.Name,
-		TaskMode:       string(item.TaskMode),
-		TaskType:       item.TaskType,
-		ShellType:      item.ShellType,
-		WorkDir:        item.WorkDir,
-		ScriptID:       item.ScriptID,
-		ScriptName:     item.ScriptName,
-		ScriptPath:     item.ScriptPath,
-		ScriptText:     item.ScriptText,
-		Variables:      variables,
-		TimeoutSec:     item.TimeoutSec,
-		Status:         item.Status,
-		ClaimedAt:      item.ClaimedAt,
-		StartedAt:      item.StartedAt,
-		FinishedAt:     item.FinishedAt,
-		ExitCode:       item.ExitCode,
-		StdoutText:     item.StdoutText,
-		StderrText:     item.StderrText,
-		FailureReason:  item.FailureReason,
-		RunCount:       item.RunCount,
-		SuccessCount:   item.SuccessCount,
-		FailureCount:   item.FailureCount,
-		LastRunStatus:  string(item.LastRunStatus),
-		LastRunSummary: item.LastRunSummary,
-		CreatedBy:      item.CreatedBy,
-		CreatedAt:      item.CreatedAt,
-		UpdatedAt:      item.UpdatedAt,
+		ID:              item.ID,
+		AgentID:         item.AgentID,
+		AgentCode:       item.AgentCode,
+		TargetAgentIDs:  targetAgentIDs,
+		SourceTaskID:    item.SourceTaskID,
+		DispatchBatchID: item.DispatchBatchID,
+		Name:            item.Name,
+		TaskMode:        string(item.TaskMode),
+		TaskType:        item.TaskType,
+		ShellType:       item.ShellType,
+		WorkDir:         item.WorkDir,
+		ScriptID:        item.ScriptID,
+		ScriptName:      item.ScriptName,
+		ScriptPath:      item.ScriptPath,
+		ScriptText:      item.ScriptText,
+		Variables:       variables,
+		TimeoutSec:      item.TimeoutSec,
+		Status:          item.Status,
+		ClaimedAt:       item.ClaimedAt,
+		StartedAt:       item.StartedAt,
+		FinishedAt:      item.FinishedAt,
+		ExitCode:        item.ExitCode,
+		StdoutText:      item.StdoutText,
+		StderrText:      item.StderrText,
+		FailureReason:   item.FailureReason,
+		RunCount:        item.RunCount,
+		SuccessCount:    item.SuccessCount,
+		FailureCount:    item.FailureCount,
+		LastRunStatus:   string(item.LastRunStatus),
+		LastRunSummary:  item.LastRunSummary,
+		CreatedBy:       item.CreatedBy,
+		CreatedAt:       item.CreatedAt,
+		UpdatedAt:       item.UpdatedAt,
 	}
 }
 

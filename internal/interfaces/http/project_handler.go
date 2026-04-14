@@ -22,6 +22,50 @@ func NewProjectHandler(manager *usecase.ProjectManager, authz RequestAuthorizer)
 	return &ProjectHandler{manager: manager, authz: authz}
 }
 
+func (h *ProjectHandler) ensureProjectReadable(c *gin.Context) bool {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return false
+	}
+	if h.authz == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "authorizer is not configured"})
+		return false
+	}
+
+	// application.manage 仍然是最强的全局权限，直接放行。
+	manageAllowed, err := h.authz.HasPermission(c.Request.Context(), user, "application.manage", "", "")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	if manageAllowed {
+		return true
+	}
+
+	// 兼容“仅有应用范围的 release.create / application.view”的账号。
+	// 这类账号能看到/操作部分应用，但旧逻辑会导致项目列表永远 403，从而前端无法按项目筛选。
+	items, err := h.authz.ListEffectivePermissions(c.Request.Context(), user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return false
+	}
+	accepted := map[string]struct{}{
+		"application.view": {},
+		"release.view":     {},
+		"release.create":   {},
+		"release.execute":  {},
+		"release.cancel":   {},
+	}
+	applicationIDs, envScopes := collectApplicationScopesFromPermissions(items, accepted)
+	if len(applicationIDs) > 0 || len(envScopes) > 0 {
+		return true
+	}
+
+	c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: permission denied"})
+	return false
+}
+
 func (h *ProjectHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/projects", h.List)
 	router.GET("/projects/:id", h.GetByID)
@@ -70,7 +114,7 @@ func (h *ProjectHandler) Create(c *gin.Context) {
 }
 
 func (h *ProjectHandler) GetByID(c *gin.Context) {
-	if !ensureAnyPermission(c, h.authz, "application.view", "application.manage") {
+	if !h.ensureProjectReadable(c) {
 		return
 	}
 	item, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
@@ -82,7 +126,7 @@ func (h *ProjectHandler) GetByID(c *gin.Context) {
 }
 
 func (h *ProjectHandler) List(c *gin.Context) {
-	if !ensureAnyPermission(c, h.authz, "application.view", "application.manage") {
+	if !h.ensureProjectReadable(c) {
 		return
 	}
 	page, err := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("page", "1")))

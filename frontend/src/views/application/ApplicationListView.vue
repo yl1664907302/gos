@@ -95,19 +95,17 @@ const introVisible = ref(false)
 const collapsedApplicationMap = ref<Record<string, boolean>>({})
 const collapseSeeded = ref(false)
 const viewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1440)
+const firstWorkbenchLoaded = ref(false)
 let autoRefreshTimer: ReturnType<typeof window.setInterval> | null = null
 
 const canManageApplication = computed(() => authStore.hasPermission('application.manage'))
 const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
 const visibleApplicationIDs = computed(() => new Set(dataSource.value.map((item) => String(item.id || '').trim()).filter(Boolean)))
 const workbenchLoading = computed(() => loading.value || loadingTemplateAvailability.value || loadingRecentReleases.value)
-const initialWorkbenchLoading = computed(() => workbenchLoading.value && dataSource.value.length === 0)
+const initialWorkbenchLoading = computed(() => !firstWorkbenchLoaded.value && workbenchLoading.value && dataSource.value.length === 0)
 
 const filters = computed(() => ({
-  key: String(listStore.key || '').trim() || undefined,
-  name: String(listStore.name || '').trim() || undefined,
   project_id: String(listStore.project_id || '').trim() || undefined,
-  status: listStore.status || undefined,
   page: listStore.page,
   page_size: listStore.pageSize,
 }))
@@ -434,7 +432,7 @@ async function loadRecentReleases(options: { silent?: boolean } = {}) {
   }
 }
 
-function handleSearch() {
+function handleProjectChange() {
   listStore.setPage(1, listStore.pageSize)
   void (async () => {
     await loadApplications()
@@ -689,6 +687,7 @@ onMounted(() => {
     await loadProjectOptions()
     await loadApplications()
     await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
+    firstWorkbenchLoaded.value = true
   })()
   window.addEventListener('resize', handleResize)
   startAutoRefresh()
@@ -705,7 +704,7 @@ onUnmounted(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">我的应用</h2>
-        <p class="page-subtitle">围绕应用查看环境状态、最近发布与可用动作，把发布入口直接放到工作台第一屏。</p>
+        <p class="page-subtitle">围绕应用查看环境状态、最近发布与可用动作，把发布入口直接放到工作台第一屏</p>
       </div>
       <a-space>
         <a-button @click="openIntroDrawer">
@@ -785,29 +784,11 @@ onUnmounted(() => {
               placeholder="请选择项目"
               :loading="loadingProjects"
               :options="projectOptions"
-            />
-          </a-form-item>
-          <a-form-item label="Key">
-            <a-input v-model:value="listStore.key" allow-clear placeholder="按 app_key 查询" />
-          </a-form-item>
-          <a-form-item label="名称">
-            <a-input v-model:value="listStore.name" allow-clear placeholder="按应用名称查询" />
-          </a-form-item>
-          <a-form-item label="状态">
-            <a-select
-              v-model:value="listStore.status"
-              class="filter-status-select"
-              allow-clear
-              placeholder="全部"
-              :options="[
-                { label: '启用中', value: 'active' },
-                { label: '已停用', value: 'inactive' },
-              ]"
+              @change="handleProjectChange"
             />
           </a-form-item>
           <a-form-item class="filter-form-actions">
             <a-space>
-              <a-button type="primary" @click="handleSearch">查询</a-button>
               <a-button @click="handleReset">重置</a-button>
             </a-space>
           </a-form-item>

@@ -121,8 +121,10 @@ func main() {
 	gitopsInstanceManager := usecase.NewGitOpsInstanceManager(gitopsRepo, gitopsServiceFactory, platformParamRepo)
 	argocdInstanceManager := usecase.NewArgoCDInstanceManager(argocdAppRepo, gitopsRepo, argocdClientFactory)
 	userManagement := usecase.NewUserManagement(userRepo)
+	releaseStore := configstore.NewReleaseStore(resolvedConfigPath)
 	authSessionManager := usecase.NewAuthSessionManager(
 		userRepo,
+		releaseStore,
 		time.Duration(cfg.Auth.SessionTTLHours)*time.Hour,
 	)
 	if err := userManagement.EnsureSeedData(
@@ -154,7 +156,6 @@ func main() {
 		usecase.NewProjectManager(projectRepo),
 		authSessionManager,
 	)
-	releaseStore := configstore.NewReleaseStore(resolvedConfigPath)
 	releaseSettingsQuery := usecase.NewQueryReleaseSettings(releaseStore)
 	systemSettingsHandler := httpapi.NewSystemSettingsHandler(
 		releaseSettingsQuery,

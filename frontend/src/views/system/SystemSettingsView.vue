@@ -85,7 +85,7 @@ onMounted(() => {
       <div class="toolbar">
         <div class="page-header-copy">
           <div class="page-title">系统设置</div>
-          <div class="page-subtitle">配置发布单基础参数里的环境下拉选项。这里的值会直接用于新建发布单页面。</div>
+          <div class="page-subtitle">配置发布单基础参数里的环境下拉选项。这里的值会直接用于新建发布单页面</div>
         </div>
         <a-space>
           <a-button @click="loadSettings" :loading="loading">刷新</a-button>

@@ -1,7 +1,7 @@
 export type AgentStatus = 'active' | 'disabled' | 'maintenance'
 export type AgentRuntimeState = 'online' | 'offline' | 'busy' | 'disabled' | 'maintenance'
 export type AgentLastTaskStatus = 'unknown' | 'running' | 'success' | 'failed' | 'cancelled'
-export type AgentTaskStatus = 'pending' | 'queued' | 'claimed' | 'running' | 'success' | 'failed' | 'cancelled'
+export type AgentTaskStatus = 'draft' | 'pending' | 'queued' | 'claimed' | 'running' | 'success' | 'failed' | 'cancelled'
 export type AgentTaskMode = 'temporary' | 'resident'
 
 export interface AgentInstance {
@@ -68,11 +68,13 @@ export interface UpsertAgentPayload {
 export interface AgentInstallConfig {
   agent_id: string
   agent_code: string
+  registration_token?: string
   suggested_path: string
   launch_command: string
   config_yaml: string
   resolved_server_url: string
   heartbeat_interval: string
+  poll_interval: string
 }
 
 export type AgentTaskType = 'shell_task' | 'script_file_task' | 'file_distribution_task'
@@ -83,6 +85,9 @@ export interface AgentTask {
   id: string
   agent_id: string
   agent_code: string
+  target_agent_ids: string[]
+  source_task_id: string
+  dispatch_batch_id: string
   name: string
   task_mode: AgentTaskMode
   task_type: AgentTaskType
@@ -133,6 +138,7 @@ export interface CreateAgentTaskPayload {
   script_path?: string
   script_text?: string
   variables?: Record<string, string>
+  target_agent_ids?: string[]
   timeout_sec?: number
 }
 

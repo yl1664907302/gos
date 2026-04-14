@@ -151,6 +151,104 @@ func TestMarkTaskRunning_RequiresClaimedStatus(t *testing.T) {
 	}
 }
 
+func TestBootstrapToken_IsPersistedUntilReset(t *testing.T) {
+	t.Parallel()
+
+	repo := newTestAgentRepository(t)
+	ctx := context.Background()
+
+	first, err := repo.GetBootstrapToken(ctx)
+	if err != nil {
+		t.Fatalf("GetBootstrapToken first failed: %v", err)
+	}
+	if first == "" {
+		t.Fatalf("GetBootstrapToken first returned empty token")
+	}
+
+	second, err := repo.GetBootstrapToken(ctx)
+	if err != nil {
+		t.Fatalf("GetBootstrapToken second failed: %v", err)
+	}
+	if second != first {
+		t.Fatalf("GetBootstrapToken second = %q, want %q", second, first)
+	}
+
+	rotated, err := repo.ResetBootstrapToken(ctx)
+	if err != nil {
+		t.Fatalf("ResetBootstrapToken failed: %v", err)
+	}
+	if rotated == "" || rotated == first {
+		t.Fatalf("ResetBootstrapToken returned %q, want a different non-empty token", rotated)
+	}
+}
+
+func TestActivateTemporaryTask_TransitionsDraftTaskIntoQueue(t *testing.T) {
+	t.Parallel()
+
+	repo := newTestAgentRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	instance := domain.Instance{
+		ID:              "agt-3",
+		MachineID:       "machine-3",
+		AgentCode:       "agent-3",
+		Name:            "Agent 3",
+		EnvironmentCode: "prod",
+		WorkDir:         "/tmp/agent-3",
+		Token:           "token-3",
+		Status:          domain.StatusActive,
+		LastTaskStatus:  domain.LastTaskStatusUnknown,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if _, err := repo.CreateInstance(ctx, instance); err != nil {
+		t.Fatalf("CreateInstance failed: %v", err)
+	}
+
+	draft := domain.Task{
+		ID:         "task-draft",
+		AgentID:    instance.ID,
+		AgentCode:  instance.AgentCode,
+		Name:       "draft task",
+		TaskMode:   domain.TaskModeTemporary,
+		TaskType:   string(domain.TaskTypeShellScript),
+		ShellType:  "sh",
+		WorkDir:    instance.WorkDir,
+		ScriptText: "echo draft",
+		Variables:  map[string]string{},
+		TimeoutSec: 30,
+		Status:     domain.TaskStatusDraft,
+		CreatedBy:  "test",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if _, err := repo.CreateTask(ctx, draft); err != nil {
+		t.Fatalf("CreateTask draft failed: %v", err)
+	}
+
+	if _, claimed, err := repo.ClaimNextPendingTask(ctx, instance.ID, now); err != nil {
+		t.Fatalf("ClaimNextPendingTask before activate failed: %v", err)
+	} else if claimed {
+		t.Fatalf("ClaimNextPendingTask claimed draft task before activation")
+	}
+
+	if _, err := repo.ActivateTemporaryTask(ctx, draft.ID, domain.TaskStatusPending, now.Add(time.Second)); err != nil {
+		t.Fatalf("ActivateTemporaryTask failed: %v", err)
+	}
+
+	claimedTask, claimed, err := repo.ClaimNextPendingTask(ctx, instance.ID, now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("ClaimNextPendingTask after activate failed: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("ClaimNextPendingTask claimed = false, want true after activate")
+	}
+	if claimedTask.ID != draft.ID {
+		t.Fatalf("ClaimNextPendingTask claimed %s, want %s", claimedTask.ID, draft.ID)
+	}
+}
+
 func newTestAgentRepository(t *testing.T) *AgentRepository {
 	t.Helper()
 

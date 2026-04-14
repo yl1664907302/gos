@@ -3,7 +3,6 @@ package httpapi
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -90,19 +89,10 @@ func (h *SystemSettingsHandler) ensureReleaseSettingsVisible(c *gin.Context) boo
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 		return false
 	}
-	for _, item := range items {
-		if !item.Enabled {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(item.PermissionCode)) != "release.create" {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application" {
-			continue
-		}
-		if strings.TrimSpace(item.ScopeValue) == "" {
-			continue
-		}
+	applicationIDs, envScopes := collectApplicationScopesFromPermissions(items, map[string]struct{}{
+		"release.create": {},
+	})
+	if len(applicationIDs) > 0 || len(envScopes) > 0 {
 		return true
 	}
 

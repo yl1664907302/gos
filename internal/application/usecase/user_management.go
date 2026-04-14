@@ -20,9 +20,10 @@ type UserManagement struct {
 }
 
 type AuthSessionManager struct {
-	repo       userdomain.Repository
-	sessionTTL time.Duration
-	now        func() time.Time
+	repo            userdomain.Repository
+	releaseSettings ReleaseSettingsStore
+	sessionTTL      time.Duration
+	now             func() time.Time
 }
 
 type CreateUserInput struct {
@@ -66,13 +67,18 @@ func NewUserManagement(repo userdomain.Repository) *UserManagement {
 	}
 }
 
-func NewAuthSessionManager(repo userdomain.Repository, sessionTTL time.Duration) *AuthSessionManager {
+func NewAuthSessionManager(
+	repo userdomain.Repository,
+	releaseSettings ReleaseSettingsStore,
+	sessionTTL time.Duration,
+) *AuthSessionManager {
 	if sessionTTL <= 0 {
 		sessionTTL = 24 * time.Hour
 	}
 	return &AuthSessionManager{
-		repo:       repo,
-		sessionTTL: sessionTTL,
+		repo:            repo,
+		releaseSettings: releaseSettings,
+		sessionTTL:      sessionTTL,
 		now: func() time.Time {
 			return time.Now().UTC()
 		},
@@ -292,8 +298,11 @@ func (uc *UserManagement) GrantUserPermissions(
 			scopeType = "global"
 		}
 		scopeValue := strings.TrimSpace(item.ScopeValue)
-		if scopeType == "application" && scopeValue == "" {
-			return fmt.Errorf("%w: scope_value is required when scope_type=application", ErrInvalidInput)
+		switch scopeType {
+		case "application", "application_env":
+			if scopeValue == "" {
+				return fmt.Errorf("%w: scope_value is required when scope_type=%s", ErrInvalidInput, scopeType)
+			}
 		}
 		clean = append(clean, userdomain.UserPermissionGrant{
 			PermissionCode: code,
@@ -330,8 +339,11 @@ func (uc *UserManagement) RevokeUserPermissions(
 			scopeType = "global"
 		}
 		scopeValue := strings.TrimSpace(item.ScopeValue)
-		if scopeType == "application" && scopeValue == "" {
-			return fmt.Errorf("%w: scope_value is required when scope_type=application", ErrInvalidInput)
+		switch scopeType {
+		case "application", "application_env":
+			if scopeValue == "" {
+				return fmt.Errorf("%w: scope_value is required when scope_type=%s", ErrInvalidInput, scopeType)
+			}
 		}
 		clean = append(clean, userdomain.UserPermissionGrant{
 			PermissionCode: code,
@@ -549,7 +561,11 @@ func (uc *AuthSessionManager) ListEffectivePermissions(ctx context.Context, user
 			},
 		}, nil
 	}
-	return uc.repo.ListUserPermissions(ctx, user.ID)
+	items, err := uc.repo.ListUserPermissions(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	return uc.filterUserPermissionsByCurrentReleaseEnvs(ctx, items)
 }
 
 func (uc *AuthSessionManager) HasPermission(
@@ -571,20 +587,21 @@ func (uc *AuthSessionManager) HasPermission(
 	if err != nil {
 		return false, err
 	}
+	perms, err = uc.filterUserPermissionsByCurrentReleaseEnvs(ctx, perms)
+	if err != nil {
+		return false, err
+	}
 	scopeType = strings.TrimSpace(scopeType)
 	scopeType = strings.ToLower(scopeType)
 	scopeValue = strings.TrimSpace(scopeValue)
-	// release.create/release.execute/release.cancel 在应用发布场景必须命中 application scoped 权限，
-	// 全局授权不再作为这三个动作的兜底，避免绕过“按应用授权”。
-	requireApplicationScope := isReleaseApplicationScopedPermission(code) && scopeType == "application" && scopeValue != ""
 	for _, item := range perms {
 		itemCode := strings.ToLower(strings.TrimSpace(item.PermissionCode))
 		if !item.Enabled || itemCode != code {
 			continue
 		}
 		itemScopeType := strings.ToLower(strings.TrimSpace(item.ScopeType))
-		if requireApplicationScope {
-			if itemScopeType == "application" && strings.TrimSpace(item.ScopeValue) == scopeValue {
+		if isReleaseApplicationScopedPermission(code) {
+			if matchesReleaseScopedPermission(itemScopeType, strings.TrimSpace(item.ScopeValue), scopeType, scopeValue) {
 				return true, nil
 			}
 			continue
@@ -603,11 +620,130 @@ func (uc *AuthSessionManager) HasPermission(
 
 func isReleaseApplicationScopedPermission(code string) bool {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "release.create", "release.execute", "release.cancel":
+	case "release.view", "release.create", "release.execute", "release.cancel":
 		return true
 	default:
 		return false
 	}
+}
+
+func (uc *AuthSessionManager) filterUserPermissionsByCurrentReleaseEnvs(
+	ctx context.Context,
+	items []userdomain.UserPermission,
+) ([]userdomain.UserPermission, error) {
+	if uc == nil || uc.releaseSettings == nil || len(items) == 0 {
+		return items, nil
+	}
+	options, err := uc.releaseSettings.LoadEnvOptions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return filterUserPermissionsByReleaseEnvOptions(items, normalizeReleaseEnvOptionSet(options)), nil
+}
+
+func normalizeReleaseEnvOptionSet(values []string) map[string]struct{} {
+	normalized := normalizeReleaseEnvOptions(values)
+	if len(normalized) == 0 {
+		return map[string]struct{}{}
+	}
+	result := make(map[string]struct{}, len(normalized))
+	for _, item := range normalized {
+		result[item] = struct{}{}
+	}
+	return result
+}
+
+func filterUserPermissionsByReleaseEnvOptions(
+	items []userdomain.UserPermission,
+	validEnvSet map[string]struct{},
+) []userdomain.UserPermission {
+	if len(items) == 0 || validEnvSet == nil {
+		return items
+	}
+	result := make([]userdomain.UserPermission, 0, len(items))
+	for _, item := range items {
+		if strings.ToLower(strings.TrimSpace(item.ScopeType)) != "application_env" {
+			result = append(result, item)
+			continue
+		}
+		_, envCode, ok := parseApplicationEnvScopeValue(item.ScopeValue)
+		if !ok {
+			continue
+		}
+		if _, exists := validEnvSet[envCode]; !exists {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func matchesReleaseScopedPermission(
+	itemScopeType string,
+	itemScopeValue string,
+	targetScopeType string,
+	targetScopeValue string,
+) bool {
+	itemScopeType = strings.ToLower(strings.TrimSpace(itemScopeType))
+	itemScopeValue = strings.TrimSpace(itemScopeValue)
+	targetScopeType = strings.ToLower(strings.TrimSpace(targetScopeType))
+	targetScopeValue = strings.TrimSpace(targetScopeValue)
+
+	switch targetScopeType {
+	case "":
+		if itemScopeType == "application" && itemScopeValue != "" {
+			return true
+		}
+		if itemScopeType == "application_env" {
+			_, _, ok := parseApplicationEnvScopeValue(itemScopeValue)
+			return ok
+		}
+		return false
+	case "application":
+		if targetScopeValue == "" {
+			return false
+		}
+		if itemScopeType == "application" {
+			return itemScopeValue == targetScopeValue
+		}
+		if itemScopeType == "application_env" {
+			applicationID, _, ok := parseApplicationEnvScopeValue(itemScopeValue)
+			return ok && applicationID == targetScopeValue
+		}
+		return false
+	case "application_env":
+		targetApplicationID, targetEnvCode, ok := parseApplicationEnvScopeValue(targetScopeValue)
+		if !ok {
+			return false
+		}
+		if itemScopeType == "application" {
+			return itemScopeValue == targetApplicationID
+		}
+		if itemScopeType == "application_env" {
+			applicationID, envCode, ok := parseApplicationEnvScopeValue(itemScopeValue)
+			return ok && applicationID == targetApplicationID && envCode == targetEnvCode
+		}
+		return false
+	default:
+		return itemScopeType == targetScopeType && itemScopeValue == targetScopeValue
+	}
+}
+
+func parseApplicationEnvScopeValue(value string) (applicationID string, envCode string, ok bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "", "", false
+	}
+	parts := strings.SplitN(text, "::", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	applicationID = strings.TrimSpace(parts[0])
+	envCode = strings.TrimSpace(parts[1])
+	if applicationID == "" || envCode == "" {
+		return "", "", false
+	}
+	return applicationID, envCode, true
 }
 
 func (uc *AuthSessionManager) ResolveParamAccess(

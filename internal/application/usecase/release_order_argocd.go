@@ -601,7 +601,7 @@ func (uc *ReleaseOrderManager) ensureArgoCDExecutionSteps(
 		return nil
 	}
 
-	rebuilt := defaultReleaseOrderSteps(order.ID, executions, uc.now(), gitopsType, nil)
+	rebuilt := defaultReleaseOrderSteps(order.ID, executions, uc.now(), gitopsType, nil, order.EnvCode)
 	existingByCode := make(map[string]domain.ReleaseOrderStep, len(steps))
 	for _, item := range steps {
 		existingByCode[item.StepCode] = item

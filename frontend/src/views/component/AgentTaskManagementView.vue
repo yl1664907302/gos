@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { EyeOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CaretRightOutlined, DeleteOutlined, EditOutlined, EyeOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { createAgentTask, createUnassignedAgentTask, listAgents, listAgentScripts, listAllAgentTasks } from '../../api/agent'
+import { createAgentTask, createUnassignedAgentTask, deleteResidentAgentTask, deleteTemporaryAgentTask, executeAgentTask, executeStandaloneAgentTask, listAgents, listAgentScripts, listAllAgentTasks, updateResidentAgentTask, updateTemporaryAgentTask } from '../../api/agent'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { useAuthStore } from '../../stores/auth'
-import { useRouter } from 'vue-router'
 import type {
   AgentInstance,
   AgentScript,
@@ -38,7 +37,6 @@ interface AgentTaskViewItem extends AgentTask {
 }
 
 const authStore = useAuthStore()
-const router = useRouter()
 const AUTO_REFRESH_INTERVAL = 15000
 
 const loadingAgents = ref(false)
@@ -46,6 +44,8 @@ const refreshingTasks = ref(false)
 const savingTask = ref(false)
 const createTaskVisible = ref(false)
 const previewTaskVisible = ref(false)
+const boundAgentModalVisible = ref(false)
+const currentBoundTask = ref<AgentTaskViewItem | AgentTask | null>(null)
 const dataSource = ref<AgentInstance[]>([])
 const scriptOptions = ref<AgentScript[]>([])
 const platformParamOptions = ref<PlatformParamDict[]>([])
@@ -166,11 +166,6 @@ function closeTaskPreview() {
   previewTaskVisible.value = false
 }
 
-function goToAgentManagement() {
-  createTaskVisible.value = false
-  void router.push('/components/agents')
-}
-
 function normalizeAgents(rows: AgentInstance[]) {
   rows.forEach((item) => {
     // 缓存项无需额外处理，这里预留做展示映射。
@@ -211,6 +206,8 @@ function taskContentLabel(task: AgentTask | null) {
 
 function taskStatusColor(status: AgentTask['status']) {
   switch (status) {
+    case 'draft':
+      return 'cyan'
     case 'success':
       return 'green'
     case 'failed':
@@ -230,6 +227,8 @@ function taskStatusColor(status: AgentTask['status']) {
 
 function taskStatusText(status: AgentTask['status']) {
   switch (status) {
+    case 'draft':
+      return '待执行'
     case 'pending':
       return '待领取'
     case 'queued':
@@ -247,6 +246,27 @@ function taskStatusText(status: AgentTask['status']) {
     default:
       return status
   }
+}
+
+function taskAgentBindingText(task: AgentTaskViewItem | AgentTask) {
+  const targetAgentIDs = task.target_agent_ids || []
+  if (!targetAgentIDs.length) {
+    return '未绑定'
+  }
+  return `绑定 ${targetAgentIDs.length} 台 Agent`
+}
+
+function showBoundAgentsModal(task: AgentTaskViewItem | AgentTask) {
+  currentBoundTask.value = task
+  boundAgentModalVisible.value = true
+}
+
+function getBoundAgentList(task: AgentTaskViewItem | AgentTask | null) {
+  if (!task) return []
+  const targetAgentIDs = task.target_agent_ids || []
+  return targetAgentIDs
+    .map((id) => dataSource.value.find((item) => item.id === id))
+    .filter((item): item is AgentInstance => Boolean(item))
 }
 
 function taskVariableSignature(variables?: Record<string, string>) {
@@ -439,6 +459,18 @@ function clearManagedScript() {
   taskForm.script_text = ''
 }
 
+function canExecuteTemporaryTask(task: AgentTaskViewItem) {
+  return (
+    task.task_mode === 'temporary' &&
+    (Boolean(task.agent_id) || (task.target_agent_ids || []).length > 0) &&
+    ['draft', 'success', 'failed', 'cancelled'].includes(String(task.status || ''))
+  )
+}
+
+function executeActionText(task: AgentTaskViewItem) {
+  return task.run_count > 0 ? '重新执行' : '执行'
+}
+
 async function loadAgents(options: { silent?: boolean } = {}) {
   if (!canViewAgent.value) {
     return
@@ -534,7 +566,9 @@ async function loadTaskViews(options: { silent?: boolean } = {}) {
         claimed_at: latestInstance?.claimed_at || item.claimed_at,
       }
     })
-    historyTaskList.value = allTasks.filter((item) => item.task_mode !== 'resident')
+    // 临时任务列表只展示手动创建的临时任务（source_task_id 为空的）
+    // 排除发布单触发的任务（source_task_id 有值的）
+    historyTaskList.value = allTasks.filter((item) => item.task_mode !== 'resident' && !item.source_task_id)
   } catch (error) {
     if (!options.silent) {
       message.error(extractHTTPErrorMessage(error, '任务视图加载失败'))
@@ -565,12 +599,19 @@ async function handleCreateTask() {
       script_path: taskForm.script_path,
       script_text: taskForm.script_text,
       variables: serializeTaskVariables(),
+      target_agent_ids: taskTargetAgentIDs.value,
       timeout_sec: taskForm.timeout_sec,
     }
-    if (!taskTargetAgentIDs.value.length) {
+    if ((taskForm.task_mode || 'temporary') === 'temporary') {
       await createUnassignedAgentTask(payload)
       historyFilters.agent_id = '__unassigned__'
-      message.success('任务已创建；后续可在 Agent 管理页面进行分发')
+      historyFilters.agent_keyword = ''
+      historyFilters.page = 1
+      message.success(
+        taskTargetAgentIDs.value.length
+          ? `任务已创建，已绑定 ${taskTargetAgentIDs.value.length} 台 Agent；执行时会按绑定关系批量下发`
+          : '任务已创建；后续绑定 Agent 后点击执行才会真正开始',
+      )
     } else {
       const results = await Promise.allSettled(taskTargetAgentIDs.value.map((agentID) => createAgentTask(agentID, payload)))
       const failed = results.filter((item) => item.status === 'rejected') as PromiseRejectedResult[]
@@ -578,7 +619,10 @@ async function handleCreateTask() {
         const firstMessage = extractHTTPErrorMessage(failed[0].reason, '批量下发任务失败')
         throw new Error(taskTargetAgentIDs.value.length === failed.length ? firstMessage : `部分 Agent 下发失败：${firstMessage}`)
       }
-      message.success(`任务已下发到 ${taskTargetAgentIDs.value.length} 台 Agent，等待 Agent 轮询领取`)
+      historyFilters.agent_id = taskTargetAgentIDs.value.length === 1 ? taskTargetAgentIDs.value[0] : ''
+      historyFilters.agent_keyword = ''
+      historyFilters.page = 1
+      message.success(`任务已创建到 ${taskTargetAgentIDs.value.length} 台 Agent，点击执行后才会开始领取`)
     }
     resetTaskForm()
     createTaskVisible.value = false
@@ -587,6 +631,174 @@ async function handleCreateTask() {
     message.error(extractHTTPErrorMessage(error, error instanceof Error ? error.message : '创建任务失败'))
   } finally {
     savingTask.value = false
+  }
+}
+
+async function handleExecuteTemporaryTask(task: AgentTaskViewItem) {
+  try {
+    if (task.agent_id) {
+      await executeAgentTask(task.agent_id, task.id)
+    } else {
+      await executeStandaloneAgentTask(task.id)
+    }
+    message.success(task.run_count > 0 ? '任务已重新进入执行队列' : '任务已进入执行队列')
+    await loadTaskViews({ silent: true })
+    await loadAgents({ silent: true })
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '任务执行失败'))
+  }
+}
+
+function canEditTemporaryTask(task: AgentTaskViewItem) {
+  // 手动创建的临时任务都可以编辑（除了执行中）
+  return !task.source_task_id && task.status !== 'running' && task.status !== 'claimed'
+}
+
+function canDeleteTemporaryTask(task: AgentTaskViewItem) {
+  // 执行中的任务不能删除
+  return task.status !== 'running' && task.status !== 'claimed' && !task.source_task_id
+}
+
+const editTaskVisible = ref(false)
+const editTaskSaving = ref(false)
+const editTaskForm = reactive<CreateAgentTaskPayload>({
+  name: '',
+  task_mode: 'temporary',
+  task_type: 'shell_task',
+  shell_type: 'sh',
+  work_dir: '',
+  script_id: '',
+  script_path: '',
+  script_text: '',
+  variables: {},
+  timeout_sec: 300,
+})
+const editTaskID = ref('')
+const editTaskTargetAgentIDs = ref<string[]>([])
+
+async function handleEditTemporaryTask(task: AgentTaskViewItem) {
+  editTaskID.value = task.id
+  editTaskForm.name = task.name
+  editTaskForm.task_mode = task.task_mode
+  editTaskForm.task_type = task.task_type
+  editTaskForm.shell_type = task.shell_type
+  editTaskForm.work_dir = task.work_dir
+  editTaskForm.script_id = task.script_id
+  editTaskForm.script_path = task.script_path
+  editTaskForm.script_text = task.script_text
+  editTaskForm.variables = { ...task.variables }
+  editTaskForm.timeout_sec = task.timeout_sec
+  editTaskTargetAgentIDs.value = [...(task.target_agent_ids || [])]
+  editTaskVisible.value = true
+}
+
+async function handleSaveEditTemporaryTask() {
+  editTaskSaving.value = true
+  try {
+    if (!editTaskForm.script_id) {
+      throw new Error('请选择脚本')
+    }
+    const payload: CreateAgentTaskPayload = {
+      name: editTaskForm.name,
+      task_mode: editTaskForm.task_mode,
+      task_type: editTaskForm.task_type,
+      shell_type: editTaskForm.shell_type,
+      work_dir: editTaskForm.work_dir,
+      script_id: editTaskForm.script_id,
+      script_path: editTaskForm.script_path,
+      script_text: editTaskForm.script_text,
+      variables: editTaskForm.variables,
+      target_agent_ids: editTaskTargetAgentIDs.value,
+      timeout_sec: editTaskForm.timeout_sec,
+    }
+    await updateTemporaryAgentTask(editTaskID.value, payload)
+    message.success('任务已更新')
+    editTaskVisible.value = false
+    await loadTaskViews({ silent: true })
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '更新任务失败'))
+  } finally {
+    editTaskSaving.value = false
+  }
+}
+
+async function handleDeleteTemporaryTask(taskID: string) {
+  try {
+    await deleteTemporaryAgentTask(taskID)
+    message.success('任务已删除')
+    await loadTaskViews({ silent: true })
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '删除任务失败'))
+  }
+}
+
+const editResidentTaskVisible = ref(false)
+const editResidentTaskSaving = ref(false)
+const editResidentTaskForm = reactive<CreateAgentTaskPayload>({
+  name: '',
+  task_mode: 'resident',
+  task_type: 'shell_task',
+  shell_type: 'sh',
+  work_dir: '',
+  script_id: '',
+  script_path: '',
+  script_text: '',
+  variables: {},
+  timeout_sec: 300,
+})
+const editResidentTaskID = ref('')
+
+function handleEditResidentTask(task: AgentTaskViewItem) {
+  editResidentTaskID.value = task.id
+  editResidentTaskForm.name = task.name
+  editResidentTaskForm.task_mode = task.task_mode
+  editResidentTaskForm.task_type = task.task_type
+  editResidentTaskForm.shell_type = task.shell_type
+  editResidentTaskForm.work_dir = task.work_dir
+  editResidentTaskForm.script_id = task.script_id
+  editResidentTaskForm.script_path = task.script_path
+  editResidentTaskForm.script_text = task.script_text
+  editResidentTaskForm.variables = { ...task.variables }
+  editResidentTaskForm.timeout_sec = task.timeout_sec
+  editResidentTaskVisible.value = true
+}
+
+async function handleSaveEditResidentTask() {
+  editResidentTaskSaving.value = true
+  try {
+    if (!editResidentTaskForm.script_id) {
+      throw new Error('请选择脚本')
+    }
+    const payload: CreateAgentTaskPayload = {
+      name: editResidentTaskForm.name,
+      task_mode: 'resident',
+      task_type: editResidentTaskForm.task_type,
+      shell_type: editResidentTaskForm.shell_type,
+      work_dir: editResidentTaskForm.work_dir,
+      script_id: editResidentTaskForm.script_id,
+      script_path: editResidentTaskForm.script_path,
+      script_text: editResidentTaskForm.script_text,
+      variables: editResidentTaskForm.variables,
+      timeout_sec: editResidentTaskForm.timeout_sec,
+    }
+    await updateResidentAgentTask(editResidentTaskID.value, payload)
+    message.success('常驻任务已更新')
+    editResidentTaskVisible.value = false
+    await loadTaskViews({ silent: true })
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '更新任务失败'))
+  } finally {
+    editResidentTaskSaving.value = false
+  }
+}
+
+async function handleDeleteResidentTask(taskID: string) {
+  try {
+    await deleteResidentAgentTask(taskID)
+    message.success('常驻任务已删除')
+    await loadTaskViews({ silent: true })
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '删除任务失败'))
   }
 }
 
@@ -656,7 +868,7 @@ onBeforeUnmount(() => {
     <div class="page-header-card page-header">
         <div class="page-header-copy">
           <div class="page-title">Agent任务管理</div>
-          <div class="page-subtitle">以任务为中心统一下发脚本，下面分别查看常驻任务和历史任务；已分配常驻任务的启停请回到 Agent 管理。</div>
+          <div class="page-subtitle">以任务为中心统一下发脚本；临时任务创建后先停留在待执行，点击执行才会真正进入 Agent 队列</div>
         </div>
         <a-space>
           <a-button type="primary" @click="openCreateTaskModal">
@@ -680,7 +892,7 @@ onBeforeUnmount(() => {
       @ok="handleCreateTask"
       @cancel="closeCreateTaskModal"
     >
-      <div class="task-panel-subtitle modal-subtitle">先配置任务；目标 Agent 可选。如果要面向多台 Agent 批量下发，建议前往 Agent 管理页面操作。</div>
+      <div class="task-panel-subtitle modal-subtitle">先配置任务；临时任务会保存绑定的 Agent 集合，后续执行或被发布模板引用时再批量下发。</div>
       <a-form layout="vertical" class="task-create-form">
         <a-form-item label="目标 Agent">
           <div class="task-target-card">
@@ -700,8 +912,7 @@ onBeforeUnmount(() => {
               已选择的 Agent 工作目录不一致，如需覆盖请手动填写下方工作目录；留空则各 Agent 使用自己的默认工作目录。
             </div>
             <div class="task-variable-tip">
-              不选也可以先整理任务内容；若需要批量下发，推荐前往 Agent 管理页进行分发。
-              <a-button type="link" size="small" class="task-tip-link" @click="goToAgentManagement">前往 Agent 管理</a-button>
+              不选也可以先整理任务内容；若选择多台 Agent，系统会把它们作为临时任务的绑定目标，在执行时统一派发。
             </div>
           </div>
         </a-form-item>
@@ -819,6 +1030,87 @@ onBeforeUnmount(() => {
       </a-form>
     </a-modal>
 
+    <a-modal
+      v-model:open="editTaskVisible"
+      title="编辑临时任务"
+      :width="860"
+      :confirm-loading="editTaskSaving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="handleSaveEditTemporaryTask"
+      @cancel="() => { editTaskVisible = false }"
+    >
+      <a-form layout="vertical" class="task-create-form">
+        <a-form-item label="目标 Agent">
+          <div class="task-target-card">
+            <a-select
+              v-model:value="editTaskTargetAgentIDs"
+              mode="multiple"
+              allow-clear
+              show-search
+              placeholder="请选择要下发任务的 Agent"
+              :options="taskTargetOptions"
+              :filter-option="(input: string, option: any) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
+            />
+          </div>
+        </a-form-item>
+
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="任务名称" required>
+              <a-input v-model:value="editTaskForm.name" placeholder="例如：版本检查、下载产物" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="任务模式">
+              <a-select v-model:value="editTaskForm.task_mode">
+                <a-select-option value="temporary">临时任务</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="选择脚本" required>
+          <a-select
+            :value="editTaskForm.script_id || undefined"
+            allow-clear
+            show-search
+            placeholder="请选择脚本管理中的脚本"
+            :filter-option="(input: string, option: any) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
+            :options="scriptOptions.map((item) => ({ value: item.id, label: `${item.name} · ${taskTypeText(item.task_type as AgentTaskType)}${item.script_path ? ` · ${item.script_path}` : ''}` }))"
+            @update:value="(value) => { editTaskForm.script_id = String(value || ''); const s = scriptOptions.find(x => x.id === value); if (s) { editTaskForm.task_type = s.task_type as any; editTaskForm.shell_type = s.shell_type; editTaskForm.script_text = s.script_text; editTaskForm.script_path = s.script_path; editTaskForm.script_name = s.name } }"
+          />
+        </a-form-item>
+
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="脚本类型">
+              <a-input :value="taskTypeText(editTaskForm.task_type)" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="Shell 类型">
+              <a-input :value="editTaskForm.shell_type || '-'" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="超时时间（秒）">
+              <a-input-number v-model:value="editTaskForm.timeout_sec" :min="10" :max="3600" style="width: 100%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="工作目录">
+              <a-input v-model:value="editTaskForm.work_dir" placeholder="留空则使用 Agent 工作目录" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="脚本内容">
+          <a-textarea v-model:value="editTaskForm.script_text" :rows="8" readonly />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
     <a-card class="filter-card" :bordered="false">
       <div class="task-view-toolbar">
         <div class="task-view-copy">
@@ -857,6 +1149,35 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   <a-space>
+                    <a-button
+                      v-if="canManageAgent && canExecuteTemporaryTask(item)"
+                      type="link"
+                      size="small"
+                      @click="handleExecuteTemporaryTask(item)"
+                    >
+                      <template #icon><CaretRightOutlined /></template>
+                      {{ executeActionText(item) }}
+                    </a-button>
+                    <a-button
+                      v-if="canManageAgent"
+                      type="link"
+                      size="small"
+                      @click="handleEditResidentTask(item)"
+                    >
+                      <template #icon><EditOutlined /></template>
+                      编辑
+                    </a-button>
+                    <a-popconfirm
+                      v-if="canManageAgent"
+                      title="确认删除此常驻任务？"
+                      description="删除后所有关联的运行实例都会被清理，此操作不可恢复"
+                      @confirm="handleDeleteResidentTask(item.id)"
+                    >
+                      <a-button type="link" size="small" danger>
+                        <template #icon><DeleteOutlined /></template>
+                        删除
+                      </a-button>
+                    </a-popconfirm>
                     <a-button type="link" size="small" @click="openTaskPreview(item)">
                       <template #icon><EyeOutlined /></template>
                       预览任务
@@ -890,7 +1211,6 @@ onBeforeUnmount(() => {
                 </div>
                 <div v-if="item.last_run_summary" class="task-summary">{{ item.last_run_summary }}</div>
                 <div v-if="item.failure_reason" class="task-error">{{ item.failure_reason }}</div>
-                <div class="muted-text">常驻任务的停止、重新启用与删除，请在对应 Agent 的详情页里操作。</div>
               </div>
             </div>
             <a-empty v-else description="暂无常驻任务" />
@@ -926,9 +1246,43 @@ onBeforeUnmount(() => {
                       <a-tag>{{ taskModeText(item.task_mode) }}</a-tag>
                       <a-tag>{{ taskTypeText(item.task_type) }}</a-tag>
                     </div>
-                    <div class="muted-text">{{ item.agent_name }} · {{ item.agent_code_display }} · {{ item.agent_environment_code || '-' }}</div>
+                    <div class="muted-text">
+                      <a v-if="item.target_agent_ids && item.target_agent_ids.length" class="agent-link" @click="showBoundAgentsModal(item)">
+                        {{ taskAgentBindingText(item) }}
+                      </a>
+                      <span v-else>{{ taskAgentBindingText(item) }}</span>
+                    </div>
                   </div>
                   <a-space>
+                    <a-button
+                      v-if="canManageAgent && canExecuteTemporaryTask(item)"
+                      type="link"
+                      size="small"
+                      @click="handleExecuteTemporaryTask(item)"
+                    >
+                      <template #icon><CaretRightOutlined /></template>
+                      {{ executeActionText(item) }}
+                    </a-button>
+                    <a-button
+                      v-if="canManageAgent && canEditTemporaryTask(item)"
+                      type="link"
+                      size="small"
+                      @click="handleEditTemporaryTask(item)"
+                    >
+                      <template #icon><EditOutlined /></template>
+                      编辑
+                    </a-button>
+                    <a-popconfirm
+                      v-if="canManageAgent && canDeleteTemporaryTask(item)"
+                      title="确认删除此临时任务？"
+                      description="删除后无法恢复"
+                      @confirm="handleDeleteTemporaryTask(item.id)"
+                    >
+                      <a-button type="link" size="small" danger>
+                        <template #icon><DeleteOutlined /></template>
+                        删除
+                      </a-button>
+                    </a-popconfirm>
                     <a-button type="link" size="small" @click="openTaskPreview(item)">
                       <template #icon><EyeOutlined /></template>
                       预览任务
@@ -986,7 +1340,7 @@ onBeforeUnmount(() => {
         <div class="task-preview-meta">
           <a-tag>{{ taskModeText(previewTask.task_mode) }}</a-tag>
           <a-tag>{{ taskTypeText(previewTask.task_type) }}</a-tag>
-          <span>Agent：{{ previewTask.agent_name }} · {{ previewTask.agent_code_display }}</span>
+          <span>Agent：{{ taskAgentBindingText(previewTask) }}</span>
           <span>目录：{{ previewTask.work_dir || '-' }}</span>
           <span>脚本：{{ previewTask.script_name || previewTask.script_path || '-' }}</span>
         </div>
@@ -1004,6 +1358,131 @@ onBeforeUnmount(() => {
         </div>
       </template>
     </a-modal>
+
+    <a-modal
+      v-model:open="boundAgentModalVisible"
+      :title="currentBoundTask ? `${currentBoundTask.name} - 绑定 Agent 列表` : '绑定 Agent 列表'"
+      :footer="null"
+      :width="720"
+    >
+      <a-table
+        :columns="[
+          { title: 'Agent 名称', dataIndex: 'name', key: 'name', ellipsis: true },
+          { title: 'Agent Code', dataIndex: 'agent_code', key: 'agent_code', width: 180, ellipsis: true },
+          { title: '环境', dataIndex: 'environment_code', key: 'environment_code', width: 100 },
+          { 
+            title: '状态', 
+            key: 'runtime_state', 
+            width: 100,
+            customRender: ({ record }: any) => {
+              const stateColors: Record<string, string> = {
+                online: 'green',
+                offline: 'default',
+                busy: 'orange',
+                disabled: 'red',
+                maintenance: 'blue',
+              }
+              const stateText: Record<string, string> = {
+                online: '在线',
+                offline: '离线',
+                busy: '忙碌',
+                disabled: '禁用',
+                maintenance: '维护',
+              }
+              return {
+                children: stateText[record.runtime_state] || record.runtime_state,
+                tagProps: { color: stateColors[record.runtime_state] || 'default' },
+              }
+            }
+          },
+        ]"
+        :data-source="getBoundAgentList(currentBoundTask)"
+        :pagination="false"
+        size="small"
+        row-key="id"
+      >
+        <template #bodyCell="{ column, record }">
+          <template v-if="column.dataIndex === 'name'">
+            {{ record.name || record.agent_code }}
+          </template>
+          <template v-if="column.dataIndex === 'environment_code'">
+            {{ record.environment_code || '-' }}
+          </template>
+          <template v-if="column.key === 'runtime_state'">
+            <a-tag :color="{ online: 'green', offline: 'default', busy: 'orange', disabled: 'red', maintenance: 'blue' }[record.runtime_state] || 'default'">
+              {{ { online: '在线', offline: '离线', busy: '忙碌', disabled: '禁用', maintenance: '维护' }[record.runtime_state] || record.runtime_state }}
+            </a-tag>
+          </template>
+        </template>
+      </a-table>
+    </a-modal>
+
+    <a-modal
+      v-model:open="editResidentTaskVisible"
+      title="编辑常驻任务"
+      :width="860"
+      :confirm-loading="editResidentTaskSaving"
+      ok-text="保存"
+      cancel-text="取消"
+      @ok="handleSaveEditResidentTask"
+      @cancel="() => { editResidentTaskVisible = false }"
+    >
+      <a-form layout="vertical" class="task-create-form">
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="任务名称" required>
+              <a-input v-model:value="editResidentTaskForm.name" placeholder="例如：版本检查、下载产物" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="任务模式">
+              <a-select v-model:value="editResidentTaskForm.task_mode">
+                <a-select-option value="resident">常驻任务</a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="选择脚本" required>
+          <a-select
+            :value="editResidentTaskForm.script_id || undefined"
+            allow-clear
+            show-search
+            placeholder="请选择脚本管理中的脚本"
+            :filter-option="(input: string, option: any) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())"
+            :options="scriptOptions.map((item) => ({ value: item.id, label: `${item.name} · ${taskTypeText(item.task_type as AgentTaskType)}${item.script_path ? ` · ${item.script_path}` : ''}` }))"
+            @update:value="(value) => { editResidentTaskForm.script_id = String(value || ''); const s = scriptOptions.find(x => x.id === value); if (s) { editResidentTaskForm.task_type = s.task_type as any; editResidentTaskForm.shell_type = s.shell_type; editResidentTaskForm.script_text = s.script_text; editResidentTaskForm.script_path = s.script_path; editResidentTaskForm.script_name = s.name } }"
+          />
+        </a-form-item>
+
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="脚本类型">
+              <a-input :value="taskTypeText(editResidentTaskForm.task_type)" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="Shell 类型">
+              <a-input :value="editResidentTaskForm.shell_type || '-'" readonly />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="超时时间（秒）">
+              <a-input-number v-model:value="editResidentTaskForm.timeout_sec" :min="10" :max="3600" style="width: 100%" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="工作目录">
+              <a-input v-model:value="editResidentTaskForm.work_dir" placeholder="留空则使用 Agent 工作目录" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+
+        <a-form-item label="脚本内容">
+          <a-textarea v-model:value="editResidentTaskForm.script_text" :rows="8" readonly />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </div>
 </template>
 
@@ -1013,6 +1492,17 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+
+.agent-link {
+  color: #1890ff;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.agent-link:hover {
+  color: #40a9ff;
+  text-decoration: underline;
 }
 
 .task-form-header,

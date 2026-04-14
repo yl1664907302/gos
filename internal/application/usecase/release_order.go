@@ -70,17 +70,18 @@ type CreateReleaseOrderStepInput struct {
 }
 
 type ListReleaseOrderInput struct {
-	ApplicationID          string
-	ApplicationIDs         []string
-	VisibleToUserID        string
-	ApprovalApproverUserID string
-	CreatorUserID          string
-	BindingID              string
-	EnvCode                string
-	Status                 domain.OrderStatus
-	TriggerType            domain.TriggerType
-	Page                   int
-	PageSize               int
+	ApplicationID               string
+	ApplicationIDs              []string
+	VisibleApplicationEnvScopes []domain.ApplicationEnvScope
+	VisibleToUserID             string
+	ApprovalApproverUserID      string
+	CreatorUserID               string
+	BindingID                   string
+	EnvCode                     string
+	Status                      domain.OrderStatus
+	TriggerType                 domain.TriggerType
+	Page                        int
+	PageSize                    int
 }
 
 type FinishReleaseOrderStepInput struct {
@@ -322,7 +323,7 @@ func (uc *ReleaseOrderManager) Create(
 		)
 		return domain.ReleaseOrder{}, err
 	}
-	steps, err := uc.buildCreateSteps(order.ID, now, executions, template.GitOpsType, templateHooks, input.Steps)
+	steps, err := uc.buildCreateSteps(order.ID, now, executions, template.GitOpsType, templateHooks, input.Steps, order.EnvCode)
 	if err != nil {
 		logx.Error("release_order", "create_failed", err,
 			logx.F("order_id", order.ID),
@@ -417,7 +418,7 @@ func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
 		return domain.ReleaseOrder{}, err
 	}
 
-	template, templateBindings, _, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
+	template, templateBindings, _, _, templateHooks, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
@@ -433,6 +434,7 @@ func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
 		sourceOrder,
 		sourceParams,
 		template,
+		templateHooks,
 		cdBinding,
 		domain.PipelineScopeCD,
 		nil,
@@ -500,7 +502,7 @@ func (uc *ReleaseOrderManager) CreatePipelineReplayByOrder(
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: 来源成功单缺少可重放参数快照，无法执行参数重放", ErrInvalidInput)
 	}
 
-	template, templateBindings, templateParams, _, _, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
+	template, templateBindings, templateParams, _, templateHooks, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
@@ -530,6 +532,7 @@ func (uc *ReleaseOrderManager) CreatePipelineReplayByOrder(
 		sourceOrder,
 		sourceParams,
 		template,
+		templateHooks,
 		replayBinding,
 		replayScope,
 		replayParams,
@@ -1043,6 +1046,7 @@ func (uc *ReleaseOrderManager) createRecoveryOrder(
 	sourceOrder domain.ReleaseOrder,
 	sourceParams []domain.ReleaseOrderParam,
 	template domain.ReleaseTemplate,
+	templateHooks []domain.ReleaseTemplateHook,
 	targetBinding domain.ReleaseTemplateBinding,
 	targetScope domain.PipelineScope,
 	paramsInput []CreateReleaseOrderParamInput,
@@ -1108,7 +1112,15 @@ func (uc *ReleaseOrderManager) createRecoveryOrder(
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
-	steps, err := uc.buildCreateSteps(order.ID, now, executions, normalizeTemplateGitOpsType(template.GitOpsType, true), nil, nil)
+	steps, err := uc.buildCreateSteps(
+		order.ID,
+		now,
+		executions,
+		normalizeTemplateGitOpsType(template.GitOpsType, true),
+		templateHooks,
+		nil,
+		order.EnvCode,
+	)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
@@ -1337,17 +1349,18 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 	}
 
 	items, total, err := uc.repo.List(ctx, domain.ListFilter{
-		ApplicationID:          input.ApplicationID,
-		ApplicationIDs:         normalizeReleaseApplicationIDs(input.ApplicationIDs),
-		VisibleToUserID:        strings.TrimSpace(input.VisibleToUserID),
-		ApprovalApproverUserID: strings.TrimSpace(input.ApprovalApproverUserID),
-		CreatorUserID:          strings.TrimSpace(input.CreatorUserID),
-		BindingID:              input.BindingID,
-		EnvCode:                input.EnvCode,
-		Status:                 input.Status,
-		TriggerType:            input.TriggerType,
-		Page:                   input.Page,
-		PageSize:               input.PageSize,
+		ApplicationID:               input.ApplicationID,
+		ApplicationIDs:              normalizeReleaseApplicationIDs(input.ApplicationIDs),
+		VisibleApplicationEnvScopes: normalizeReleaseApplicationEnvScopes(input.VisibleApplicationEnvScopes),
+		VisibleToUserID:             strings.TrimSpace(input.VisibleToUserID),
+		ApprovalApproverUserID:      strings.TrimSpace(input.ApprovalApproverUserID),
+		CreatorUserID:               strings.TrimSpace(input.CreatorUserID),
+		BindingID:                   input.BindingID,
+		EnvCode:                     input.EnvCode,
+		Status:                      input.Status,
+		TriggerType:                 input.TriggerType,
+		Page:                        input.Page,
+		PageSize:                    input.PageSize,
 	})
 	if err != nil {
 		return nil, 0, err
@@ -1378,6 +1391,31 @@ func normalizeReleaseApplicationIDs(values []string) []string {
 	}
 	if len(result) == 0 {
 		return nil
+	}
+	return result
+}
+
+func normalizeReleaseApplicationEnvScopes(values []domain.ApplicationEnvScope) []domain.ApplicationEnvScope {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]domain.ApplicationEnvScope, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, item := range values {
+		applicationID := strings.TrimSpace(item.ApplicationID)
+		envCode := strings.TrimSpace(item.EnvCode)
+		if applicationID == "" || envCode == "" {
+			continue
+		}
+		key := applicationID + "::" + envCode
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, domain.ApplicationEnvScope{
+			ApplicationID: applicationID,
+			EnvCode:       envCode,
+		})
 	}
 	return result
 }
@@ -1544,30 +1582,28 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	}
 
 	cancelNotes := make([]string, 0)
-	if order.Status == domain.OrderStatusRunning || order.Status == domain.OrderStatusDeploying {
-		for _, execution := range executions {
-			note := uc.abortExecution(ctx, execution)
-			if note != "" {
-				cancelNotes = append(cancelNotes, note)
-			}
-			if execution.Status.IsTerminal() {
-				continue
-			}
-			_, updateErr := uc.repo.UpdateExecutionByScope(ctx, id, execution.PipelineScope, domain.ExecutionUpdateInput{
-				Status:     domain.ExecutionStatusCancelled,
-				QueueURL:   execution.QueueURL,
-				BuildURL:   execution.BuildURL,
-				StartedAt:  execution.StartedAt,
-				FinishedAt: &now,
-				UpdatedAt:  now,
-			})
-			if updateErr != nil && !errors.Is(updateErr, domain.ErrExecutionNotFound) {
-				logx.Error("release_order", "cancel_failed", updateErr,
-					logx.F("order_id", order.ID),
-					logx.F("pipeline_scope", execution.PipelineScope),
-				)
-				return domain.ReleaseOrder{}, updateErr
-			}
+	for _, execution := range executions {
+		note := uc.abortExecution(ctx, execution)
+		if note != "" {
+			cancelNotes = append(cancelNotes, note)
+		}
+		if execution.Status.IsTerminal() {
+			continue
+		}
+		_, updateErr := uc.repo.UpdateExecutionByScope(ctx, id, execution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     domain.ExecutionStatusCancelled,
+			QueueURL:   execution.QueueURL,
+			BuildURL:   execution.BuildURL,
+			StartedAt:  execution.StartedAt,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		})
+		if updateErr != nil && !errors.Is(updateErr, domain.ErrExecutionNotFound) {
+			logx.Error("release_order", "cancel_failed", updateErr,
+				logx.F("order_id", order.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+			)
+			return domain.ReleaseOrder{}, updateErr
 		}
 	}
 
@@ -2594,7 +2630,11 @@ func (uc *ReleaseOrderManager) ListSteps(ctx context.Context, orderID string) ([
 	if err != nil {
 		return nil, err
 	}
-	return uc.reconcileTerminalSteps(ctx, order, items)
+	items, err = uc.reconcileTerminalSteps(ctx, order, items)
+	if err != nil {
+		return nil, err
+	}
+	return uc.enrichAgentTaskStepDetails(ctx, items), nil
 }
 
 func (uc *ReleaseOrderManager) reconcileTerminalSteps(
@@ -2648,6 +2688,16 @@ func (uc *ReleaseOrderManager) reconcileTerminalSteps(
 			StartedAt:  startedAt,
 			FinishedAt: finishedAt,
 		}); updateErr != nil {
+			if errors.Is(updateErr, domain.ErrStepNotFound) {
+				logx.Warn("release_order", "reconcile_terminal_health_step_missing",
+					logx.F("order_id", order.ID),
+					logx.F("order_no", order.OrderNo),
+					logx.F("step_code", healthCode),
+					logx.F("pipeline_scope", execution.PipelineScope),
+				)
+				changed = true
+				continue
+			}
 			return nil, updateErr
 		}
 		changed = true
@@ -2673,9 +2723,19 @@ func (uc *ReleaseOrderManager) reconcileTerminalSteps(
 				StartedAt:  startedAt,
 				FinishedAt: finishedAt,
 			}); updateErr != nil {
-				return nil, updateErr
+				if errors.Is(updateErr, domain.ErrStepNotFound) {
+					logx.Warn("release_order", "reconcile_terminal_finish_step_missing",
+						logx.F("order_id", order.ID),
+						logx.F("order_no", order.OrderNo),
+						logx.F("step_code", "global:release_finish"),
+					)
+					changed = true
+				} else {
+					return nil, updateErr
+				}
+			} else {
+				changed = true
 			}
-			changed = true
 		}
 	}
 	if !changed {
@@ -2915,9 +2975,10 @@ func (uc *ReleaseOrderManager) buildCreateSteps(
 	gitopsType domain.GitOpsType,
 	templateHooks []domain.ReleaseTemplateHook,
 	input []CreateReleaseOrderStepInput,
+	orderEnvCode string,
 ) ([]domain.ReleaseOrderStep, error) {
 	if len(input) == 0 {
-		return defaultReleaseOrderSteps(orderID, executions, now, gitopsType, templateHooks), nil
+		return defaultReleaseOrderSteps(orderID, executions, now, gitopsType, templateHooks, orderEnvCode), nil
 	}
 
 	items := make([]domain.ReleaseOrderStep, 0, len(input))
@@ -2994,7 +3055,7 @@ func executionStepCodes(execution domain.ReleaseOrderExecution) []string {
 	return result
 }
 
-func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderExecution, now time.Time, gitopsType domain.GitOpsType, templateHooks []domain.ReleaseTemplateHook) []domain.ReleaseOrderStep {
+func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderExecution, now time.Time, gitopsType domain.GitOpsType, templateHooks []domain.ReleaseTemplateHook, orderEnvCode string) []domain.ReleaseOrderStep {
 	items := make([]domain.ReleaseOrderStep, 0, 8)
 	sortNo := 1
 	appendStep := func(scope domain.StepScope, executionID string, code string, name string) {
@@ -3024,6 +3085,12 @@ func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderEx
 		if stepName == "" {
 			stepName = "发布后 Hook"
 		}
+
+		// 检查环境匹配，不匹配则跳过创建 step
+		if !hookMatchesEnv(item.EnvCodes, orderEnvCode) {
+			continue
+		}
+
 		items = append(items, domain.ReleaseOrderStep{
 			ID:             generateID("ros"),
 			ReleaseOrderID: orderID,
@@ -3192,4 +3259,22 @@ func generateOrderNo(now time.Time) string {
 		return "RO-" + now.UTC().Format("20060102150405")
 	}
 	return "RO-" + now.UTC().Format("20060102150405") + "-" + strings.ToUpper(hex.EncodeToString(entropy))
+}
+
+// hookMatchesEnv 检查 Hook 的环境配置是否与发布单的执行单元环境匹配
+func hookMatchesEnv(hookEnvCodes []string, orderEnvCode string) bool {
+	if len(hookEnvCodes) == 0 {
+		return true // 未配置环境限制，所有环境都执行
+	}
+	orderEnv := strings.TrimSpace(orderEnvCode)
+	if orderEnv == "" {
+		return false // 发布单没有环境信息，保守跳过
+	}
+	// 检查是否有任意一个 hook 环境匹配发布单的环境
+	for _, hookEnv := range hookEnvCodes {
+		if strings.EqualFold(strings.TrimSpace(hookEnv), orderEnv) {
+			return true
+		}
+	}
+	return false
 }

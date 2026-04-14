@@ -10,6 +10,7 @@ import { listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api
 import { listNotificationHooks } from '../../api/notification'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { getPipelineBindingByID, listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
+import { getReleaseSettings } from '../../api/system'
 import { listUserOptions } from '../../api/user'
 import {
   createReleaseTemplate,
@@ -104,6 +105,7 @@ interface HookFormItem {
   hook_type: ReleaseTemplateHookTypePreview
   trigger_condition: ReleaseTemplateHookTriggerConditionPreview
   failure_policy: ReleaseTemplateHookFailurePolicyPreview
+  env_codes: string[]
   target_id: string
   target_name: string
   webhook_method: 'POST' | 'PUT' | 'PATCH'
@@ -203,6 +205,8 @@ const agentTaskTemplates = ref<AgentTask[]>([])
 const loadingAgentTaskTemplates = ref(false)
 const notificationHooks = ref<NotificationHook[]>([])
 const loadingNotificationHooks = ref(false)
+const hookEnvOptions = ref<SelectOption[]>([])
+const loadingHookEnvOptions = ref(false)
 const bindingOptionsCache = ref<Record<string, BindingOption[]>>({})
 const selectableParamsCache = ref<Record<string, ExecutorParamDef[]>>({})
 const gitOpsFieldCandidateCache = ref<Record<string, GitOpsFieldCandidate[]>>({})
@@ -282,6 +286,7 @@ function createHookFormItem(type: ReleaseTemplateHookTypePreview): HookFormItem 
     hook_type: type,
     trigger_condition: 'on_success',
     failure_policy: type === 'webhook_notification' ? 'warn_only' : 'block_release',
+    env_codes: [],
     target_id: '',
     target_name: '',
     webhook_method: 'POST',
@@ -301,6 +306,7 @@ function createHookFormItemFromResponse(item: ReleaseTemplateHook): HookFormItem
     hook_type: item.hook_type,
     trigger_condition: item.trigger_condition,
     failure_policy: item.failure_policy,
+    env_codes: normalizeHookEnvCodes(item.env_codes || []),
     target_id: item.target_id || '',
     target_name: item.target_name || '',
     webhook_method: ((item.webhook_method || 'POST').toUpperCase() as 'POST' | 'PUT' | 'PATCH'),
@@ -308,6 +314,50 @@ function createHookFormItemFromResponse(item: ReleaseTemplateHook): HookFormItem
     webhook_body_template: item.webhook_body || '',
     note: item.note || '',
   }
+}
+
+function normalizeHookEnvCodes(values: string[]) {
+  const result: string[] = []
+  const seen = new Set<string>()
+  values.forEach((item) => {
+    const value = String(item || '').trim()
+    if (!value) {
+      return
+    }
+    const key = value.toLowerCase()
+    if (seen.has(key)) {
+      return
+    }
+    seen.add(key)
+    result.push(value)
+  })
+  return result
+}
+
+function mergeHookEnvOptions(extraValues: string[] = []) {
+  const merged = new Map<string, SelectOption>()
+  ;[...hookEnvOptions.value.map((item) => item.value), ...extraValues].forEach((item) => {
+    const value = String(item || '').trim()
+    if (!value) {
+      return
+    }
+    const key = value.toLowerCase()
+    if (!merged.has(key)) {
+      merged.set(key, {
+        label: value.toUpperCase(),
+        value,
+      })
+    }
+  })
+  return [...merged.values()]
+}
+
+function hookEnvLabel(envCodes: string[]) {
+  const normalized = normalizeHookEnvCodes(envCodes)
+  if (!normalized.length) {
+    return '全部环境'
+  }
+  return normalized.join(' / ')
 }
 
 const hookSummaryItems = computed(() => [
@@ -328,14 +378,26 @@ function agentTaskTypeLabel(taskType: string) {
   }
 }
 
-const agentTaskTemplateOptions = computed<SelectOption[]>(() =>
-  agentTaskTemplates.value
-    .filter((item) => !String(item.agent_id || '').trim())
-    .map((item) => ({
-      label: `${item.name} · ${item.task_mode === 'resident' ? '常驻任务' : '临时任务'} / ${agentTaskTypeLabel(item.task_type)}`,
+const agentTaskTemplateOptions = computed<SelectOption[]>(() => {
+  const temps = agentTaskTemplates.value.filter((item) => item.task_mode === 'temporary')
+  const nameKeyCounts = new Map<string, number>()
+  temps.forEach((item) => {
+    const key = String(item.name || '')
+      .trim()
+      .toLowerCase() || item.id
+    nameKeyCounts.set(key, (nameKeyCounts.get(key) || 0) + 1)
+  })
+  return temps.map((item) => {
+    const baseName = String(item.name || '').trim() || item.id
+    const key = baseName.toLowerCase() || item.id
+    const duplicate = (nameKeyCounts.get(key) || 0) > 1
+    const shortId = String(item.id || '').slice(0, 8)
+    return {
+      label: duplicate && shortId ? `${baseName}（${shortId}）` : baseName,
       value: item.id,
-    })),
-)
+    }
+  })
+})
 
 const notificationHookOptions = computed<SelectOption[]>(() =>
   notificationHooks.value
@@ -352,6 +414,22 @@ function findAgentTaskTemplate(taskID: string) {
     return null
   }
   return agentTaskTemplates.value.find((item) => item.id === normalized) || null
+}
+
+function summarizeAgentTaskScript(taskID: string) {
+  const task = findAgentTaskTemplate(taskID)
+  const content = String(task?.script_text || '')
+    .replace(/\r\n/g, '\n')
+    .trim()
+  if (!content) {
+    return '暂无脚本内容'
+  }
+  const lines = content.split('\n')
+  const preview = lines.slice(0, 10).join('\n')
+  const truncatedByLines = lines.length > 10
+  const truncatedByLength = preview.length > 800
+  const clipped = truncatedByLength ? `${preview.slice(0, 800).trimEnd()}\n...` : preview
+  return truncatedByLines && !truncatedByLength ? `${clipped}\n...` : clipped
 }
 
 function syncHookTargetName(item: HookFormItem) {
@@ -399,6 +477,25 @@ function hookTriggerLabel(type: ReleaseTemplateHookTriggerConditionPreview) {
 
 function hookFailureLabel(type: ReleaseTemplateHookFailurePolicyPreview) {
   return type === 'block_release' ? '失败阻断发布单' : '失败仅告警'
+}
+
+async function loadHookEnvOptions(extraValues: string[] = [], silent = false) {
+  const extra = normalizeHookEnvCodes(extraValues)
+  if (hookEnvOptions.value.length > 0 && extra.every((item) => hookEnvOptions.value.some((option) => option.value.toLowerCase() === item.toLowerCase()))) {
+    return
+  }
+  loadingHookEnvOptions.value = true
+  try {
+    const response = await getReleaseSettings()
+    hookEnvOptions.value = mergeHookEnvOptions([...(response.data.env_options || []), ...extra])
+  } catch (error) {
+    hookEnvOptions.value = mergeHookEnvOptions(extra)
+    if (!silent) {
+      message.error(extractHTTPErrorMessage(error, '发布环境选项加载失败'))
+    }
+  } finally {
+    loadingHookEnvOptions.value = false
+  }
 }
 
 const modalTitle = computed(() => (modalMode.value === 'create' ? '新增发布模板' : '编辑发布模板'))
@@ -1094,6 +1191,7 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
       name: item.name.trim(),
       trigger_condition: item.trigger_condition,
       failure_policy: item.failure_policy,
+      env_codes: normalizeHookEnvCodes(item.env_codes),
       target_id:
         item.hook_type === 'agent_task' || item.hook_type === 'notification_hook'
           ? item.target_id.trim() || undefined
@@ -1136,8 +1234,8 @@ async function loadApprovalUserOptions() {
   }
 }
 
-async function loadAgentTaskTemplates() {
-  if (agentTaskTemplates.value.length > 0) {
+async function loadAgentTaskTemplates(force = false) {
+  if (!force && agentTaskTemplates.value.length > 0) {
     return
   }
   loadingAgentTaskTemplates.value = true
@@ -1623,8 +1721,9 @@ function openCreateModal() {
   void Promise.all([
     loadPlatformParamMap(),
     loadApprovalUserOptions(),
-    loadAgentTaskTemplates(),
+    loadAgentTaskTemplates(true),
     loadNotificationHooks(),
+    loadHookEnvOptions([], true),
   ])
   modalVisible.value = true
 }
@@ -1657,12 +1756,11 @@ async function openEditModal(record: ReleaseTemplate) {
     if (!userOptions.value.length) {
       preloadTasks.push(loadApprovalUserOptions())
     }
-    if (!agentTaskTemplates.value.length) {
-      preloadTasks.push(loadAgentTaskTemplates())
-    }
+    preloadTasks.push(loadAgentTaskTemplates(true))
     if (!notificationHooks.value.length) {
       preloadTasks.push(loadNotificationHooks())
     }
+    preloadTasks.push(loadHookEnvOptions([], true))
     const [response] = await Promise.all([detailPromise, ...preloadTasks])
     const { template, bindings, params, gitops_rules, hooks } = response.data
     formState.id = template.id
@@ -1735,6 +1833,7 @@ async function openEditModal(record: ReleaseTemplate) {
         value_template: item.value_template,
       }),
     )
+    await loadHookEnvOptions((hooks || []).flatMap((item: ReleaseTemplateHook) => item.env_codes || []), true)
     templateHooks.value = (hooks || []).map((item: ReleaseTemplateHook) => createHookFormItemFromResponse(item))
     templateHooks.value.forEach((item) => syncHookTargetName(item))
     gitopsRuleActiveKeys.value = []
@@ -1880,7 +1979,7 @@ onMounted(async () => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">发布模板</h2>
-        <p class="page-subtitle">按应用维护可复用的 CI/CD 发布结构，模板会决定本次发布启用哪些执行单元以及暴露哪些参数。</p>
+        <p class="page-subtitle">按应用维护可复用的 CI/CD 发布结构，模板会决定本次发布启用哪些执行单元以及暴露哪些参数</p>
       </div>
       <a-button type="primary" @click="openCreateModal">
         <template #icon>
@@ -2612,7 +2711,7 @@ onMounted(async () => {
             <div>
               <div class="hook-template-capability-title">Hook 配置适配预览</div>
               <div class="hook-template-capability-subtitle">
-                点击新增 Hook，先选择类型，再补充表单字段。当前支持 Agent 任务、通知 Hook 和兼容型 Webhook 通知。
+                点击新增 Hook，先选择类型，再补充表单字段。Agent 类 Hook 只需选择<strong>临时任务名称</strong>；任务在「Agent 任务管理」里绑定 Agent 后，发布时会自动向各 Agent 派发。
               </div>
             </div>
             <a-tag class="dashboard-chip dashboard-chip-neutral">详情页直接看进度</a-tag>
@@ -2672,7 +2771,20 @@ onMounted(async () => {
                   />
                 </a-form-item>
 
-                <a-form-item :label="item.hook_type === 'agent_task' ? '目标 Agent 任务' : item.hook_type === 'notification_hook' ? '目标通知 Hook' : 'Webhook URL'" class="template-param-inline-item">
+                <a-form-item label="执行环境" class="template-param-inline-item">
+                  <a-select
+                    v-model:value="item.env_codes"
+                    mode="multiple"
+                    allow-clear
+                    show-search
+                    option-filter-prop="label"
+                    :loading="loadingHookEnvOptions"
+                    :options="mergeHookEnvOptions(item.env_codes)"
+                    placeholder="留空则所有环境执行，例如仅选 prod"
+                  />
+                </a-form-item>
+
+                <a-form-item :label="item.hook_type === 'agent_task' ? '临时任务' : item.hook_type === 'notification_hook' ? '目标通知 Hook' : 'Webhook URL'" class="template-param-inline-item">
                   <a-select
                     v-if="item.hook_type === 'agent_task'"
                     v-model:value="item.target_id"
@@ -2681,7 +2793,7 @@ onMounted(async () => {
                     option-filter-prop="label"
                     :loading="loadingAgentTaskTemplates"
                     :options="agentTaskTemplateOptions"
-                    placeholder="请选择真实 Agent 任务模板"
+                    placeholder="按任务名称选择；发布时按该任务绑定的 Agent 派发"
                     @change="syncHookTargetName(item)"
                   />
                   <a-select
@@ -2704,7 +2816,7 @@ onMounted(async () => {
                 </a-form-item>
 
                 <div v-if="item.hook_type === 'agent_task' && !agentTaskTemplateOptions.length" class="hook-template-capability-note">
-                  当前还没有可引用的未分配 Agent 任务模板，请先到 Agent 任务管理中创建任务模板。
+                  请先在「Agent 任务管理」中创建<strong>临时任务</strong>，并在该任务上绑定一台或多台 Agent。模板里只需选任务名称；发布触发 Hook 时会按绑定关系向各 Agent 派发，无需为每个 Agent 单独加 Hook。
                 </div>
                 <div v-if="item.hook_type === 'notification_hook' && !notificationHookOptions.length" class="hook-template-capability-note">
                   当前还没有可引用的通知 Hook，请先到系统管理 / 通知模块中创建通知源、Markdown 模板和通知 Hook。
@@ -2715,13 +2827,31 @@ onMounted(async () => {
                     {{ findAgentTaskTemplate(item.target_id)?.name }}
                   </a-descriptions-item>
                   <a-descriptions-item label="任务模式">
-                    {{ findAgentTaskTemplate(item.target_id)?.task_mode === 'resident' ? '常驻任务' : '临时任务' }}
+                    临时任务（发布时按下方绑定关系派发）
+                  </a-descriptions-item>
+                  <a-descriptions-item label="绑定 Agent">
+                    {{
+                      (findAgentTaskTemplate(item.target_id)?.target_agent_ids || []).length
+                        ? `已绑定 ${(findAgentTaskTemplate(item.target_id)?.target_agent_ids || []).length} 台 Agent（发布时各 Agent 各执行一次）`
+                        : findAgentTaskTemplate(item.target_id)?.agent_code
+                          ? `单 Agent：${findAgentTaskTemplate(item.target_id)?.agent_code}`
+                          : '未绑定 Agent，请回到任务管理中配置'
+                    }}
                   </a-descriptions-item>
                   <a-descriptions-item label="任务类型">
                     {{ agentTaskTypeLabel(String(findAgentTaskTemplate(item.target_id)?.task_type || '')) }}
                   </a-descriptions-item>
                   <a-descriptions-item label="脚本">
                     {{ findAgentTaskTemplate(item.target_id)?.script_name || findAgentTaskTemplate(item.target_id)?.script_path || '未绑定脚本' }}
+                  </a-descriptions-item>
+                  <a-descriptions-item label="脚本预览">
+                    <div class="hook-template-script-preview-wrap">
+                      <pre class="hook-template-script-preview">{{ summarizeAgentTaskScript(item.target_id) }}</pre>
+                      <a-button size="small" type="link" @click="loadAgentTaskTemplates(true)">
+                        <template #icon><ReloadOutlined /></template>
+                        刷新任务快照
+                      </a-button>
+                    </div>
                   </a-descriptions-item>
                 </a-descriptions>
 
@@ -2778,7 +2908,7 @@ onMounted(async () => {
 
                 <a-descriptions :column="1" size="small" bordered class="hook-template-description">
                   <a-descriptions-item label="当前摘要">
-                    {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }}
+                    {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }} · {{ hookEnvLabel(item.env_codes) }}
                   </a-descriptions-item>
                   <a-descriptions-item label="详情展示">
                     发布单详情直接展示 Hook 执行进度、变量和日志
@@ -3306,6 +3436,27 @@ onMounted(async () => {
 
 .hook-template-description {
   background: rgba(255, 255, 255, 0.66);
+}
+
+.hook-template-script-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.hook-template-script-preview {
+  width: 100%;
+  margin: 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.92);
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
 }
 
 .gitops-rule-panel {

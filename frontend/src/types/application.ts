@@ -64,6 +64,16 @@ export interface ApplicationListResponse {
   total: number
 }
 
+export interface ApplicationOption {
+  id: string
+  name: string
+  key: string
+}
+
+export interface ApplicationOptionListResponse {
+  data: ApplicationOption[]
+}
+
 export interface ErrorResponse {
   error: string
 }

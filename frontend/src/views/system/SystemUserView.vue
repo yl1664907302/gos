@@ -241,7 +241,7 @@ onMounted(() => {
     <div class="page-header-card page-header">
       <div class="page-header-copy">
         <h2 class="page-title">用户管理</h2>
-        <p class="page-subtitle">管理平台用户，支持账号创建、编辑与状态控制。</p>
+        <p class="page-subtitle">管理平台用户，支持账号创建、编辑与状态控制</p>
       </div>
       <a-button type="primary" @click="openCreateModal">
         <template #icon>
