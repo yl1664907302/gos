@@ -1,12 +1,14 @@
 import type { AxiosRequestConfig } from "axios";
 import { apiBaseURL, http } from "./http";
 import type {
+  BatchDeleteReleaseOrdersPayload,
   BatchExecuteReleaseOrdersPayload,
   CreateReleaseOrderPayload,
   ReleaseOrderApprovalActionPayload,
   ReleaseOrderApprovalRecordListResponse,
   ReleaseOrderApprovalRecordSummaryListParams,
   ReleaseOrderApprovalRecordSummaryListResponse,
+  ReleaseOrderBatchDeleteResponse,
   ReleaseOrderBatchExecuteResponse,
   ReleaseOrderConcurrentBatchProgressResponse,
   ReleaseOrderDataResponse,
@@ -26,6 +28,8 @@ import type {
   ReleaseTemplatePayload,
   UpdateReleaseTemplatePayload,
 } from "../types/release";
+
+export type ReleaseOrderDispatchAction = "execute" | "build" | "deploy";
 
 export async function listReleaseOrders(
   params: ReleaseOrderListParams,
@@ -48,6 +52,17 @@ export async function createReleaseOrder(
   return response.data;
 }
 
+export async function updateReleaseOrder(
+  id: string,
+  payload: CreateReleaseOrderPayload,
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.put<ReleaseOrderDataResponse>(
+    `/release-orders/${encodeURIComponent(String(id || "").trim())}`,
+    payload,
+  );
+  return response.data;
+}
+
 export async function batchExecuteReleaseOrders(
   payload: BatchExecuteReleaseOrdersPayload,
 ): Promise<ReleaseOrderBatchExecuteResponse> {
@@ -57,6 +72,16 @@ export async function batchExecuteReleaseOrders(
     {
       timeout: 120_000,
     },
+  );
+  return response.data;
+}
+
+export async function batchDeleteReleaseOrders(
+  payload: BatchDeleteReleaseOrdersPayload,
+): Promise<ReleaseOrderBatchDeleteResponse> {
+  const response = await http.post<ReleaseOrderBatchDeleteResponse>(
+    "/release-orders/batch-delete",
+    payload,
   );
   return response.data;
 }
@@ -90,9 +115,15 @@ export async function getReleaseOrderByID(
 
 export async function getReleaseOrderPrecheck(
   id: string,
+  action: ReleaseOrderDispatchAction = "execute",
 ): Promise<ReleaseOrderPrecheckResponse> {
   const response = await http.get<ReleaseOrderPrecheckResponse>(
     `/release-orders/${id}/precheck`,
+    {
+      params: {
+        action,
+      },
+    },
   );
   return response.data;
 }
@@ -167,11 +198,43 @@ export async function cancelReleaseOrder(
   return response.data;
 }
 
+export async function deleteReleaseOrder(id: string): Promise<void> {
+  await http.delete(
+    `/release-orders/${encodeURIComponent(String(id || "").trim())}`,
+  );
+}
+
 export async function executeReleaseOrder(
   id: string,
 ): Promise<ReleaseOrderDataResponse> {
   const response = await http.post<ReleaseOrderDataResponse>(
     `/release-orders/${id}/execute`,
+    undefined,
+    {
+      timeout: 120_000,
+    },
+  );
+  return response.data;
+}
+
+export async function buildReleaseOrder(
+  id: string,
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${encodeURIComponent(String(id || "").trim())}/build`,
+    undefined,
+    {
+      timeout: 120_000,
+    },
+  );
+  return response.data;
+}
+
+export async function deployReleaseOrder(
+  id: string,
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${encodeURIComponent(String(id || "").trim())}/deploy`,
     undefined,
     {
       timeout: 120_000,

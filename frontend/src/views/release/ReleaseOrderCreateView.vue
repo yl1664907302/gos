@@ -5,15 +5,17 @@ import type { FormInstance } from 'ant-design-vue'
 import type { Rule } from 'ant-design-vue/es/form'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { listApplications } from '../../api/application'
+import { getApplicationByID, listApplications } from '../../api/application'
 import { getExecutorParamDefByID, listApplicationExecutorParamDefs } from '../../api/pipeline'
-import { createReleaseOrder, getReleaseTemplateByID, listAllReleaseTemplates } from '../../api/release'
+import { createReleaseOrder, getReleaseOrderByID, getReleaseTemplateByID, listAllReleaseTemplates, listReleaseOrderParams, updateReleaseOrder } from '../../api/release'
 import { getReleaseSettings } from '../../api/system'
 import { useAuthStore } from '../../stores/auth'
 import type { Application } from '../../types/application'
 import type { ExecutorParamDef } from '../../types/pipeline'
 import type {
   CreateReleaseOrderParamPayload,
+  ReleaseOrder,
+  ReleaseOrderParam,
   ReleasePipelineScope,
   ReleaseTemplate,
   ReleaseTemplateBinding,
@@ -55,7 +57,9 @@ const loadingApplications = ref(false)
 const loadingEnvOptions = ref(false)
 const loadingTemplates = ref(false)
 const loadingTemplateDetail = ref(false)
+const loadingEditOrder = ref(false)
 const submitting = ref(false)
+const submittingMode = ref<'standard' | 'fast' | ''>('')
 const templateWarning = ref('')
 
 const allApplicationOptions = ref<SelectOption[]>([])
@@ -66,6 +70,9 @@ const templateList = ref<ReleaseTemplate[]>([])
 const selectedTemplate = ref<ReleaseTemplate | null>(null)
 const templateBindings = ref<ReleaseTemplateBinding[]>([])
 const templateParams = ref<ReleaseTemplateParam[]>([])
+const editingOrder = ref<ReleaseOrder | null>(null)
+const editingParamSnapshot = ref<ReleaseOrderParam[]>([])
+const pendingEditSnapshotRestore = ref(false)
 const paramValues = reactive<Record<string, string>>({})
 
 const scopeStates = reactive<Record<ReleasePipelineScope, ScopeRuntimeState>>({
@@ -83,6 +90,9 @@ const scopeStates = reactive<Record<ReleasePipelineScope, ScopeRuntimeState>>({
 
 const preferredTemplateID = ref('')
 const preferredBindingID = ref('')
+const currentUserID = computed(() => String(authStore.profile?.id || '').trim())
+const editingOrderID = computed(() => String(route.params.id || '').trim())
+const isEditMode = computed(() => Boolean(editingOrderID.value))
 
 const formState = reactive<CreateFormState>({
   application_id: '',
@@ -116,10 +126,11 @@ const allowedApplicationIDs = computed(() => {
 
 const applicationOptions = computed<SelectOption[]>(() => {
   const allowed = allowedApplicationIDs.value
+  const editingApplicationID = String(editingOrder.value?.application_id || '').trim()
   if (!allowed) {
     return allApplicationOptions.value
   }
-  return allApplicationOptions.value.filter((item) => allowed.has(item.value))
+  return allApplicationOptions.value.filter((item) => allowed.has(item.value) || (isEditMode.value && item.value === editingApplicationID))
 })
 
 const authorizedEnvOptions = computed<SelectOption[]>(() => {
@@ -142,6 +153,13 @@ const currentUserDisplayName = computed(() => {
     return '-'
   }
   return String(profile.display_name || '').trim() || String(profile.username || '').trim() || '-'
+})
+
+const formCreatorDisplayName = computed(() => {
+  if (isEditMode.value && editingOrder.value) {
+    return String(editingOrder.value.triggered_by || '').trim() || currentUserDisplayName.value
+  }
+  return currentUserDisplayName.value
 })
 
 const selectedApplicationRecord = computed(() =>
@@ -188,8 +206,11 @@ const scopeCardList = computed(() =>
 
 const hasScopeErrors = computed(() => visibleScopes.value.some((scope) => Boolean(scopeStates[scope].error)))
 const isParamLoading = computed(() => loadingTemplateDetail.value || visibleScopes.value.some((scope) => scopeStates[scope].loading))
-const canSubmitRelease = computed(() => Boolean(formState.application_id && formState.template_id && selectedTemplate.value) && !hasScopeErrors.value && !isParamLoading.value)
+const canSubmitRelease = computed(() => Boolean(formState.application_id && formState.template_id && selectedTemplate.value) && !hasScopeErrors.value && !isParamLoading.value && !loadingEditOrder.value)
 const fastReleaseDisabledReason = computed(() => {
+  if (isEditMode.value) {
+    return '编辑模式下不支持极速发布'
+  }
   if (!selectedTemplate.value) {
     return ''
   }
@@ -202,6 +223,15 @@ const fastReleaseDisabledReason = computed(() => {
   return ''
 })
 const canFastSubmitRelease = computed(() => canSubmitRelease.value && !fastReleaseDisabledReason.value)
+const standardSubmitting = computed(() => submitting.value && submittingMode.value !== 'fast')
+const fastSubmitting = computed(() => submitting.value && submittingMode.value === 'fast')
+const pageTitle = computed(() => (isEditMode.value ? '编辑发布单' : '新建发布单'))
+const pageSubtitle = computed(() =>
+  isEditMode.value
+    ? '仅待执行的普通发布单支持编辑；保存后会按最新模板和参数重新生成待执行快照'
+    : '先选择发布模板，再按模板拆分填写 CI / CD 参数；平台会自动按模板结构执行发布',
+)
+const primaryActionText = computed(() => (isEditMode.value ? '保存修改' : '创建发布单'))
 
 function resetParamValues() {
   Object.keys(paramValues).forEach((key) => {
@@ -236,6 +266,11 @@ function formatTemplateOptionLabel(item: ReleaseTemplate) {
 }
 
 function applyRouteQuery() {
+  if (isEditMode.value) {
+    preferredTemplateID.value = ''
+    preferredBindingID.value = ''
+    return
+  }
   const applicationID = String(route.query.application_id || '').trim()
   const templateID = String(route.query.template_id || '').trim()
   const bindingID = String(route.query.binding_id || '').trim()
@@ -269,6 +304,77 @@ async function loadApplicationOptions() {
   }
 }
 
+function isEditableReleaseOrder(orderItem: ReleaseOrder) {
+  if (!orderItem) {
+    return false
+  }
+  const isPending = String(orderItem.status || '').trim() === 'pending'
+  const isOriginalDeploy =
+    String(orderItem.operation_type || '').trim() === 'deploy' &&
+    !String(orderItem.source_order_id || '').trim()
+  const canOperate =
+    authStore.isAdmin ||
+    (currentUserID.value !== '' && String(orderItem.creator_user_id || '').trim() === currentUserID.value)
+  return isPending && isOriginalDeploy && canOperate
+}
+
+async function ensureEditingApplicationOption() {
+  const applicationID = String(editingOrder.value?.application_id || '').trim()
+  if (!applicationID) {
+    return
+  }
+  if (applicationRecords.value.some((item) => item.id === applicationID)) {
+    return
+  }
+  try {
+    const response = await getApplicationByID(applicationID)
+    const record = response.data
+    applicationRecords.value = [...applicationRecords.value, record]
+    allApplicationOptions.value = [
+      ...allApplicationOptions.value,
+      {
+        label: `${record.name} (${record.key})`,
+        value: record.id,
+      },
+    ]
+  } catch {
+    // Ignore application detail lookup failures here and let the form surface later issues.
+  }
+}
+
+async function loadEditingOrderSnapshot() {
+  if (!isEditMode.value) {
+    return
+  }
+  loadingEditOrder.value = true
+  try {
+    const [orderResp, paramsResp] = await Promise.all([
+      getReleaseOrderByID(editingOrderID.value),
+      listReleaseOrderParams(editingOrderID.value),
+    ])
+    if (!isEditableReleaseOrder(orderResp.data)) {
+      message.warning('当前发布单不是可编辑的待执行普通发布单')
+      void router.replace(`/releases/${editingOrderID.value}`)
+      return
+    }
+    editingOrder.value = orderResp.data
+    editingParamSnapshot.value = paramsResp.data
+    formState.application_id = String(orderResp.data.application_id || '').trim()
+    formState.template_id = ''
+    formState.env_code = String(orderResp.data.env_code || '').trim()
+    formState.git_ref = String(orderResp.data.git_ref || '').trim()
+    formState.remark = String(orderResp.data.remark || '').trim()
+    preferredTemplateID.value = String(orderResp.data.template_id || '').trim()
+    preferredBindingID.value = ''
+    pendingEditSnapshotRestore.value = true
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '待编辑发布单加载失败'))
+    void router.replace('/releases')
+  } finally {
+    loadingEditOrder.value = false
+  }
+}
+
 async function loadEnvOptions() {
   loadingEnvOptions.value = true
   try {
@@ -296,6 +402,10 @@ function syncSelectedEnvCode() {
 }
 
 function resetSelectionIfUnauthorized() {
+  if (isEditMode.value) {
+    syncSelectedEnvCode()
+    return
+  }
   const hasCurrentApplication = applicationOptions.value.some((item) => item.value === formState.application_id)
   if (hasCurrentApplication) {
     syncSelectedEnvCode()
@@ -327,7 +437,11 @@ async function findTemplateByBinding(templates: ReleaseTemplate[], bindingID: st
 
 async function loadTemplateOptions() {
   const applicationID = formState.application_id.trim()
+  const preservedGitRef = pendingEditSnapshotRestore.value ? formState.git_ref.trim() : ''
   resetTemplateState()
+  if (preservedGitRef) {
+    formState.git_ref = preservedGitRef
+  }
   if (!applicationID) {
     return
   }
@@ -434,6 +548,40 @@ async function loadScopeParamDefs(scope: ReleasePipelineScope) {
   }
 }
 
+function restoreEditingParamValues() {
+  if (!pendingEditSnapshotRestore.value) {
+    return
+  }
+  const snapshot = editingParamSnapshot.value
+  if (snapshot.length === 0) {
+    pendingEditSnapshotRestore.value = false
+    return
+  }
+  for (const scope of visibleScopes.value) {
+    const items = scopeTemplateParamDefs(scope)
+    for (const item of items) {
+      if (!isTemplateParamEditable(scope, item)) {
+        continue
+      }
+      const matched = snapshot.find((param) => {
+        if (param.pipeline_scope !== scope) {
+          return false
+        }
+        const executorParamName = String(param.executor_param_name || '').trim().toLowerCase()
+        const currentExecutorParamName = String(item.executor_param_name || '').trim().toLowerCase()
+        if (executorParamName && currentExecutorParamName) {
+          return executorParamName === currentExecutorParamName
+        }
+        return String(param.param_key || '').trim().toLowerCase() === String(item.param_key || '').trim().toLowerCase()
+      })
+      if (matched) {
+        paramValues[item.id] = String(matched.param_value || '')
+      }
+    }
+  }
+  pendingEditSnapshotRestore.value = false
+}
+
 async function loadSelectedTemplateDetail() {
   const templateID = formState.template_id.trim()
   if (!templateID) {
@@ -458,6 +606,7 @@ async function loadSelectedTemplateDetail() {
       loadScopeParamDefs('ci'),
       loadScopeParamDefs('cd'),
     ])
+    restoreEditingParamValues()
     templateWarning.value = ''
   } catch (error) {
     selectedTemplate.value = null
@@ -488,7 +637,11 @@ async function handleTemplateChange(value: string | undefined) {
   await loadSelectedTemplateDetail()
 }
 
-function toList() {
+function goBack() {
+  if (isEditMode.value && editingOrderID.value) {
+    void router.push(`/releases/${editingOrderID.value}`)
+    return
+  }
   void router.push('/releases')
 }
 
@@ -856,10 +1009,11 @@ async function submitRelease(options?: { fast?: boolean }) {
     return
   }
 
+  const fast = Boolean(options?.fast)
   submitting.value = true
+  submittingMode.value = fast ? 'fast' : 'standard'
   try {
-    const fast = Boolean(options?.fast)
-    const response = await createReleaseOrder({
+    const payload = {
       application_id: formState.application_id.trim(),
       template_id: formState.template_id.trim(),
       env_code: formState.env_code.trim(),
@@ -868,7 +1022,10 @@ async function submitRelease(options?: { fast?: boolean }) {
       triggered_by: currentUserDisplayName.value !== '-' ? currentUserDisplayName.value : undefined,
       remark: formState.remark.trim() || undefined,
       params: paramsPayload.length > 0 ? paramsPayload : undefined,
-    })
+    }
+    const response = isEditMode.value
+      ? await updateReleaseOrder(editingOrderID.value, payload)
+      : await createReleaseOrder(payload)
     if (fast) {
       message.success('极速发布单创建成功，正在进入详情并自动开始发布')
       void router.push({
@@ -879,12 +1036,13 @@ async function submitRelease(options?: { fast?: boolean }) {
       })
       return
     }
-    message.success('发布单创建成功')
+    message.success(isEditMode.value ? '发布单修改成功' : '发布单创建成功')
     void router.push(`/releases/${response.data.id}`)
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '发布单创建失败'))
+    message.error(extractHTTPErrorMessage(error, isEditMode.value ? '发布单修改失败' : '发布单创建失败'))
   } finally {
     submitting.value = false
+    submittingMode.value = ''
   }
 }
 
@@ -919,7 +1077,9 @@ function scopeHint(scope: ReleasePipelineScope) {
 onMounted(async () => {
   await authStore.loadMe(true)
   applyRouteQuery()
+  await loadEditingOrderSnapshot()
   await Promise.all([loadApplicationOptions(), loadEnvOptions()])
+  await ensureEditingApplicationOption()
   resetSelectionIfUnauthorized()
   if (formState.application_id) {
     await loadTemplateOptions()
@@ -931,15 +1091,15 @@ onMounted(async () => {
   <div class="page-wrapper">
     <div class="page-header-card page-header">
       <div class="header-left">
-        <a-button @click="toList">
+        <a-button @click="goBack">
           <template #icon>
             <ArrowLeftOutlined />
           </template>
-          返回发布单
+          {{ isEditMode ? '返回详情' : '返回发布单' }}
         </a-button>
         <div class="page-header-copy">
-          <h2 class="page-title">新建发布单</h2>
-          <p class="page-subtitle">先选择发布模板，再按模板拆分填写 CI / CD 参数；平台会自动按模板结构执行发布</p>
+          <h2 class="page-title">{{ pageTitle }}</h2>
+          <p class="page-subtitle">{{ pageSubtitle }}</p>
         </div>
       </div>
     </div>
@@ -959,9 +1119,10 @@ onMounted(async () => {
               <a-select
                 v-model:value="formState.application_id"
                 show-search
-                allow-clear
+                :allow-clear="!isEditMode"
+                :disabled="isEditMode"
                 option-filter-prop="label"
-                placeholder="请选择应用"
+                :placeholder="isEditMode ? '编辑模式下应用已锁定' : '请选择应用'"
                 :loading="loadingApplications"
                 :options="applicationOptions"
                 @change="handleApplicationChange"
@@ -987,7 +1148,7 @@ onMounted(async () => {
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
             <a-form-item label="创建者">
-              <a-input :value="currentUserDisplayName" disabled />
+              <a-input :value="formCreatorDisplayName" disabled />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -1127,11 +1288,12 @@ onMounted(async () => {
 
       <div class="action-area">
         <a-space>
-          <a-button @click="toList">取消</a-button>
+          <a-button @click="goBack">取消</a-button>
           <a-button
+            v-if="!isEditMode"
             class="fast-submit-button"
             :class="{ 'fast-submit-button-disabled': !canFastSubmitRelease }"
-            :loading="submitting"
+            :loading="fastSubmitting"
             :aria-disabled="!canFastSubmitRelease"
             @click="handleFastSubmit"
           >
@@ -1140,7 +1302,7 @@ onMounted(async () => {
             </template>
             极速发布
           </a-button>
-          <a-button type="primary" :loading="submitting" :disabled="!canSubmitRelease" @click="handleSubmit">创建发布单</a-button>
+          <a-button type="primary" :loading="standardSubmitting" :disabled="!canSubmitRelease" @click="handleSubmit">{{ primaryActionText }}</a-button>
         </a-space>
       </div>
     </a-form>

@@ -61,7 +61,10 @@ func NewReleaseOrderHandler(
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/applications/:id/release-orders/rollback", h.CreateRollbackByApplication)
 	router.POST("/release-orders", h.Create)
+	router.PUT("/release-orders/:id", h.Update)
+	router.DELETE("/release-orders/:id", h.Delete)
 	router.POST("/release-orders/batch-execute", h.BatchExecute)
+	router.POST("/release-orders/batch-delete", h.BatchDelete)
 	router.POST("/release-orders/:id/rollback", h.CreateRollbackByOrder)
 	router.POST("/release-orders/:id/replay", h.CreateReplayByOrder)
 	router.GET("/release-orders", h.List)
@@ -74,6 +77,8 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/release-orders/:id/approve", h.Approve)
 	router.POST("/release-orders/:id/reject", h.Reject)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
+	router.POST("/release-orders/:id/build", h.Build)
+	router.POST("/release-orders/:id/deploy", h.Deploy)
 	router.POST("/release-orders/:id/execute", h.Execute)
 	router.GET("/release-orders/:id/logs/stream", h.StreamLogs)
 
@@ -126,6 +131,11 @@ type FinishReleaseOrderStepRequest struct {
 }
 
 type BatchExecuteReleaseOrdersRequest struct {
+	OrderIDs           []string `json:"order_ids"`
+	StagedDispatchMode string   `json:"staged_dispatch_mode"`
+}
+
+type BatchDeleteReleaseOrdersRequest struct {
 	OrderIDs []string `json:"order_ids"`
 }
 
@@ -140,6 +150,8 @@ type ReleaseOrderResponse struct {
 	ConcurrentBatchNo     string     `json:"concurrent_batch_no"`
 	ConcurrentBatchSeq    int        `json:"concurrent_batch_seq"`
 	CDProvider            string     `json:"cd_provider"`
+	HasCIExecution        bool       `json:"has_ci_execution"`
+	HasCDExecution        bool       `json:"has_cd_execution"`
 	ApplicationID         string     `json:"application_id"`
 	ApplicationName       string     `json:"application_name"`
 	TemplateID            string     `json:"template_id"`
@@ -388,40 +400,7 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 		return
 	}
 
-	params := make([]usecase.CreateReleaseOrderParamInput, 0, len(req.Params))
-	for _, item := range req.Params {
-		params = append(params, usecase.CreateReleaseOrderParamInput{
-			PipelineScope:     domain.PipelineScope(strings.ToLower(strings.TrimSpace(item.PipelineScope))),
-			ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
-			ExecutorParamName: item.ExecutorParamName,
-			ParamValue:        item.ParamValue,
-			ValueSource:       domain.ValueSource(strings.TrimSpace(item.ValueSource)),
-		})
-	}
-
-	steps := make([]usecase.CreateReleaseOrderStepInput, 0, len(req.Steps))
-	for _, item := range req.Steps {
-		steps = append(steps, usecase.CreateReleaseOrderStepInput{
-			StepCode: item.StepCode,
-			StepName: item.StepName,
-			SortNo:   item.SortNo,
-		})
-	}
-
-	order, err := h.manager.Create(c.Request.Context(), usecase.CreateReleaseOrderInput{
-		ApplicationID: req.ApplicationID,
-		TemplateID:    req.TemplateID,
-		EnvCode:       req.EnvCode,
-		SonService:    "",
-		GitRef:        req.GitRef,
-		ImageTag:      req.ImageTag,
-		TriggerType:   domain.TriggerType(strings.TrimSpace(req.TriggerType)),
-		Remark:        req.Remark,
-		CreatorUserID: strings.TrimSpace(currentUser.ID),
-		TriggeredBy:   firstNonEmpty(resolveTriggeredBy(currentUser), req.TriggeredBy),
-		Params:        params,
-		Steps:         steps,
-	})
+	order, err := h.manager.Create(c.Request.Context(), buildReleaseOrderInput(req, currentUser))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -429,6 +408,95 @@ func (h *ReleaseOrderHandler) Create(c *gin.Context) {
 	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
 
 	c.JSON(http.StatusCreated, gin.H{"data": toReleaseOrderResponse(order)})
+}
+
+// Update godoc
+// @Summary      Update editable release order
+// @Tags         release-orders
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                     true  "Release order id"
+// @Param        request  body      CreateReleaseOrderRequest  true  "Update release order request"
+// @Success      200      {object}  ReleaseOrderDataResponse
+// @Failure      400      {object}  ErrorResponse
+// @Failure      403      {object}  ErrorResponse
+// @Failure      404      {object}  ErrorResponse
+// @Failure      409      {object}  ErrorResponse
+// @Failure      500      {object}  ErrorResponse
+// @Router       /release-orders/{id} [put]
+func (h *ReleaseOrderHandler) Update(c *gin.Context) {
+	orderID := strings.TrimSpace(c.Param("id"))
+	if orderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "release order id is required"})
+		return
+	}
+
+	existing, err := h.manager.GetByID(c.Request.Context(), orderID)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing) {
+		return
+	}
+
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderEditableActor(c, currentUser, existing) {
+		return
+	}
+
+	var req CreateReleaseOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	order, err := h.manager.Update(c.Request.Context(), orderID, buildReleaseOrderInput(req, currentUser))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
+
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(order)})
+}
+
+func (h *ReleaseOrderHandler) Delete(c *gin.Context) {
+	if _, ok := ensureCurrentUserAdmin(c); !ok {
+		return
+	}
+	if err := h.manager.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"data": gin.H{
+			"id": strings.TrimSpace(c.Param("id")),
+		},
+	})
+}
+
+func (h *ReleaseOrderHandler) BatchDelete(c *gin.Context) {
+	if _, ok := ensureCurrentUserAdmin(c); !ok {
+		return
+	}
+	var req BatchDeleteReleaseOrdersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	output, err := h.manager.BatchDelete(c.Request.Context(), usecase.BatchDeleteReleaseOrdersInput{
+		OrderIDs: req.OrderIDs,
+	})
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
 }
 
 func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
@@ -466,7 +534,8 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 		}
 	}
 	output, err := h.manager.BatchExecute(c.Request.Context(), usecase.BatchExecuteReleaseOrdersInput{
-		OrderIDs: req.OrderIDs,
+		OrderIDs:           req.OrderIDs,
+		StagedDispatchMode: usecase.BatchExecuteStagedDispatchMode(strings.TrimSpace(req.StagedDispatchMode)),
 	})
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
@@ -730,7 +799,16 @@ func (h *ReleaseOrderHandler) GetPrecheck(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	output, err := h.manager.PrecheckExecute(c.Request.Context(), c.Param("id"))
+	action := strings.ToLower(strings.TrimSpace(c.Query("action")))
+	var output usecase.ReleaseOrderPrecheckOutput
+	switch action {
+	case "build":
+		output, err = h.manager.PrecheckBuild(c.Request.Context(), c.Param("id"))
+	case "deploy":
+		output, err = h.manager.PrecheckDeploy(c.Request.Context(), c.Param("id"))
+	default:
+		output, err = h.manager.PrecheckExecute(c.Request.Context(), c.Param("id"))
+	}
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -959,7 +1037,12 @@ func (h *ReleaseOrderHandler) Cancel(c *gin.Context) {
 	if !ensureReleaseOrderVisible(c, h.authz, existing) {
 		return
 	}
-	if !ensureReleaseApplicationPermission(c, h.authz, "release.cancel", existing.ApplicationID, existing.EnvCode) {
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderCancelActor(c, currentUser, existing) {
 		return
 	}
 	item, err := h.manager.Cancel(c.Request.Context(), c.Param("id"))
@@ -1001,7 +1084,65 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
-	item, err := h.manager.Execute(c.Request.Context(), c.Param("id"))
+	item, err := h.manager.Execute(c.Request.Context(), c.Param("id"), strings.TrimSpace(currentUser.ID), resolveTriggeredBy(currentUser))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+func (h *ReleaseOrderHandler) Build(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
+		return
+	}
+	item, err := h.manager.Build(c.Request.Context(), c.Param("id"), strings.TrimSpace(currentUser.ID), resolveTriggeredBy(currentUser))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
+	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+}
+
+func (h *ReleaseOrderHandler) Deploy(c *gin.Context) {
+	existing, err := h.manager.GetByID(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseOrderVisible(c, h.authz, existing) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
+		return
+	}
+	item, err := h.manager.Deploy(c.Request.Context(), c.Param("id"), strings.TrimSpace(currentUser.ID), resolveTriggeredBy(currentUser))
 	if err != nil {
 		writeReleaseOrderHTTPError(c, err)
 		return
@@ -1291,6 +1432,8 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		ConcurrentBatchNo:     item.ConcurrentBatchNo,
 		ConcurrentBatchSeq:    item.ConcurrentBatchSeq,
 		CDProvider:            item.CDProvider,
+		HasCIExecution:        item.HasCIExecution,
+		HasCDExecution:        item.HasCDExecution,
 		ApplicationID:         item.ApplicationID,
 		ApplicationName:       item.ApplicationName,
 		TemplateID:            item.TemplateID,
@@ -1339,13 +1482,19 @@ func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context
 		if execution.Status == domain.ExecutionStatusRunning {
 			hasRunningExecution = true
 		}
+		if execution.PipelineScope == domain.PipelineScopeCI {
+			item.HasCIExecution = true
+		}
 		if execution.PipelineScope != domain.PipelineScopeCD {
 			continue
 		}
+		item.HasCDExecution = true
 		item.CDProvider = strings.TrimSpace(execution.Provider)
 	}
 	item.BusinessStatus = deriveReleaseBusinessStatus(item.Status, hasRunningExecution)
-	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying || item.BusinessStatus == domain.ReleaseBusinessStatusQueued {
+	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying ||
+		item.BusinessStatus == domain.ReleaseBusinessStatusQueued ||
+		item.BusinessStatus == domain.ReleaseBusinessStatusBuilding {
 		if progress, progressErr := h.manager.GetConcurrentBatchProgress(ctx, item.ID); progressErr == nil {
 			for _, current := range progress.Items {
 				if strings.TrimSpace(current.OrderID) != strings.TrimSpace(item.ID) {
@@ -1353,13 +1502,17 @@ func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context
 				}
 				switch current.QueueState {
 				case usecase.ReleaseOrderConcurrentBatchQueueStateQueued:
-					item.BusinessStatus = domain.ReleaseBusinessStatusQueued
+					if item.BusinessStatus != domain.ReleaseBusinessStatusBuilding {
+						item.BusinessStatus = domain.ReleaseBusinessStatusQueued
+					}
 					item.QueuePosition = current.QueuePosition
 					if item.QueuePosition > 0 {
 						item.QueuedReason = fmt.Sprintf("并发批次排队中，当前位次 %d", item.QueuePosition)
 					}
 				case usecase.ReleaseOrderConcurrentBatchQueueStateExecuting:
-					item.BusinessStatus = domain.ReleaseBusinessStatusDeploying
+					if item.BusinessStatus != domain.ReleaseBusinessStatusBuilding {
+						item.BusinessStatus = domain.ReleaseBusinessStatusDeploying
+					}
 				case usecase.ReleaseOrderConcurrentBatchQueueStateSuccess:
 					item.BusinessStatus = domain.ReleaseBusinessStatusDeploySuccess
 				case usecase.ReleaseOrderConcurrentBatchQueueStateFailed:
@@ -1371,7 +1524,8 @@ func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context
 			}
 		}
 	}
-	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying || item.BusinessStatus == domain.ReleaseBusinessStatusQueued {
+	if item.BusinessStatus == domain.ReleaseBusinessStatusDeploying ||
+		item.BusinessStatus == domain.ReleaseBusinessStatusQueued {
 		if precheck, precheckErr := h.manager.PrecheckExecute(ctx, item.ID); precheckErr == nil && precheck.WaitingForLock {
 			item.BusinessStatus = domain.ReleaseBusinessStatusQueued
 			if item.QueuePosition <= 0 {
@@ -1395,6 +1549,10 @@ func deriveReleaseBusinessStatus(status domain.OrderStatus, hasRunningExecution 
 		return domain.ReleaseBusinessStatusApproving
 	case domain.OrderStatusApproved:
 		return domain.ReleaseBusinessStatusApproved
+	case domain.OrderStatusBuilding:
+		return domain.ReleaseBusinessStatusBuilding
+	case domain.OrderStatusBuiltWaitingDeploy:
+		return domain.ReleaseBusinessStatusBuiltWaitingDeploy
 	case domain.OrderStatusRejected:
 		return domain.ReleaseBusinessStatusRejected
 	case domain.OrderStatusQueued:
@@ -1570,6 +1728,19 @@ func normalizeReleaseOrderErrorMessage(err error) string {
 	return message
 }
 
+func ensureCurrentUserAdmin(c *gin.Context) (userdomain.User, bool) {
+	user, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return userdomain.User{}, false
+	}
+	if user.Role != userdomain.RoleAdmin {
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden: only admin can perform this action"})
+		return userdomain.User{}, false
+	}
+	return user, true
+}
+
 func ensureReleaseApplicationPermission(
 	c *gin.Context,
 	authz RequestAuthorizer,
@@ -1617,6 +1788,28 @@ func ensureReleaseOrderExecuteActor(
 	order domain.ReleaseOrder,
 ) bool {
 	return ensureReleaseOrderCreatorActor(c, user, order, "execute this release order")
+}
+
+func ensureReleaseOrderCancelActor(
+	c *gin.Context,
+	user userdomain.User,
+	order domain.ReleaseOrder,
+) bool {
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+	return ensureReleaseOrderCreatorActor(c, user, order, "cancel this release order")
+}
+
+func ensureReleaseOrderEditableActor(
+	c *gin.Context,
+	user userdomain.User,
+	order domain.ReleaseOrder,
+) bool {
+	if user.Role == userdomain.RoleAdmin {
+		return true
+	}
+	return ensureReleaseOrderCreatorActor(c, user, order, "edit this release order")
 }
 
 func ensureReleaseOrderCreatorActor(
@@ -1673,6 +1866,43 @@ func ensureReleaseOrderVisible(
 		return false
 	}
 	return true
+}
+
+func buildReleaseOrderInput(req CreateReleaseOrderRequest, currentUser userdomain.User) usecase.CreateReleaseOrderInput {
+	params := make([]usecase.CreateReleaseOrderParamInput, 0, len(req.Params))
+	for _, item := range req.Params {
+		params = append(params, usecase.CreateReleaseOrderParamInput{
+			PipelineScope:     domain.PipelineScope(strings.ToLower(strings.TrimSpace(item.PipelineScope))),
+			ParamKey:          strings.ToLower(strings.TrimSpace(item.ParamKey)),
+			ExecutorParamName: item.ExecutorParamName,
+			ParamValue:        item.ParamValue,
+			ValueSource:       domain.ValueSource(strings.TrimSpace(item.ValueSource)),
+		})
+	}
+
+	steps := make([]usecase.CreateReleaseOrderStepInput, 0, len(req.Steps))
+	for _, item := range req.Steps {
+		steps = append(steps, usecase.CreateReleaseOrderStepInput{
+			StepCode: item.StepCode,
+			StepName: item.StepName,
+			SortNo:   item.SortNo,
+		})
+	}
+
+	return usecase.CreateReleaseOrderInput{
+		ApplicationID: req.ApplicationID,
+		TemplateID:    req.TemplateID,
+		EnvCode:       req.EnvCode,
+		SonService:    "",
+		GitRef:        req.GitRef,
+		ImageTag:      req.ImageTag,
+		TriggerType:   domain.TriggerType(strings.TrimSpace(req.TriggerType)),
+		Remark:        req.Remark,
+		CreatorUserID: strings.TrimSpace(currentUser.ID),
+		TriggeredBy:   firstNonEmpty(resolveTriggeredBy(currentUser), req.TriggeredBy),
+		Params:        params,
+		Steps:         steps,
+	}
 }
 
 func resolveVisibleReleaseOrderApplicationIDs(

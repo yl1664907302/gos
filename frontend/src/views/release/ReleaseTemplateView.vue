@@ -32,6 +32,7 @@ import type {
   ReleaseTemplate,
   ReleaseTemplateBinding,
   ReleaseTemplateHook,
+  ReleaseTemplateHookExecuteStage,
   ReleaseTemplateHookPayload,
   ReleaseTemplateApprovalMode,
   ReleaseTemplateParamConfigPayload,
@@ -96,6 +97,7 @@ interface GitOpsRuleFormItem {
 }
 
 type ReleaseTemplateHookTypePreview = 'agent_task' | 'notification_hook' | 'webhook_notification'
+type ReleaseTemplateHookExecuteStagePreview = ReleaseTemplateHookExecuteStage
 type ReleaseTemplateHookTriggerConditionPreview = 'on_success' | 'on_failed' | 'always'
 type ReleaseTemplateHookFailurePolicyPreview = 'block_release' | 'warn_only'
 
@@ -103,6 +105,7 @@ interface HookFormItem {
   local_id: string
   name: string
   hook_type: ReleaseTemplateHookTypePreview
+  execute_stages: ReleaseTemplateHookExecuteStagePreview[]
   trigger_condition: ReleaseTemplateHookTriggerConditionPreview
   failure_policy: ReleaseTemplateHookFailurePolicyPreview
   env_codes: string[]
@@ -224,6 +227,10 @@ const scopeDescriptions: Record<ReleasePipelineScope, string> = {
 }
 
 const hookVariableSourceTags = ['固定值', '标准字段', '内置字段']
+const hookExecuteStageOptions = [
+  { label: '发布完成时', value: 'post_release' },
+  { label: '构建完成时', value: 'build_complete' },
+] satisfies Array<{ label: string; value: ReleaseTemplateHookExecuteStagePreview }>
 
 const initialColumns: TableColumnsType<ReleaseTemplate> = [
   { title: '模板名称', dataIndex: 'name', key: 'name', width: 220 },
@@ -279,11 +286,12 @@ function createHookFormItem(type: ReleaseTemplateHookTypePreview): HookFormItem 
     local_id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name:
       type === 'agent_task'
-        ? '发布后 Agent 任务'
+        ? 'Agent 任务 Hook'
         : type === 'notification_hook'
-          ? '发布后通知 Hook'
-          : '发布后 Webhook 通知',
+          ? '通知 Hook'
+          : 'Webhook 通知 Hook',
     hook_type: type,
+    execute_stages: ['post_release'],
     trigger_condition: 'on_success',
     failure_policy: type === 'webhook_notification' ? 'warn_only' : 'block_release',
     env_codes: [],
@@ -304,6 +312,7 @@ function createHookFormItemFromResponse(item: ReleaseTemplateHook): HookFormItem
     local_id: item.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     name: item.name,
     hook_type: item.hook_type,
+    execute_stages: normalizeHookExecuteStages(item.execute_stages, item.execute_stage),
     trigger_condition: item.trigger_condition,
     failure_policy: item.failure_policy,
     env_codes: normalizeHookEnvCodes(item.env_codes || []),
@@ -334,6 +343,27 @@ function normalizeHookEnvCodes(values: string[]) {
   return result
 }
 
+function normalizeHookExecuteStages(
+  values: Array<ReleaseTemplateHookExecuteStagePreview | string> = [],
+  legacy?: ReleaseTemplateHookExecuteStagePreview | string,
+) {
+  const normalized: ReleaseTemplateHookExecuteStagePreview[] = []
+  const seen = new Set<string>()
+  ;[...values, legacy || ''].forEach((item) => {
+    const value = item === 'build_complete' ? 'build_complete' : item === 'post_release' ? 'post_release' : ''
+    if (!value || seen.has(value)) {
+      return
+    }
+    seen.add(value)
+    normalized.push(value)
+  })
+  return normalized.length ? normalized : ['post_release']
+}
+
+function hookHasBuildStage(stages: Array<ReleaseTemplateHookExecuteStagePreview | string>) {
+  return normalizeHookExecuteStages(stages).includes('build_complete')
+}
+
 function mergeHookEnvOptions(extraValues: string[] = []) {
   const merged = new Map<string, SelectOption>()
   ;[...hookEnvOptions.value.map((item) => item.value), ...extraValues].forEach((item) => {
@@ -361,7 +391,12 @@ function hookEnvLabel(envCodes: string[]) {
 }
 
 const hookSummaryItems = computed(() => [
-  { label: 'Hook 阶段', value: 'post_release' },
+  {
+    label: 'Hook 阶段',
+    value: templateHooks.value.length
+      ? Array.from(new Set(templateHooks.value.flatMap((item) => hookStageLabels(item.execute_stages)))).join(' / ')
+      : '待配置',
+  },
   { label: '执行方式', value: templateHooks.value.length ? '串行执行' : '待配置' },
   { label: 'Hook 数量', value: `${templateHooks.value.length} 个` },
   { label: '变量', value: '标准平台 Key / 内置字段' },
@@ -464,19 +499,58 @@ function removeHook(localID: string) {
   templateHooks.value = templateHooks.value.filter((item) => item.local_id !== localID)
 }
 
-function hookTriggerLabel(type: ReleaseTemplateHookTriggerConditionPreview) {
+function hookStageLabel(type: ReleaseTemplateHookExecuteStagePreview) {
+  return type === 'build_complete' ? '构建完成时' : '发布完成时'
+}
+
+function hookStageLabels(stages: Array<ReleaseTemplateHookExecuteStagePreview | string>) {
+  return normalizeHookExecuteStages(stages).map((item) => hookStageLabel(item))
+}
+
+function hookTriggerLabel(
+  type: ReleaseTemplateHookTriggerConditionPreview,
+  stages: Array<ReleaseTemplateHookExecuteStagePreview | string> = ['post_release'],
+) {
+  const normalizedStages = normalizeHookExecuteStages(stages)
+  if (normalizedStages.length === 1 && normalizedStages[0] === 'build_complete') {
+    return '构建成功后'
+  }
   switch (type) {
     case 'on_success':
-      return '主流程成功后'
+      return hookHasBuildStage(normalizedStages) ? '成功后触发' : '主流程成功后'
     case 'on_failed':
-      return '主流程失败后'
+      return hookHasBuildStage(normalizedStages) ? '失败后触发' : '主流程失败后'
     default:
-      return '始终触发'
+      return hookHasBuildStage(normalizedStages) ? '始终触发' : '始终触发'
   }
 }
 
 function hookFailureLabel(type: ReleaseTemplateHookFailurePolicyPreview) {
   return type === 'block_release' ? '失败阻断发布单' : '失败仅告警'
+}
+
+function hookTriggerOptions(item: HookFormItem) {
+  const normalizedStages = normalizeHookExecuteStages(item.execute_stages)
+  if (normalizedStages.length === 1 && normalizedStages[0] === 'build_complete') {
+    return [{ label: '构建成功后', value: 'on_success' }]
+  }
+  return [
+    { label: '仅成功后', value: 'on_success' },
+    { label: '仅失败后', value: 'on_failed' },
+    { label: '始终触发', value: 'always' },
+  ]
+}
+
+function handleHookStageChange(item: HookFormItem, values: string[]) {
+  item.execute_stages = normalizeHookExecuteStages(values)
+  if (item.execute_stages.length === 1 && item.execute_stages[0] === 'build_complete') {
+    item.trigger_condition = 'on_success'
+    return
+  }
+  const validValues = hookTriggerOptions(item).map((option) => option.value)
+  if (!validValues.includes(item.trigger_condition)) {
+    item.trigger_condition = 'on_success'
+  }
 }
 
 async function loadHookEnvOptions(extraValues: string[] = [], silent = false) {
@@ -1189,6 +1263,8 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     hooks: templateHooks.value.map<ReleaseTemplateHookPayload>((item) => ({
       hook_type: item.hook_type,
       name: item.name.trim(),
+      execute_stage: normalizeHookExecuteStages(item.execute_stages)[0],
+      execute_stages: normalizeHookExecuteStages(item.execute_stages),
       trigger_condition: item.trigger_condition,
       failure_policy: item.failure_policy,
       env_codes: normalizeHookEnvCodes(item.env_codes),
@@ -2685,7 +2761,7 @@ onMounted(async () => {
           <template #title>发布后 Hook</template>
           <template #extra>
             <a-space>
-              <a-tag class="dashboard-chip dashboard-chip-running">发布后执行</a-tag>
+              <a-tag class="dashboard-chip dashboard-chip-running">多阶段执行</a-tag>
               <a-button type="dashed" size="small" @click="openHookTypePicker">
                 <template #icon><PlusOutlined /></template>
                 新增 Hook
@@ -2697,7 +2773,7 @@ onMounted(async () => {
             class="scope-alert"
             type="info"
             show-icon
-            message="发布模板中的 Hook 会在主发布流程结束后串行执行。通知 Hook 会自动使用发布过程中的标准平台 Key 和内置字段渲染消息。"
+            message="发布模板中的 Hook 可配置在构建完成或发布完成后串行执行。通知 Hook 会自动使用发布过程中的标准平台 Key 和内置字段渲染消息。"
           />
 
           <div class="hook-template-summary-grid">
@@ -2728,7 +2804,7 @@ onMounted(async () => {
                   </div>
                   <div class="hook-template-capability-card-meta">
                     {{ hookTypeLabel(item.hook_type) }} ·
-                    {{ item.hook_type === 'agent_task' ? '发布后 Agent 任务' : item.hook_type === 'notification_hook' ? '发布后通知 Hook' : '发布后 Webhook 通知' }}
+                    {{ item.hook_type === 'agent_task' ? 'Agent 任务 Hook' : item.hook_type === 'notification_hook' ? '通知 Hook' : 'Webhook 通知 Hook' }}
                   </div>
                 </div>
                 <a-space>
@@ -2743,21 +2819,26 @@ onMounted(async () => {
                     v-model:value="item.name"
                     allow-clear
                     :placeholder="item.hook_type === 'agent_task'
-                      ? '例如：发布后 Agent 任务'
+                      ? '例如：构建/发布后 Agent 任务'
                       : item.hook_type === 'notification_hook'
-                        ? '例如：发布后通知 Hook'
-                        : '例如：发布后 Webhook 通知'"
+                        ? '例如：构建/发布通知 Hook'
+                        : '例如：构建/发布 Webhook 通知'"
+                  />
+                </a-form-item>
+
+                <a-form-item label="执行阶段" class="template-param-inline-item">
+                  <a-checkbox-group
+                    :value="item.execute_stages"
+                    :options="hookExecuteStageOptions"
+                    class="hook-stage-checkbox-group"
+                    @update:value="handleHookStageChange(item, $event)"
                   />
                 </a-form-item>
 
                 <a-form-item label="触发条件" class="template-param-inline-item">
                   <a-segmented
                     v-model:value="item.trigger_condition"
-                    :options="[
-                      { label: '仅成功后', value: 'on_success' },
-                      { label: '仅失败后', value: 'on_failed' },
-                      { label: '始终触发', value: 'always' },
-                    ]"
+                    :options="hookTriggerOptions(item)"
                   />
                 </a-form-item>
 
@@ -2908,7 +2989,7 @@ onMounted(async () => {
 
                 <a-descriptions :column="1" size="small" bordered class="hook-template-description">
                   <a-descriptions-item label="当前摘要">
-                    {{ hookTriggerLabel(item.trigger_condition) }} · {{ hookFailureLabel(item.failure_policy) }} · {{ hookEnvLabel(item.env_codes) }}
+                    {{ hookStageLabels(item.execute_stages).join(' / ') }} · {{ hookTriggerLabel(item.trigger_condition, item.execute_stages) }} · {{ hookFailureLabel(item.failure_policy) }} · {{ hookEnvLabel(item.env_codes) }}
                   </a-descriptions-item>
                   <a-descriptions-item label="详情展示">
                     发布单详情直接展示 Hook 执行进度、变量和日志
@@ -3066,6 +3147,12 @@ onMounted(async () => {
 .scope-alert,
 .scope-binding-alert {
   margin-bottom: 12px;
+}
+
+.hook-stage-checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .scope-card {

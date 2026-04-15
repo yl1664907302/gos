@@ -288,7 +288,9 @@ func defaultPipelineStageMessage(status domain.OrderStatus) string {
 	switch status {
 	case domain.OrderStatusPending:
 		return "当前发布单尚未执行，执行后将展示 Jenkins 阶段进度。"
-	case domain.OrderStatusRunning:
+	case domain.OrderStatusBuiltWaitingDeploy:
+		return "构建已完成，等待部署触发后展示后续阶段进度。"
+	case domain.OrderStatusBuilding, domain.OrderStatusRunning:
 		return "Jenkins 已触发，等待阶段数据同步。"
 	case domain.OrderStatusSuccess, domain.OrderStatusFailed, domain.OrderStatusCancelled:
 		return "当前构建未返回阶段数据。"

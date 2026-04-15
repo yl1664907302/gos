@@ -85,7 +85,12 @@ const builtinVariableOptions = [
   { label: 'order_no', value: 'order_no', type: '内置字段' },
   { label: 'operation_type', value: 'operation_type', type: '内置字段' },
   { label: 'source_order_no', value: 'source_order_no', type: '内置字段' },
+  { label: 'executor_user_id', value: 'executor_user_id', type: '内置字段' },
+  { label: 'executor_name', value: 'executor_name', type: '内置字段' },
   { label: 'release_status', value: 'release_status', type: '内置字段' },
+  { label: 'release_stage', value: 'release_stage', type: '内置字段' },
+  { label: 'release_status_rich', value: 'release_status_rich', type: '内置字段' },
+  { label: 'release_stage_rich', value: 'release_stage_rich', type: '内置字段' },
 ] as const
 
 const markdownVariableOptions = computed(() => {
@@ -110,7 +115,7 @@ const conditionParamKeyOptions = computed(() => {
     type: '标准平台 Key',
   }))
   // 排除 release_status 等不适合作为条件的运行时字段
-  const excludeKeys = new Set(['release_status'])
+  const excludeKeys = new Set(['release_status', 'release_stage', 'release_status_rich', 'release_stage_rich'])
   const filteredBuiltin = builtinVariableOptions.filter(
     (item) => !excludeKeys.has(item.value as string)
   )
@@ -270,6 +275,97 @@ const hookColumns: TableColumnsType<NotificationHook> = [
   { title: '操作', key: 'actions', width: 180, fixed: 'right' },
 ]
 
+const defaultNotificationTemplatePreset = {
+  name: '通用发布通知模板-默认',
+  title_template: '[{env}] {app_name} {release_status_rich}',
+  body_template: [
+    '## 发布进展',
+    '',
+    '> **阶段**：{release_stage_rich}',
+    '> **结果**：{release_status_rich}',
+    '',
+    '### 核心信息',
+    '- **应用**：{app_name}（`{app_key}`）',
+    '- **环境**：`{env}`',
+    '- **发布单**：`{order_no}`',
+    '- **操作**：`{operation_type}`',
+    '- **分支**：`{branch}`',
+    '- **子服务**：`{project_name}`',
+    '- **镜像版本**：`{image_version}`',
+    '- **来源单**：`{source_order_no}`',
+    '- **执行人**：{executor_name}',
+    '',
+    '---',
+    '请前往 **GOS Release** 查看执行日志、审批记录与 Hook 详情。',
+  ].join('\n'),
+  remark: '推荐用于构建完成通知与发布完成通知的通用模板，已内置彩色进度语义标签',
+} as const
+
+type TemplatePreviewScenario = 'build_success' | 'release_success' | 'release_failed'
+
+const templatePreviewScenario = ref<TemplatePreviewScenario>('build_success')
+
+const templatePreviewScenarioOptions = [
+  { label: '构建成功', value: 'build_success' },
+  { label: '发布成功', value: 'release_success' },
+  { label: '发布失败', value: 'release_failed' },
+] as const
+
+const templatePreviewMockValues = computed<Record<string, string>>(() => {
+  const common = {
+    app_key: 'gov-collab-service',
+    app_name: '省公协同后端',
+    project_name: 'shenggongxie-notarization-management-java-k8s',
+    env: 'prod',
+    env_code: 'prod',
+    branch: 'release_v2026.04.15',
+    git_ref: 'release_v2026.04.15',
+    image_version: '20260415.15',
+    image_tag: '20260415.15',
+    order_no: 'RO-20260415094512-8AC7D1E2',
+    operation_type: 'deploy',
+    source_order_no: 'RO-20260415090100-01AB23CD',
+    executor_user_id: 'user-ops-01',
+    executor_name: 'yepingfan',
+  }
+  if (templatePreviewScenario.value === 'build_success') {
+    return buildNotificationTemplatePreviewValues({
+      ...common,
+      release_stage: 'build_complete',
+      release_status: 'success',
+    })
+  }
+  if (templatePreviewScenario.value === 'release_failed') {
+    return buildNotificationTemplatePreviewValues({
+      ...common,
+      release_stage: 'post_release',
+      release_status: 'failed',
+    })
+  }
+  return buildNotificationTemplatePreviewValues({
+    ...common,
+    release_stage: 'post_release',
+    release_status: 'success',
+  })
+})
+
+const templatePreviewStageBadgeClass = computed(() =>
+  templatePreviewMockValues.value.release_stage === 'build_complete'
+    ? 'notification-preview-badge-warm'
+    : 'notification-preview-badge-primary',
+)
+
+const templatePreviewStatusBadgeClass = computed(() => {
+  switch (templatePreviewMockValues.value.release_status) {
+    case 'failed':
+      return 'notification-preview-badge-danger'
+    case 'success':
+      return 'notification-preview-badge-success'
+    default:
+      return 'notification-preview-badge-neutral'
+  }
+})
+
 function normalizeEnabledFilter(value: '' | 'true' | 'false') {
   if (value === '') return undefined
   return value === 'true'
@@ -304,6 +400,221 @@ function resetTemplateForm() {
   templateForm.enabled = true
   templateForm.remark = ''
 }
+
+function applyDefaultNotificationTemplatePreset() {
+  if (!templateForm.name.trim() || templateForm.name === defaultNotificationTemplatePreset.name) {
+    templateForm.name = defaultNotificationTemplatePreset.name
+  }
+  templateForm.title_template = defaultNotificationTemplatePreset.title_template
+  templateForm.body_template = defaultNotificationTemplatePreset.body_template
+  if (!templateForm.remark.trim()) {
+    templateForm.remark = defaultNotificationTemplatePreset.remark
+  }
+}
+
+function buildReleaseStageRichValue(value: string) {
+  switch (String(value || '').trim()) {
+    case 'build_complete':
+      return '🟠 构建完成'
+    case 'post_release':
+      return '🔵 发布完成'
+    default:
+      return value ? `🟡 ${value}` : ''
+  }
+}
+
+function buildReleaseStatusRichValue(value: string) {
+  switch (String(value || '').trim()) {
+    case 'success':
+    case 'deploy_success':
+      return '🟢 成功'
+    case 'failed':
+    case 'deploy_failed':
+      return '🔴 失败'
+    case 'cancelled':
+      return '⚪ 已取消'
+    case 'building':
+      return '🟠 构建中'
+    case 'built_waiting_deploy':
+      return '🟠 已构建待部署'
+    case 'deploying':
+      return '🔵 部署中'
+    case 'pending':
+      return '🟡 待执行'
+    case 'running':
+      return '🔵 执行中'
+    case 'pending_approval':
+      return '🟣 待审批'
+    case 'approving':
+      return '🟣 审批中'
+    case 'approved':
+      return '🟢 审批通过'
+    case 'rejected':
+      return '🔴 审批拒绝'
+    case 'queued':
+      return '🟡 排队中'
+    default:
+      return value ? `🟡 ${value}` : ''
+  }
+}
+
+function buildNotificationTemplatePreviewValues(values: Record<string, string>) {
+  const normalizedValues = { ...values }
+  normalizedValues.release_stage_rich = buildReleaseStageRichValue(normalizedValues.release_stage || '')
+  normalizedValues.release_status_rich = buildReleaseStatusRichValue(normalizedValues.release_status || '')
+  return normalizedValues
+}
+
+function escapeMarkdownHTML(input: string) {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function renderInlineMarkdown(input: string) {
+  let text = escapeMarkdownHTML(input)
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>')
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+  return text
+}
+
+function renderMarkdownPreview(input: string) {
+  const source = String(input || '').replace(/\r\n/g, '\n').trim()
+  if (!source) {
+    return '<p>通知正文预览</p>'
+  }
+
+  const lines = source.split('\n')
+  const blocks: string[] = []
+  let paragraph: string[] = []
+  let listItems: string[] = []
+  let quoteLines: string[] = []
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return
+    const content = renderInlineMarkdown(paragraph.join('\n')).replace(/\n/g, '<br />')
+    blocks.push(`<p>${content}</p>`)
+    paragraph = []
+  }
+
+  const flushList = () => {
+    if (!listItems.length) return
+    blocks.push(`<ul>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join('')}</ul>`)
+    listItems = []
+  }
+
+  const flushQuote = () => {
+    if (!quoteLines.length) return
+    blocks.push(`<blockquote>${quoteLines.map((line) => `<p>${renderInlineMarkdown(line)}</p>`).join('')}</blockquote>`)
+    quoteLines = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimRight()
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      flushParagraph()
+      flushList()
+      flushQuote()
+      continue
+    }
+
+    if (trimmed === '---') {
+      flushParagraph()
+      flushList()
+      flushQuote()
+      blocks.push('<hr />')
+      continue
+    }
+
+    const heading = trimmed.match(/^(#{1,3})\s+(.*)$/)
+    if (heading) {
+      flushParagraph()
+      flushList()
+      flushQuote()
+      const level = heading[1].length
+      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+      continue
+    }
+
+    if (trimmed.startsWith('> ')) {
+      flushParagraph()
+      flushList()
+      quoteLines.push(trimmed.slice(2).trim())
+      continue
+    }
+
+    if (trimmed.startsWith('- ')) {
+      flushParagraph()
+      flushQuote()
+      listItems.push(trimmed.slice(2).trim())
+      continue
+    }
+
+    flushList()
+    flushQuote()
+    paragraph.push(trimmed)
+  }
+
+  flushParagraph()
+  flushList()
+  flushQuote()
+
+  return blocks.join('')
+}
+
+function renderTemplatePlaceholders(input: string, values: Record<string, string>) {
+  return String(input || '').replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => values[key] ?? '')
+}
+
+function matchesTemplateCondition(condition: ConditionFormItem, values: Record<string, string>) {
+  const actualValue = String(values[String(condition.param_key || '').trim()] || '')
+  const expectedValue = String(condition.expected_value || '')
+  switch (condition.operator) {
+    case 'equals':
+      return actualValue === expectedValue
+    case 'not_equals':
+      return actualValue !== expectedValue
+    case 'contains':
+      return actualValue.includes(expectedValue)
+    case 'not_contains':
+      return !actualValue.includes(expectedValue)
+    case 'is_empty':
+      return actualValue.trim() === ''
+    case 'not_empty':
+      return actualValue.trim() !== ''
+    default:
+      return false
+  }
+}
+
+const templatePreviewTitle = computed(() =>
+  renderTemplatePlaceholders(templateForm.title_template, templatePreviewMockValues.value).trim() || '通知标题预览',
+)
+
+const templatePreviewBody = computed(() => {
+  const blocks: string[] = []
+  const body = renderTemplatePlaceholders(templateForm.body_template, templatePreviewMockValues.value).trim()
+  if (body) {
+    blocks.push(body)
+  }
+  templateForm.conditions.forEach((condition) => {
+    if (!condition.param_key.trim() || !condition.markdown_text.trim()) {
+      return
+    }
+    if (matchesTemplateCondition(condition, templatePreviewMockValues.value)) {
+      blocks.push(renderTemplatePlaceholders(condition.markdown_text, templatePreviewMockValues.value).trim())
+    }
+  })
+  return blocks.filter(Boolean).join('\n\n').trim() || '通知正文预览'
+})
+
+const templatePreviewBodyHTML = computed(() => renderMarkdownPreview(templatePreviewBody.value))
 
 function resetHookForm() {
   editingHookID.value = ''
@@ -488,6 +799,7 @@ function confirmDeleteSource(item: NotificationSource) {
 
 function openCreateTemplateModal() {
   resetTemplateForm()
+  applyDefaultNotificationTemplatePreset()
   templateModalVisible.value = true
 }
 
@@ -914,6 +1226,13 @@ onMounted(async () => {
         <a-form-item label="模板名称" name="name">
           <a-input v-model:value="templateForm.name" allow-clear placeholder="例如：发布结果通知模板" />
         </a-form-item>
+        <div class="notification-template-preset-bar notification-compact-panel">
+          <div>
+            <div class="section-title">推荐模板</div>
+            <div class="section-description">这套默认模板已经适配当前的构建完成 / 发布完成两段进度，适合直接作为通用发布通知模板，默认还会用彩色语义标签把构建 / 发布阶段凸显出来。</div>
+          </div>
+          <a-button @click="applyDefaultNotificationTemplatePreset">套用“通用发布通知模板-默认”</a-button>
+        </div>
         <a-form-item label="标题模板">
           <a-input v-model:value="templateForm.title_template" allow-clear placeholder="例如：[{env}] {app_name} 发布结果" />
         </a-form-item>
@@ -925,8 +1244,28 @@ onMounted(async () => {
           />
         </a-form-item>
 
+        <div class="notification-preview-card notification-compact-panel notification-preview-warm">
+          <div class="notification-preview-head">
+            <div>
+              <div class="section-title">模板预览</div>
+              <div class="section-description">这里会按 Markdown 语法实时渲染预览。标准 Markdown 本身不支持字体颜色，正文里建议直接使用 {release_stage_rich} / {release_status_rich}，让阶段和结果随字段值自动带出彩色语义标签。</div>
+            </div>
+            <a-segmented v-model:value="templatePreviewScenario" :options="templatePreviewScenarioOptions" />
+          </div>
+          <div class="notification-preview-meta">
+            <span class="notification-preview-badge" :class="templatePreviewStageBadgeClass">{{ templatePreviewMockValues.release_stage_rich }}</span>
+            <span class="notification-preview-badge" :class="templatePreviewStatusBadgeClass">{{ templatePreviewMockValues.release_status_rich }}</span>
+            <span class="notification-preview-badge notification-preview-badge-neutral">{{ templatePreviewMockValues.env.toUpperCase() }}</span>
+          </div>
+          <div class="notification-preview-shell">
+            <div class="notification-preview-title">{{ templatePreviewTitle }}</div>
+            <div class="notification-preview-body markdown-preview-content" v-html="templatePreviewBodyHTML"></div>
+          </div>
+        </div>
+
         <div class="variable-guide-card notification-compact-panel">
           <div class="section-title">可用变量</div>
+          <div class="section-description">推荐优先使用 <code>{release_stage_rich}</code> 与 <code>{release_status_rich}</code>。标准 Markdown 不支持直接改字色，这两个变量会按当前阶段 / 结果自动输出带语义色彩的展示文本。</div>
           <div class="variable-chip-grid">
             <span v-for="item in markdownVariableOptions" :key="item.value" class="variable-chip">
               {{ item.value }}
@@ -938,7 +1277,7 @@ onMounted(async () => {
         <div class="condition-section-head notification-template-section-head">
           <div>
             <div class="section-title">条件 Markdown 语句</div>
-            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句。注意：release_status 只在发布完成后才有值，不建议作为条件判断字段。</div>
+            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句。注意：release_status / release_stage 以及它们的彩色语义标签变量都属于运行时字段，已在预览区展示，但不建议作为条件判断字段。</div>
           </div>
           <a-button type="dashed" @click="addCondition">
             <template #icon><PlusOutlined /></template>
@@ -1121,6 +1460,20 @@ onMounted(async () => {
   margin-bottom: 16px;
 }
 
+.notification-template-preset-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border: 1px solid #f2dfbf;
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, rgba(217, 119, 6, 0.12), transparent 38%),
+    linear-gradient(180deg, #fffaf1 0%, #fff4e4 100%);
+}
+
 .variable-guide-card {
   margin-bottom: 16px;
   padding: 14px 16px;
@@ -1139,6 +1492,155 @@ onMounted(async () => {
   margin-top: 4px;
   font-size: 12px;
   color: #6b7a90;
+}
+
+.notification-preview-card {
+  margin-bottom: 16px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid #f0d9b4;
+  background:
+    radial-gradient(circle at top right, rgba(217, 119, 6, 0.12), transparent 28%),
+    linear-gradient(180deg, #fffbf5 0%, #fff4e5 100%);
+}
+
+.notification-preview-warm {
+  border-color: #f0d9b4;
+}
+
+.notification-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.notification-preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.notification-preview-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  color: #1f3352;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.notification-preview-badge-primary {
+  color: #0f4c81;
+  border-color: rgba(59, 130, 246, 0.24);
+  background: rgba(239, 246, 255, 0.92);
+}
+
+.notification-preview-badge-success {
+  color: #166534;
+  border-color: rgba(34, 197, 94, 0.22);
+  background: rgba(240, 253, 244, 0.96);
+}
+
+.notification-preview-badge-warm {
+  color: #9a5a00;
+  border-color: rgba(217, 119, 6, 0.24);
+  background: rgba(255, 247, 237, 0.96);
+}
+
+.notification-preview-badge-danger {
+  color: #be123c;
+  border-color: rgba(244, 63, 94, 0.2);
+  background: rgba(255, 241, 242, 0.96);
+}
+
+.notification-preview-badge-neutral {
+  color: #475569;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(248, 250, 252, 0.96);
+}
+
+.notification-preview-shell {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+.notification-preview-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: #13233f;
+  margin-bottom: 12px;
+}
+
+.notification-preview-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.78;
+  color: #31435f;
+}
+
+.markdown-preview-content :deep(h1),
+.markdown-preview-content :deep(h2),
+.markdown-preview-content :deep(h3) {
+  margin: 0 0 12px;
+  color: #13233f;
+  font-weight: 800;
+}
+
+.markdown-preview-content :deep(h2) {
+  font-size: 16px;
+}
+
+.markdown-preview-content :deep(h3) {
+  font-size: 14px;
+}
+
+.markdown-preview-content :deep(p) {
+  margin: 0 0 10px;
+}
+
+.markdown-preview-content :deep(ul) {
+  margin: 0 0 12px;
+  padding-left: 18px;
+}
+
+.markdown-preview-content :deep(li + li) {
+  margin-top: 6px;
+}
+
+.markdown-preview-content :deep(blockquote) {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #f2b463;
+  border-radius: 10px;
+  background: rgba(255, 248, 235, 0.92);
+}
+
+.markdown-preview-content :deep(blockquote p:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown-preview-content :deep(code) {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #fff2d8;
+  color: #8a4b00;
+  font-family: 'SFMono-Regular', 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+.markdown-preview-content :deep(hr) {
+  border: 0;
+  border-top: 1px solid #edd6b0;
+  margin: 14px 0;
 }
 
 .variable-chip-grid {
@@ -1262,7 +1764,9 @@ onMounted(async () => {
 
 @media (max-width: 900px) {
   .toolbar-row,
-  .condition-section-head {
+  .condition-section-head,
+  .notification-preview-head,
+  .notification-template-preset-bar {
     flex-direction: column;
     align-items: flex-start;
   }

@@ -18,8 +18,12 @@ import { listApplications } from "../../api/application";
 import { listPipelineBindings } from "../../api/pipeline";
 import { getReleaseSettings } from "../../api/system";
 import {
+  batchDeleteReleaseOrders,
   batchExecuteReleaseOrders,
+  buildReleaseOrder,
   cancelReleaseOrder,
+  deleteReleaseOrder,
+  deployReleaseOrder,
   executeReleaseOrder,
   getReleaseOrderByID,
   getReleaseOrderPrecheck,
@@ -32,6 +36,7 @@ import { useResizableColumns } from "../../composables/useResizableColumns";
 import { useAuthStore } from "../../stores/auth";
 import type { PipelineBinding } from "../../types/pipeline";
 import type {
+  BatchExecuteStagedDispatchMode,
   BatchExecuteReleaseOrdersPayload,
   ReleaseOperationType,
   ReleaseOrder,
@@ -39,6 +44,7 @@ import type {
   ReleaseOrderParam,
   ReleaseOrderPrecheck,
   ReleaseOrderStatus,
+  ReleaseOrderDispatchAction,
   ReleaseTriggerType,
 } from "../../types/release";
 import { extractHTTPErrorMessage } from "../../utils/http-error";
@@ -68,6 +74,8 @@ const statusOptions: Array<{ label: string; value: ReleaseOrderStatus | "" }> =
     { label: "待审批", value: "pending_approval" },
     { label: "审批中", value: "approving" },
     { label: "已批准", value: "approved" },
+    { label: "构建中", value: "building" },
+    { label: "已构建待部署", value: "built_waiting_deploy" },
     { label: "审批拒绝", value: "rejected" },
     { label: "排队中", value: "queued" },
     { label: "发布中", value: "deploying" },
@@ -89,9 +97,11 @@ const triggerTypeOptions: Array<{
 const loading = ref(false);
 const querying = ref(false);
 const cancellingID = ref("");
+const deletingID = ref("");
 const executingID = ref("");
 const recoveringID = ref("");
 const batchExecuting = ref(false);
+const batchDeleting = ref(false);
 const dataSource = ref<ReleaseOrder[]>([]);
 const total = ref(0);
 const autoRefreshTimer = ref<number | null>(null);
@@ -108,12 +118,15 @@ const releaseEnvOptions = ref<SelectOption[]>([]);
 const executePreviewVisible = ref(false);
 const executePreviewLoading = ref(false);
 const executeSubmitting = ref(false);
+const executePreviewAction = ref<ReleaseOrderDispatchAction>("execute");
 const executePreviewOrder = ref<ReleaseOrder | null>(null);
 const executePreviewParams = ref<ReleaseOrderParam[]>([]);
 const executePreviewPrecheck = ref<ReleaseOrderPrecheck | null>(null);
 const batchExecutePreviewVisible = ref(false);
 const batchExecutePreviewLoading = ref(false);
 const batchExecuteSubmitting = ref(false);
+const batchExecuteStagedDispatchMode = ref<BatchExecuteStagedDispatchMode>("execute");
+const batchExecutePreviewOrderIDs = ref<string[]>([]);
 const advancedSearchExpanded = ref(false);
 
 interface BatchExecutePreviewItem {
@@ -172,7 +185,7 @@ const initialColumns: TableColumnsType<ReleaseOrder> = [
     key: "finished_at",
     width: 190,
   },
-  { title: "操作", key: "actions", width: 280, fixed: "right" },
+  { title: "操作", key: "actions", width: 340, fixed: "right" },
 ];
 const { columns } = useResizableColumns(initialColumns, {
   minWidth: 100,
@@ -211,7 +224,7 @@ function canCurrentUserExecute(record: ReleaseOrder) {
 }
 
 const currentPageStatusStats = computed(() => {
-  const stats: Record<ReleaseOrderStatus, number> = {
+  const stats: Record<string, number> = {
     pending: 0,
     running: 0,
     success: 0,
@@ -219,7 +232,7 @@ const currentPageStatusStats = computed(() => {
     cancelled: 0,
   };
   dataSource.value.forEach((item) => {
-    stats[item.status] += 1;
+    stats[item.status] = (stats[item.status] || 0) + 1;
   });
   return stats;
 });
@@ -376,6 +389,10 @@ function rawStatusText(status: ReleaseOrderStatus) {
   switch (status) {
     case "pending":
       return "待执行";
+    case "building":
+      return "构建中";
+    case "built_waiting_deploy":
+      return "已构建待部署";
     case "running":
       return "执行中";
     case "success":
@@ -399,6 +416,10 @@ function fallbackBusinessStatus(status: ReleaseOrderStatus): ReleaseOrderBusines
       return "approving";
     case "approved":
       return "approved";
+    case "building":
+      return "building";
+    case "built_waiting_deploy":
+      return "built_waiting_deploy";
     case "rejected":
       return "rejected";
     case "queued":
@@ -433,6 +454,10 @@ function businessStatusColor(status: ReleaseOrderBusinessStatus) {
       return "red";
     case "deploying":
       return "blue";
+    case "building":
+      return "blue";
+    case "built_waiting_deploy":
+      return "gold";
     case "queued":
     case "pending_execution":
     case "pending_approval":
@@ -457,6 +482,10 @@ function businessStatusText(status: ReleaseOrderBusinessStatus) {
       return "审批中";
     case "approved":
       return "已批准";
+    case "building":
+      return "构建中";
+    case "built_waiting_deploy":
+      return "已构建待部署";
     case "rejected":
       return "审批拒绝";
     case "queued":
@@ -475,7 +504,7 @@ function businessStatusText(status: ReleaseOrderBusinessStatus) {
 }
 
 function isRunningBusinessStatus(status: ReleaseOrderBusinessStatus) {
-  return status === "deploying" || status === "approving";
+  return status === "deploying" || status === "approving" || status === "building";
 }
 
 function triggerTypeText(
@@ -539,6 +568,10 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
         caption:
           status === "pending_execution"
             ? "当前可直接发起发布"
+            : status === "building"
+              ? "构建阶段执行中"
+              : status === "built_waiting_deploy"
+                ? "构建已完成，等待手动触发部署"
             : status === "queued"
               ? record.queued_reason || "已进入等待队列"
               : status === "deploying"
@@ -555,7 +588,7 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
             ? "rejected"
             : status === "pending_execution"
               ? "active"
-              : ["queued", "deploying", "deploy_success", "cancelled"].includes(status)
+              : ["building", "built_waiting_deploy", "queued", "deploying", "deploy_success", "cancelled"].includes(status)
                 ? "done"
                 : "pending",
       },
@@ -573,7 +606,7 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
   const executeTone: ApprovalFlowNode["tone"] =
     status === "approved"
       ? "active"
-      : status === "queued" || status === "deploying" || status === "deploy_success" || status === "deploy_failed" || status === "cancelled"
+      : status === "building" || status === "built_waiting_deploy" || status === "queued" || status === "deploying" || status === "deploy_success" || status === "deploy_failed" || status === "cancelled"
         ? "done"
         : "pending";
 
@@ -612,6 +645,10 @@ function approvalFlowNodes(record: ReleaseOrder): ApprovalFlowNode[] {
       caption:
         status === "approved"
           ? "审批已通过，等待发起执行"
+          : status === "building"
+            ? "审批已通过，当前处于构建阶段"
+            : status === "built_waiting_deploy"
+              ? "构建已完成，等待手动触发部署"
           : status === "queued"
             ? record.queued_reason || "已进入等待队列"
             : status === "deploying"
@@ -686,15 +723,22 @@ function approvalFlowSummary(record: ReleaseOrder) {
 function canCancel(record: ReleaseOrder) {
   const businessStatus = orderBusinessStatus(record);
   return (
-    authStore.hasApplicationPermission(
-      "release.cancel",
-      record.application_id,
-      record.env_code,
-    ) &&
+    (authStore.isAdmin || canCurrentUserExecute(record)) &&
     (businessStatus === "pending_execution" ||
+      businessStatus === "building" ||
+      businessStatus === "built_waiting_deploy" ||
       businessStatus === "approved" ||
       businessStatus === "queued" ||
       businessStatus === "deploying")
+  );
+}
+
+function canEdit(record: ReleaseOrder) {
+  return (
+    (authStore.isAdmin || canCurrentUserExecute(record)) &&
+    String(record.status || "").trim() === "pending" &&
+    String(record.operation_type || "").trim() === "deploy" &&
+    !String(record.source_order_id || "").trim()
   );
 }
 
@@ -708,6 +752,61 @@ function canExecute(record: ReleaseOrder) {
     ) &&
     ["pending_execution", "approved"].includes(orderBusinessStatus(record))
   );
+}
+
+function supportsStagedDispatch(record: ReleaseOrder) {
+  return (
+    String(record.operation_type || "").trim() === "deploy" &&
+    Boolean(record.has_ci_execution) &&
+    Boolean(record.has_cd_execution)
+  );
+}
+
+function canBuild(record: ReleaseOrder) {
+  return (
+    supportsStagedDispatch(record) &&
+    canCurrentUserExecute(record) &&
+    authStore.hasApplicationPermission(
+      "release.execute",
+      record.application_id,
+      record.env_code,
+    ) &&
+    ["pending_execution", "approved"].includes(orderBusinessStatus(record))
+  );
+}
+
+function canDeploy(record: ReleaseOrder) {
+  return (
+    supportsStagedDispatch(record) &&
+    canCurrentUserExecute(record) &&
+    authStore.hasApplicationPermission(
+      "release.execute",
+      record.application_id,
+      record.env_code,
+    ) &&
+    orderBusinessStatus(record) === "built_waiting_deploy"
+  );
+}
+
+function resolveDispatchAction(record: ReleaseOrder): ReleaseOrderDispatchAction {
+  if (canDeploy(record)) {
+    return "deploy";
+  }
+  if (canBuild(record)) {
+    return "build";
+  }
+  return "execute";
+}
+
+function dispatchActionText(action: ReleaseOrderDispatchAction) {
+  switch (action) {
+    case "build":
+      return "构建";
+    case "deploy":
+      return "部署";
+    default:
+      return "发布";
+  }
 }
 
 function canRollback(record: ReleaseOrder) {
@@ -793,9 +892,39 @@ const batchPreviewPassCount = computed(
       .length,
 );
 
+const batchPreviewStagedCount = computed(
+  () =>
+    batchExecutePreviewItems.value.filter((item) =>
+      supportsStagedDispatch(item.order),
+    ).length,
+);
+
+const batchPreviewHasStagedOrders = computed(
+  () => batchPreviewStagedCount.value > 0,
+);
+
+const batchPreviewCIOnlyCount = computed(
+  () => batchExecutePreviewItems.value.length - batchPreviewStagedCount.value,
+);
+
+const batchDispatchModeLabel = computed(() =>
+  batchExecuteStagedDispatchMode.value === "build"
+    ? "仅构建可分段单"
+    : "直接进入部署流程",
+);
+
 const canShowBatchExecuteBar = computed(
   () =>
     dataSource.value.some((item) => String(item.creator_user_id || "").trim() === currentUserID.value),
+);
+
+const canShowBatchDeleteBar = computed(() => authStore.isAdmin);
+
+const canBatchDelete = computed(
+  () =>
+    canShowBatchDeleteBar.value &&
+    selectedOrderIDs.value.length > 0 &&
+    !batchDeleting.value,
 );
 
 const tableRowSelection = computed(() => rowSelection.value);
@@ -807,7 +936,7 @@ const rowSelection = computed(() => ({
   selectedRowKeys: selectedOrderIDs.value,
   preserveSelectedRowKeys: false,
   getCheckboxProps: (record: ReleaseOrder) => ({
-    disabled: !canExecute(record),
+    disabled: !authStore.isAdmin && !canExecute(record),
   }),
   onChange: (keys: Array<string | number>) => {
     selectedOrderIDs.value = keys.map((item) => String(item));
@@ -974,6 +1103,14 @@ function toDetail(id: string) {
   void router.push(`/releases/${id}`);
 }
 
+function handleEdit(record: ReleaseOrder) {
+  if (!canEdit(record)) {
+    message.warning("当前发布单不是可编辑的待执行普通发布单");
+    return;
+  }
+  void router.push(`/releases/${record.id}/edit`);
+}
+
 function handleSearch() {
   filters.page = 1;
   applyActiveQueryFromFilters();
@@ -1029,22 +1166,91 @@ async function handleCancel(record: ReleaseOrder) {
   }
 }
 
+async function handleDelete(record: ReleaseOrder) {
+  if (!authStore.isAdmin) {
+    message.warning("仅管理员可删除发布记录");
+    return;
+  }
+  deletingID.value = record.id;
+  try {
+    await deleteReleaseOrder(record.id);
+    selectedOrderIDs.value = selectedOrderIDs.value.filter(
+      (item) => item !== record.id,
+    );
+    message.success("发布记录已删除");
+    await loadReleaseOrders();
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, "发布记录删除失败"));
+  } finally {
+    deletingID.value = "";
+  }
+}
+
+async function handleBatchDelete() {
+  if (!canBatchDelete.value) {
+    message.warning("请先勾选要删除的发布记录");
+    return;
+  }
+  batchDeleting.value = true;
+  try {
+    const targetIDs = [...selectedOrderIDs.value];
+    const response = await batchDeleteReleaseOrders({ order_ids: targetIDs });
+    const deletedIDs = response.data.deleted_order_ids || [];
+    const failed = response.data.failed || [];
+    const failedIDs = new Set(failed.map((item) => item.order_id));
+    selectedOrderIDs.value = selectedOrderIDs.value.filter((item) =>
+      failedIDs.has(item),
+    );
+    if (deletedIDs.length > 0 && failed.length === 0) {
+      message.success(`已删除 ${deletedIDs.length} 条发布记录`);
+    } else if (deletedIDs.length > 0 && failed.length > 0) {
+      const firstReason = failed[0]?.reason ? `，失败原因：${failed[0].reason}` : "";
+      message.warning(
+        `已删除 ${deletedIDs.length} 条，${failed.length} 条删除失败${firstReason}`,
+      );
+    } else {
+      const firstReason = failed[0]?.reason ? `：${failed[0].reason}` : "";
+      message.warning(`未删除任何发布记录${firstReason}`);
+    }
+    await loadReleaseOrders();
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, "批量删除发布记录失败"));
+  } finally {
+    batchDeleting.value = false;
+  }
+}
+
 function closeExecutePreviewModal() {
   executePreviewVisible.value = false;
+  executePreviewAction.value = "execute";
   executePreviewOrder.value = null;
   executePreviewParams.value = [];
   executePreviewPrecheck.value = null;
 }
 
-async function openExecutePreviewModal(record: ReleaseOrder) {
-  if (!canExecute(record)) {
+async function openExecutePreviewModal(
+  record: ReleaseOrder,
+  action: ReleaseOrderDispatchAction = "execute",
+) {
+  const canDispatch =
+    action === "build"
+      ? canBuild(record)
+      : action === "deploy"
+        ? canDeploy(record)
+        : canExecute(record);
+  if (!canDispatch) {
     message.warning(
-      "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
+      action === "build"
+        ? "当前发布单不满足构建条件，无法触发构建"
+        : action === "deploy"
+          ? "当前发布单尚未完成构建，无法直接部署"
+          : "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
     );
     return;
   }
   executePreviewVisible.value = true;
   executePreviewLoading.value = true;
+  executePreviewAction.value = action;
   executePreviewOrder.value = null;
   executePreviewParams.value = [];
   executePreviewPrecheck.value = null;
@@ -1053,11 +1259,21 @@ async function openExecutePreviewModal(record: ReleaseOrder) {
     const [orderResp, paramsResp, precheckResp] = await Promise.all([
       getReleaseOrderByID(record.id),
       listReleaseOrderParams(record.id).catch(() => null),
-      getReleaseOrderPrecheck(record.id),
+      getReleaseOrderPrecheck(record.id, action),
     ]);
-    if (!canExecute(orderResp.data)) {
+    const nextCanDispatch =
+      action === "build"
+        ? canBuild(orderResp.data)
+        : action === "deploy"
+          ? canDeploy(orderResp.data)
+          : canExecute(orderResp.data);
+    if (!nextCanDispatch) {
       message.warning(
-        "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
+        action === "build"
+          ? "当前发布单状态已变化，无法继续触发构建"
+          : action === "deploy"
+            ? "当前发布单状态已变化，无法继续触发部署"
+            : "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
       );
       closeExecutePreviewModal();
       return;
@@ -1078,21 +1294,49 @@ async function confirmExecuteRelease() {
   if (!executePreviewOrder.value) {
     return;
   }
-  if (!canExecute(executePreviewOrder.value)) {
+  const action = executePreviewAction.value;
+  const canDispatch =
+    action === "build"
+      ? canBuild(executePreviewOrder.value)
+      : action === "deploy"
+        ? canDeploy(executePreviewOrder.value)
+        : canExecute(executePreviewOrder.value);
+  if (!canDispatch) {
     message.warning(
-      "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
+      action === "build"
+        ? "当前发布单状态已变化，无法继续触发构建"
+        : action === "deploy"
+          ? "当前发布单状态已变化，无法继续触发部署"
+          : "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
     );
     closeExecutePreviewModal();
     return;
   }
   executeSubmitting.value = true;
   try {
-    await executeReleaseOrder(executePreviewOrder.value.id);
-    message.success("发布已提交，正在调度执行");
+    if (action === "build") {
+      await buildReleaseOrder(executePreviewOrder.value.id);
+      message.success("构建已提交，正在调度执行");
+    } else if (action === "deploy") {
+      await deployReleaseOrder(executePreviewOrder.value.id);
+      message.success("部署已提交，正在调度执行");
+    } else {
+      await executeReleaseOrder(executePreviewOrder.value.id);
+      message.success("发布已提交，正在调度执行");
+    }
     closeExecutePreviewModal();
     await loadReleaseOrders();
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, "发布执行失败"));
+    message.error(
+      extractHTTPErrorMessage(
+        error,
+        action === "build"
+          ? "构建执行失败"
+          : action === "deploy"
+            ? "部署执行失败"
+            : "发布执行失败",
+      ),
+    );
   } finally {
     executeSubmitting.value = false;
   }
@@ -1130,16 +1374,26 @@ async function handleReplay(record: ReleaseOrder) {
   }
 }
 
-async function handleBatchExecute() {
-  if (!canBatchExecute.value) {
+async function handleBatchExecute(
+  mode: BatchExecuteStagedDispatchMode = "execute",
+  orderIDs: string[] = [],
+) {
+  const targetOrderIDs = (
+    orderIDs.length > 0
+      ? orderIDs
+      : selectedExecutableOrders.value.map((item) => item.id)
+  )
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  if (targetOrderIDs.length < 2) {
     message.warning("请至少选择两张待执行发布单");
     return;
   }
-  const targetOrderIDs = [...selectedOrderIDs.value];
   batchExecuting.value = true;
   try {
     const payload: BatchExecuteReleaseOrdersPayload = {
       order_ids: targetOrderIDs,
+      staged_dispatch_mode: mode,
     };
     const response = await batchExecuteReleaseOrders(payload);
     selectedOrderIDs.value = [];
@@ -1169,6 +1423,16 @@ async function handleBatchExecute() {
   } finally {
     batchExecuting.value = false;
   }
+}
+
+function resolveBatchDispatchAction(
+  record: ReleaseOrder,
+  mode: BatchExecuteStagedDispatchMode,
+): ReleaseOrderDispatchAction {
+  if (mode === "build" && canBuild(record)) {
+    return "build";
+  }
+  return "execute";
 }
 
 function sleep(ms: number) {
@@ -1222,25 +1486,30 @@ async function detectAcceptedBatchExecute(orderIDs: string[]): Promise<{
 function closeBatchExecutePreviewModal() {
   batchExecutePreviewVisible.value = false;
   batchExecutePreviewItems.value = [];
+  batchExecutePreviewOrderIDs.value = [];
+  batchExecuteStagedDispatchMode.value = "execute";
 }
 
-async function openBatchExecutePreviewModal() {
-  if (!canBatchExecute.value) {
-    message.warning("请至少选择两张待执行发布单");
+async function loadBatchExecutePreviewItems() {
+  const targetOrderIDs = [...batchExecutePreviewOrderIDs.value];
+  if (targetOrderIDs.length < 2) {
+    closeBatchExecutePreviewModal();
     return;
   }
-  const targetOrderIDs = [...selectedExecutableOrders.value].map((item) => item.id);
-  batchExecutePreviewVisible.value = true;
   batchExecutePreviewLoading.value = true;
   batchExecutePreviewItems.value = [];
   try {
     const results = await Promise.all(
       targetOrderIDs.map(async (orderID) => {
-        const [orderResp, precheckResp] = await Promise.all([
-          getReleaseOrderByID(orderID),
-          getReleaseOrderPrecheck(orderID).catch(() => null),
+        const orderResp = await getReleaseOrderByID(orderID);
+        const action = resolveBatchDispatchAction(
+          orderResp.data,
+          batchExecuteStagedDispatchMode.value,
+        );
+        const [precheckResp, paramsResp] = await Promise.all([
+          getReleaseOrderPrecheck(orderID, action).catch(() => null),
+          listReleaseOrderParams(orderID).catch(() => null),
         ]);
-        const paramsResp = await listReleaseOrderParams(orderID).catch(() => null);
         return {
           order: orderResp.data,
           precheck: precheckResp?.data || null,
@@ -1256,6 +1525,9 @@ async function openBatchExecutePreviewModal() {
       await loadReleaseOrders({ silent: true });
       return;
     }
+    if (!batchPreviewHasStagedOrders.value && batchExecuteStagedDispatchMode.value !== "execute") {
+      batchExecuteStagedDispatchMode.value = "execute";
+    }
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, "并发执行预审加载失败"));
     closeBatchExecutePreviewModal();
@@ -1264,14 +1536,38 @@ async function openBatchExecutePreviewModal() {
   }
 }
 
+function handleBatchDispatchModeChange(value: BatchExecuteStagedDispatchMode) {
+  batchExecuteStagedDispatchMode.value = value;
+  void loadBatchExecutePreviewItems();
+}
+
+async function openBatchExecutePreviewModal() {
+  if (!canBatchExecute.value) {
+    message.warning("请至少选择两张待执行发布单");
+    return;
+  }
+  batchExecutePreviewOrderIDs.value = [...selectedExecutableOrders.value].map(
+    (item) => item.id,
+  );
+  batchExecuteStagedDispatchMode.value = "execute";
+  batchExecutePreviewVisible.value = true;
+  await loadBatchExecutePreviewItems();
+}
+
 async function confirmBatchExecute() {
-  if (batchExecutePreviewItems.value.length < 2) {
+  const previewOrderIDs = batchExecutePreviewItems.value
+    .map((item) => String(item.order.id || "").trim())
+    .filter(Boolean);
+  if (previewOrderIDs.length < 2) {
     message.warning("请至少选择两张待执行发布单");
     return;
   }
   batchExecuteSubmitting.value = true;
   try {
-    await handleBatchExecute();
+    await handleBatchExecute(
+      batchExecuteStagedDispatchMode.value,
+      previewOrderIDs,
+    );
     closeBatchExecutePreviewModal();
   } finally {
     batchExecuteSubmitting.value = false;
@@ -1308,28 +1604,29 @@ const executePreviewSummaryMessage = computed(() => {
   if (!executePreviewPrecheck.value) {
     return "";
   }
+  const actionText = dispatchActionText(executePreviewAction.value);
   if (!executePreviewPrecheck.value.executable && executePreviewPrecheck.value.ahead_count > 0) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      `当前应用前面还有 ${executePreviewPrecheck.value.ahead_count} 单，请等待先前执行单结束后再点击发布。`
+      `当前应用前面还有 ${executePreviewPrecheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}。`
     );
   }
   if (executePreviewPrecheck.value.waiting_for_lock) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      "当前目标已被其他发布占用，确认发布后会进入等待队列。"
+      `当前目标已被其他发布占用，确认${actionText}后会进入等待队列。`
     );
   }
   if (!executePreviewPrecheck.value.executable) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      "当前发布单未通过预审，请先处理阻塞项。"
+      `当前发布单未通过${actionText}前预审，请先处理阻塞项。`
     );
   }
   if (executePreviewPrecheck.value.lock_enabled) {
     return `并发发布保护已启用，当前按 ${executePreviewPrecheck.value.lock_scope || "application_env"} 范围进行调度控制。`;
   }
-  return "预审已完成，确认后将进入执行调度。";
+  return `预审已完成，确认后将进入${actionText}调度。`;
 });
 
 const executePreviewSummaryTone = computed<"info" | "warning" | "error">(() => {
@@ -1341,6 +1638,10 @@ const executePreviewSummaryTone = computed<"info" | "warning" | "error">(() => {
   }
   return "info";
 });
+
+const executePreviewTitle = computed(() => `${dispatchActionText(executePreviewAction.value)}预审`);
+
+const executePreviewOkText = computed(() => `确认${dispatchActionText(executePreviewAction.value)}`);
 
 function stopAutoRefresh() {
   if (autoRefreshTimer.value !== null) {
@@ -1592,6 +1893,40 @@ onBeforeUnmount(() => {
           </a-button>
         </a-space>
       </div>
+      <div v-if="canShowBatchDeleteBar" class="batch-delete-bar">
+        <div class="batch-delete-copy">
+          <div class="batch-delete-title">管理员删除</div>
+          <div class="batch-delete-subtitle">
+            支持删除单条或批量删除发布记录。当前已勾选
+            {{ selectedOrderIDs.length }} 条记录。
+          </div>
+        </div>
+        <a-space>
+          <a-button
+            v-if="selectedOrderIDs.length > 0"
+            @click="selectedOrderIDs = []"
+          >
+            清空勾选
+          </a-button>
+          <a-popconfirm
+            title="确认批量删除当前勾选的发布记录吗？删除后不可恢复。"
+            ok-text="确认删除"
+            cancel-text="取消"
+            @confirm="handleBatchDelete"
+          >
+            <template #icon>
+              <ExclamationCircleOutlined class="danger-icon" />
+            </template>
+            <a-button
+              danger
+              :disabled="!canBatchDelete"
+              :loading="batchDeleting"
+            >
+              批量删除
+            </a-button>
+          </a-popconfirm>
+        </a-space>
+      </div>
       <a-table
         row-key="id"
         :row-selection="tableRowSelection"
@@ -1690,8 +2025,36 @@ onBeforeUnmount(() => {
               <a-button
                 type="link"
                 size="small"
+                :disabled="!canEdit(record)"
+                @click="handleEdit(record)"
+              >
+                编辑
+              </a-button>
+              <a-button
+                v-if="canBuild(record)"
+                type="link"
+                size="small"
+                :disabled="!canBuild(record)"
+                :loading="executingID === record.id && executePreviewAction === 'build'"
+                @click="openExecutePreviewModal(record, 'build')"
+              >
+                构建
+              </a-button>
+              <a-button
+                v-else-if="canDeploy(record)"
+                type="link"
+                size="small"
+                :disabled="!canDeploy(record)"
+                :loading="executingID === record.id && executePreviewAction === 'deploy'"
+                @click="openExecutePreviewModal(record, 'deploy')"
+              >
+                部署
+              </a-button>
+              <a-button
+                type="link"
+                size="small"
                 :disabled="!canExecute(record)"
-                :loading="executingID === record.id"
+                :loading="executingID === record.id && executePreviewAction === 'execute'"
                 @click="openExecutePreviewModal(record)"
               >
                 发布
@@ -1751,6 +2114,24 @@ onBeforeUnmount(() => {
                 >
               </a-popconfirm>
               <a-button v-else type="link" size="small" disabled>取消</a-button>
+              <a-popconfirm
+                v-if="authStore.isAdmin"
+                title="确认删除该发布记录吗？删除后不可恢复。"
+                ok-text="确认删除"
+                cancel-text="取消"
+                @confirm="handleDelete(record)"
+              >
+                <template #icon>
+                  <ExclamationCircleOutlined class="danger-icon" />
+                </template>
+                <a-button
+                  type="link"
+                  size="small"
+                  danger
+                  :loading="deletingID === record.id"
+                  >删除</a-button
+                >
+              </a-popconfirm>
             </a-space>
           </template>
         </template>
@@ -1823,8 +2204,28 @@ onBeforeUnmount(() => {
           type="info"
           show-icon
           message="并发执行预审"
-          description="系统会先校验每张发布单的执行条件；同一批次中命中同应用同环境的发布单，会在通过预检后进入等待队列，按顺序逐步执行。"
+          :description="`系统会先校验每张发布单的执行条件；同一批次中命中同应用同环境的发布单，会在通过预检后进入等待队列，按顺序逐步执行。当前执行方式：${batchDispatchModeLabel}。`"
         />
+
+        <div v-if="batchPreviewHasStagedOrders" class="batch-dispatch-mode-panel">
+          <div class="batch-dispatch-mode-title">可分段单执行方式</div>
+          <div class="batch-dispatch-mode-desc">
+            当前勾选中可分段发布单 {{ batchPreviewStagedCount }} 张，纯 CI 发布单
+            {{ batchPreviewCIOnlyCount }} 张。纯 CI 发布单会默认走正常发布执行。
+          </div>
+          <a-radio-group
+            :value="batchExecuteStagedDispatchMode"
+            button-style="solid"
+            @change="
+              handleBatchDispatchModeChange(
+                $event.target.value as BatchExecuteStagedDispatchMode,
+              )
+            "
+          >
+            <a-radio-button value="execute">直接进入部署流程</a-radio-button>
+            <a-radio-button value="build">仅构建可分段单</a-radio-button>
+          </a-radio-group>
+        </div>
 
         <div class="batch-preview-list">
           <div
@@ -1969,14 +2370,18 @@ onBeforeUnmount(() => {
 
     <a-modal
       :open="executePreviewVisible"
-      title="发布预审"
+      :title="executePreviewTitle"
       :width="860"
-      ok-text="确认发布"
+      :ok-text="executePreviewOkText"
       cancel-text="取消"
       :ok-button-props="{
         disabled:
           !executePreviewOrder ||
-          !canExecute(executePreviewOrder) ||
+          (executePreviewAction === 'build'
+            ? !canBuild(executePreviewOrder)
+            : executePreviewAction === 'deploy'
+              ? !canDeploy(executePreviewOrder)
+              : !canExecute(executePreviewOrder)) ||
           (Boolean(executePreviewPrecheck) && !executePreviewPrecheck?.executable),
       }"
       :confirm-loading="executeSubmitting"
@@ -2627,6 +3032,35 @@ onBeforeUnmount(() => {
   line-height: 1.7;
 }
 
+.batch-delete-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: linear-gradient(180deg, #fff7f7 0%, #fff1f2 100%);
+}
+
+.batch-delete-copy {
+  min-width: 0;
+}
+
+.batch-delete-title {
+  color: #991b1b;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.batch-delete-subtitle {
+  margin-top: 4px;
+  color: #7f1d1d;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
 .batch-preview-overview {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2656,6 +3090,29 @@ onBeforeUnmount(() => {
 
 .batch-preview-alert {
   margin-bottom: 16px;
+}
+
+.batch-dispatch-mode-panel {
+  margin-top: -6px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.batch-dispatch-mode-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.batch-dispatch-mode-desc {
+  margin-top: 4px;
+  margin-bottom: 10px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .execute-preview-overview {
@@ -2887,6 +3344,11 @@ onBeforeUnmount(() => {
   }
 
   .batch-execute-bar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .batch-delete-bar {
     flex-direction: column;
     align-items: flex-start;
   }

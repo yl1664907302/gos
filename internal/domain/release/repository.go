@@ -14,6 +14,13 @@ type Repository interface {
 		params []ReleaseOrderParam,
 		steps []ReleaseOrderStep,
 	) error
+	UpdateEditable(
+		ctx context.Context,
+		order ReleaseOrder,
+		executions []ReleaseOrderExecution,
+		params []ReleaseOrderParam,
+		steps []ReleaseOrderStep,
+	) error
 	CreateDeploySnapshot(ctx context.Context, snapshot DeploySnapshot) error
 	GetDeploySnapshotByOrderID(ctx context.Context, releaseOrderID string) (DeploySnapshot, error)
 	UpdateConcurrentBatch(ctx context.Context, orderIDs []string, batchNo string, isConcurrent bool) error
@@ -35,6 +42,13 @@ type Repository interface {
 		finishedAt *time.Time,
 		updatedAt time.Time,
 	) (ReleaseOrder, error)
+	UpdateExecutor(
+		ctx context.Context,
+		id string,
+		executorUserID string,
+		executorName string,
+		updatedAt time.Time,
+	) (ReleaseOrder, error)
 	UpdateApprovalStatus(
 		ctx context.Context,
 		id string,
@@ -48,6 +62,13 @@ type Repository interface {
 	) (ReleaseOrder, error)
 	ListExecutions(ctx context.Context, releaseOrderID string) ([]ReleaseOrderExecution, error)
 	GetExecutionByScope(ctx context.Context, releaseOrderID string, scope PipelineScope) (ReleaseOrderExecution, error)
+	ClaimExecutionByScope(
+		ctx context.Context,
+		releaseOrderID string,
+		scope PipelineScope,
+		startedAt time.Time,
+		updatedAt time.Time,
+	) (ReleaseOrderExecution, bool, error)
 	UpdateExecutionByScope(
 		ctx context.Context,
 		releaseOrderID string,

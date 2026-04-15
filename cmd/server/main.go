@@ -103,6 +103,11 @@ func main() {
 	if err := bootstrap.InitSchema(notificationRepo); err != nil {
 		log.Fatalf("init notification schema: %v", err)
 	}
+	releaseStoreFallback := configstore.NewReleaseStore(resolvedConfigPath)
+	releaseStore := configstore.NewDatabaseReleaseStore(db, cfg.Database.Driver, releaseStoreFallback)
+	if err := bootstrap.InitSchema(releaseStore); err != nil {
+		log.Fatalf("init release settings schema: %v", err)
+	}
 	if err := argocdAppRepo.CleanupLegacyApplications(context.Background()); err != nil {
 		log.Fatalf("cleanup legacy argocd applications: %v", err)
 	}
@@ -121,7 +126,6 @@ func main() {
 	gitopsInstanceManager := usecase.NewGitOpsInstanceManager(gitopsRepo, gitopsServiceFactory, platformParamRepo)
 	argocdInstanceManager := usecase.NewArgoCDInstanceManager(argocdAppRepo, gitopsRepo, argocdClientFactory)
 	userManagement := usecase.NewUserManagement(userRepo)
-	releaseStore := configstore.NewReleaseStore(resolvedConfigPath)
 	authSessionManager := usecase.NewAuthSessionManager(
 		userRepo,
 		releaseStore,

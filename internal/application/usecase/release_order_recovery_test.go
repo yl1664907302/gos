@@ -84,16 +84,16 @@ func TestCreateStandardRollbackByOrderPreservesTemplateHooks(t *testing.T) {
 		t.Fatalf("Create source order failed: %v", err)
 	}
 	if err := repo.CreateDeploySnapshot(ctx, domain.DeploySnapshot{
-		ID:             "snapshot-1",
-		ReleaseOrderID: sourceOrder.ID,
-		Provider:       "argocd",
-		GitOpsType:     domain.GitOpsTypeHelm,
-		RepoURL:        "https://example.com/repo.git",
-		Branch:         "demo-prod",
-		SourcePath:     "apps/demo/helm",
-		EnvCode:        "prod",
+		ID:              "snapshot-1",
+		ReleaseOrderID:  sourceOrder.ID,
+		Provider:        "argocd",
+		GitOpsType:      domain.GitOpsTypeHelm,
+		RepoURL:         "https://example.com/repo.git",
+		Branch:          "demo-prod",
+		SourcePath:      "apps/demo/helm",
+		EnvCode:         "prod",
 		SnapshotPayload: `{"image_version":"175"}`,
-		CreatedAt:      now,
+		CreatedAt:       now,
 	}); err != nil {
 		t.Fatalf("CreateDeploySnapshot failed: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestCreateStandardRollbackByOrderPreservesTemplateHooks(t *testing.T) {
 
 	foundHook := false
 	for _, step := range steps {
-		if step.StepCode == "hook:webhook_notification:1" {
+		if step.StepCode == "hook:post_release:webhook_notification:1" || step.StepCode == "hook:webhook_notification:1" {
 			foundHook = true
 			if step.StepName != "rollback notify" {
 				t.Fatalf("hook step name = %q, want %q", step.StepName, "rollback notify")

@@ -461,6 +461,10 @@ func orderResultFromStatus(status releasedomain.OrderStatus) string {
 		return "FAILED"
 	case releasedomain.OrderStatusCancelled:
 		return "CANCELLED"
+	case releasedomain.OrderStatusBuilding:
+		return "BUILDING"
+	case releasedomain.OrderStatusBuiltWaitingDeploy:
+		return "BUILT_WAITING_DEPLOY"
 	case releasedomain.OrderStatusRunning:
 		return "RUNNING"
 	case releasedomain.OrderStatusPending:

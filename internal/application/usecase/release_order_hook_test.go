@@ -181,6 +181,17 @@ func TestParseHookTaskIDFromTerminalMessage(t *testing.T) {
 	}
 }
 
+func TestParseHookExecuteStage(t *testing.T) {
+	t.Parallel()
+
+	if got := parseHookExecuteStage("hook:build_complete:webhook_notification:3"); got != domain.TemplateHookExecuteStageBuildComplete {
+		t.Fatalf("parseHookExecuteStage(new code) = %q, want %q", got, domain.TemplateHookExecuteStageBuildComplete)
+	}
+	if got := parseHookExecuteStage("hook:webhook_notification:3"); got != domain.TemplateHookExecuteStagePostRelease {
+		t.Fatalf("parseHookExecuteStage(legacy code) = %q, want %q", got, domain.TemplateHookExecuteStagePostRelease)
+	}
+}
+
 func TestEvaluateMainReleaseStatus(t *testing.T) {
 	t.Parallel()
 
@@ -212,6 +223,96 @@ func TestEvaluateMainReleaseStatus(t *testing.T) {
 	})
 	if done || status != domain.OrderStatusRunning || message != "" {
 		t.Fatalf("running case mismatch: done=%v status=%s message=%s", done, status, message)
+	}
+}
+
+func TestDeriveHookReleaseStatus(t *testing.T) {
+	t.Parallel()
+
+	order := domain.ReleaseOrder{Status: domain.OrderStatusBuilding}
+	executions := []domain.ReleaseOrderExecution{
+		{PipelineScope: domain.PipelineScopeCI, Status: domain.ExecutionStatusSuccess},
+		{PipelineScope: domain.PipelineScopeCD, Status: domain.ExecutionStatusPending},
+	}
+	if got := deriveHookReleaseStatus(order, executions, domain.TemplateHookExecuteStageBuildComplete); got != string(domain.OrderStatusSuccess) {
+		t.Fatalf("deriveHookReleaseStatus(build_complete) = %q, want %q", got, domain.OrderStatusSuccess)
+	}
+
+	failedExecutions := []domain.ReleaseOrderExecution{
+		{PipelineScope: domain.PipelineScopeCI, Status: domain.ExecutionStatusFailed},
+	}
+	if got := deriveHookReleaseStatus(order, failedExecutions, domain.TemplateHookExecuteStageBuildComplete); got != string(domain.OrderStatusFailed) {
+		t.Fatalf("deriveHookReleaseStatus(build_failed) = %q, want %q", got, domain.OrderStatusFailed)
+	}
+
+	finishedExecutions := []domain.ReleaseOrderExecution{
+		{PipelineScope: domain.PipelineScopeCI, Status: domain.ExecutionStatusSuccess},
+		{PipelineScope: domain.PipelineScopeCD, Status: domain.ExecutionStatusSuccess},
+	}
+	if got := deriveHookReleaseStatus(domain.ReleaseOrder{Status: domain.OrderStatusSuccess}, finishedExecutions, domain.TemplateHookExecuteStagePostRelease); got != string(domain.OrderStatusSuccess) {
+		t.Fatalf("deriveHookReleaseStatus(post_release) = %q, want %q", got, domain.OrderStatusSuccess)
+	}
+}
+
+func TestBuildNotificationRichValues(t *testing.T) {
+	t.Parallel()
+
+	if got := buildNotificationReleaseStageRichValue("build_complete"); got != "🟠 构建完成" {
+		t.Fatalf("buildNotificationReleaseStageRichValue(build_complete) = %q", got)
+	}
+	if got := buildNotificationReleaseStageRichValue("post_release"); got != "🔵 发布完成" {
+		t.Fatalf("buildNotificationReleaseStageRichValue(post_release) = %q", got)
+	}
+	if got := buildNotificationReleaseStatusRichValue("success"); got != "🟢 成功" {
+		t.Fatalf("buildNotificationReleaseStatusRichValue(success) = %q", got)
+	}
+	if got := buildNotificationReleaseStatusRichValue("failed"); got != "🔴 失败" {
+		t.Fatalf("buildNotificationReleaseStatusRichValue(failed) = %q", got)
+	}
+	if got := buildNotificationReleaseStatusRichValue("built_waiting_deploy"); got != "🟠 已构建待部署" {
+		t.Fatalf("buildNotificationReleaseStatusRichValue(built_waiting_deploy) = %q", got)
+	}
+}
+
+func TestEnforceNotificationCoreVariables(t *testing.T) {
+	t.Parallel()
+
+	order := domain.ReleaseOrder{Status: domain.OrderStatusSuccess}
+	executions := []domain.ReleaseOrderExecution{
+		{PipelineScope: domain.PipelineScopeCI, Status: domain.ExecutionStatusSuccess},
+		{PipelineScope: domain.PipelineScopeCD, Status: domain.ExecutionStatusSuccess},
+	}
+	values := map[string]string{
+		"app_name": "gateway",
+	}
+
+	enforceNotificationCoreVariables(order, executions, domain.TemplateHookExecuteStagePostRelease, values)
+
+	if got := values["release_stage"]; got != "post_release" {
+		t.Fatalf("release_stage = %q, want %q", got, "post_release")
+	}
+	if got := values["release_stage_rich"]; got != "🔵 发布完成" {
+		t.Fatalf("release_stage_rich = %q, want %q", got, "🔵 发布完成")
+	}
+	if got := values["release_status"]; got != "success" {
+		t.Fatalf("release_status = %q, want %q", got, "success")
+	}
+	if got := values["release_status_rich"]; got != "🟢 成功" {
+		t.Fatalf("release_status_rich = %q, want %q", got, "🟢 成功")
+	}
+}
+
+func TestContainsUnresolvedNotificationCorePlaceholder(t *testing.T) {
+	t.Parallel()
+
+	if !containsUnresolvedNotificationCorePlaceholder("阶段：{release_stage_rich}") {
+		t.Fatal("expected unresolved release_stage_rich placeholder to be detected")
+	}
+	if !containsUnresolvedNotificationCorePlaceholder("结果：{Release_Status_Rich}") {
+		t.Fatal("expected case-insensitive unresolved release_status_rich placeholder to be detected")
+	}
+	if containsUnresolvedNotificationCorePlaceholder("阶段：🔵 发布完成") {
+		t.Fatal("did not expect plain rendered text to be detected as unresolved placeholder")
 	}
 }
 

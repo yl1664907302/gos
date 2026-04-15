@@ -134,6 +134,9 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 	if order.Status == domain.OrderStatusCancelled {
 		return uc.syncCancelledOrder(ctx, order)
 	}
+	if order.Status == domain.OrderStatusFailed {
+		return uc.syncFailedOrder(ctx, order)
+	}
 	if err := uc.manager.touchExecutionLocks(ctx, order); err != nil {
 		return false, false, err
 	}
@@ -151,6 +154,17 @@ func (uc *TrackReleaseExecution) syncOrder(ctx context.Context, order domain.Rel
 
 	runningExecution := findExecutionByStatus(executions, domain.ExecutionStatusRunning)
 	if runningExecution == nil {
+		if order.Status == domain.OrderStatusBuilding &&
+			findExecutionByScopeAndStatus(executions, domain.PipelineScopeCI, domain.ExecutionStatusSuccess) != nil &&
+			findExecutionByScopeAndStatus(executions, domain.PipelineScopeCI, domain.ExecutionStatusPending) == nil &&
+			findExecutionByScopeAndStatus(executions, domain.PipelineScopeCD, domain.ExecutionStatusPending) != nil {
+			logx.Info("release_tracker", "building_order_waiting_deploy_transition",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
+			updated, syncErr := uc.syncNextStepAfterExecution(ctx, order)
+			return updated, false, syncErr
+		}
 		pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
 		if pendingExecution != nil {
 			logx.Info("release_tracker", "start_pending_execution",
@@ -567,6 +581,50 @@ func (uc *TrackReleaseExecution) syncNextStepAfterExecution(ctx context.Context,
 	if err != nil {
 		return false, err
 	}
+	buildHookUpdated, buildHookFinished, buildHookBlocked, err := uc.manager.syncHooksAfterBuild(ctx, order, executions)
+	if err != nil {
+		return false, err
+	}
+	if buildHookBlocked {
+		updated, failErr := uc.failRemainingExecutions(ctx, order, executions, domain.PipelineScopeCI, "构建完成 Hook 执行失败，未继续执行后续阶段")
+		if failErr != nil {
+			return false, failErr
+		}
+		return buildHookUpdated || updated, nil
+	}
+	if !buildHookFinished {
+		return buildHookUpdated, nil
+	}
+	if order.Status == domain.OrderStatusBuilding {
+		if findExecutionByScopeAndStatus(executions, domain.PipelineScopeCD, domain.ExecutionStatusPending) != nil {
+			now := uc.now()
+			if _, err := uc.manager.repo.UpdateStatus(
+				ctx,
+				order.ID,
+				domain.OrderStatusBuiltWaitingDeploy,
+				firstNonNilTime(order.StartedAt, &now),
+				nil,
+				now,
+			); err != nil {
+				return false, err
+			}
+			if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+				return false, err
+			}
+			if err := uc.manager.markStep(
+				ctx,
+				order.ID,
+				"global:release_finish",
+				domain.StepStatusPending,
+				"构建已完成，等待部署触发",
+				nil,
+				nil,
+			); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+	}
 	if findExecutionByStatus(executions, domain.ExecutionStatusPending) != nil {
 		orderParams, err := uc.manager.ListParams(ctx, order.ID)
 		if err != nil {
@@ -578,7 +636,7 @@ func (uc *TrackReleaseExecution) syncNextStepAfterExecution(ctx context.Context,
 		return true, nil
 	}
 	updated, _, err := uc.finalizeOrder(ctx, order, executions)
-	return updated, err
+	return updated || buildHookUpdated, err
 }
 
 func (uc *TrackReleaseExecution) finalizeOrder(
@@ -648,7 +706,7 @@ func (uc *TrackReleaseExecution) failRemainingExecutions(
 	if _, err := uc.finishStep(ctx, order.ID, "global:release_finish", domain.StepStatusFailed, message); err != nil {
 		return false, err
 	}
-	if order.Status == domain.OrderStatusPending || order.Status == domain.OrderStatusQueued || order.Status == domain.OrderStatusDeploying {
+	if order.Status == domain.OrderStatusPending || order.Status == domain.OrderStatusQueued || order.Status == domain.OrderStatusDeploying || order.Status == domain.OrderStatusBuilding {
 		if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, firstNonNilTime(order.StartedAt, &now), nil, now); err != nil {
 			return false, err
 		}
@@ -702,6 +760,62 @@ func (uc *TrackReleaseExecution) syncCancelledOrder(
 
 	if order.FinishedAt == nil {
 		if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusCancelled, order.StartedAt, &now, now); err != nil {
+			return false, false, err
+		}
+		updated = true
+	}
+	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+		return false, false, err
+	}
+	return updated, false, nil
+}
+
+func (uc *TrackReleaseExecution) syncFailedOrder(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+) (bool, bool, error) {
+	executions, err := uc.manager.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+	steps, err := uc.manager.ListSteps(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+
+	now := uc.now()
+	updated := false
+	for _, execution := range executions {
+		if execution.Status.IsTerminal() {
+			continue
+		}
+		if _, err := uc.manager.repo.UpdateExecutionByScope(ctx, order.ID, execution.PipelineScope, domain.ExecutionUpdateInput{
+			Status:     domain.ExecutionStatusFailed,
+			QueueURL:   execution.QueueURL,
+			BuildURL:   execution.BuildURL,
+			StartedAt:  execution.StartedAt,
+			FinishedAt: &now,
+			UpdatedAt:  now,
+		}); err != nil && !errors.Is(err, domain.ErrExecutionNotFound) {
+			return false, false, err
+		} else if err == nil {
+			updated = true
+		}
+	}
+
+	for _, step := range steps {
+		if !shouldFinishStepOnFailure(step) {
+			continue
+		}
+		if ok, err := uc.finishStep(ctx, order.ID, step.StepCode, domain.StepStatusFailed, "发布已失败，终止剩余执行"); err != nil {
+			return false, false, err
+		} else if ok {
+			updated = true
+		}
+	}
+
+	if order.FinishedAt == nil {
+		if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusFailed, order.StartedAt, &now, now); err != nil {
 			return false, false, err
 		}
 		updated = true

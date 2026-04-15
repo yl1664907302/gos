@@ -1,4 +1,5 @@
 export type ReleaseTriggerType = "manual" | "webhook" | "schedule";
+export type ReleaseOrderDispatchAction = "execute" | "build" | "deploy";
 export type ReleaseOrderStatus =
   | "pending"
   | "running"
@@ -9,6 +10,8 @@ export type ReleaseOrderStatus =
   | "pending_approval"
   | "approving"
   | "approved"
+  | "building"
+  | "built_waiting_deploy"
   | "rejected"
   | "queued"
   | "deploying"
@@ -20,6 +23,8 @@ export type ReleaseOrderBusinessStatus =
   | "pending_approval"
   | "approving"
   | "approved"
+  | "building"
+  | "built_waiting_deploy"
   | "rejected"
   | "queued"
   | "deploying"
@@ -70,6 +75,8 @@ export interface ReleaseOrder {
   concurrent_batch_no: string;
   concurrent_batch_seq: number;
   cd_provider: string;
+  has_ci_execution: boolean;
+  has_cd_execution: boolean;
   application_id: string;
   application_name: string;
   template_id: string;
@@ -213,7 +220,14 @@ export type ReleaseOrderConcurrentBatchQueueState =
   | "failed"
   | "cancelled";
 
+export type BatchExecuteStagedDispatchMode = "execute" | "build";
+
 export interface BatchExecuteReleaseOrdersPayload {
+  order_ids: string[];
+  staged_dispatch_mode?: BatchExecuteStagedDispatchMode;
+}
+
+export interface BatchDeleteReleaseOrdersPayload {
   order_ids: string[];
 }
 
@@ -259,6 +273,21 @@ export interface ReleaseOrderBatchExecuteResult {
 
 export interface ReleaseOrderBatchExecuteResponse {
   data: ReleaseOrderBatchExecuteResult;
+}
+
+export interface ReleaseOrderBatchDeleteFailure {
+  order_id: string;
+  order_no: string;
+  reason: string;
+}
+
+export interface ReleaseOrderBatchDeleteResult {
+  deleted_order_ids: string[];
+  failed: ReleaseOrderBatchDeleteFailure[];
+}
+
+export interface ReleaseOrderBatchDeleteResponse {
+  data: ReleaseOrderBatchDeleteResult;
 }
 
 export interface ReleaseOrderPrecheckItem {
@@ -463,6 +492,7 @@ export interface ReleaseTemplateGitOpsRulePayload {
 }
 
 export type ReleaseTemplateHookType = "agent_task" | "notification_hook" | "webhook_notification";
+export type ReleaseTemplateHookExecuteStage = "post_release" | "build_complete";
 export type ReleaseTemplateHookTriggerCondition = "on_success" | "on_failed" | "always";
 export type ReleaseTemplateHookFailurePolicy = "block_release" | "warn_only";
 
@@ -471,6 +501,8 @@ export interface ReleaseTemplateHook {
   template_id: string;
   hook_type: ReleaseTemplateHookType;
   name: string;
+  execute_stage: ReleaseTemplateHookExecuteStage;
+  execute_stages: ReleaseTemplateHookExecuteStage[];
   trigger_condition: ReleaseTemplateHookTriggerCondition;
   failure_policy: ReleaseTemplateHookFailurePolicy;
   env_codes: string[];
@@ -488,6 +520,8 @@ export interface ReleaseTemplateHook {
 export interface ReleaseTemplateHookPayload {
   hook_type: ReleaseTemplateHookType;
   name: string;
+  execute_stage?: ReleaseTemplateHookExecuteStage;
+  execute_stages: ReleaseTemplateHookExecuteStage[];
   trigger_condition: ReleaseTemplateHookTriggerCondition;
   failure_policy: ReleaseTemplateHookFailurePolicy;
   env_codes?: string[];

@@ -13,7 +13,8 @@ import (
 )
 
 type BatchExecuteReleaseOrdersInput struct {
-	OrderIDs []string
+	OrderIDs            []string
+	StagedDispatchMode BatchExecuteStagedDispatchMode
 }
 
 type BatchExecuteReleaseOrdersOutput struct {
@@ -21,6 +22,13 @@ type BatchExecuteReleaseOrdersOutput struct {
 	Orders         []domain.ReleaseOrder `json:"orders"`
 	DispatchErrors []string              `json:"dispatch_errors"`
 }
+
+type BatchExecuteStagedDispatchMode string
+
+const (
+	BatchExecuteStagedDispatchModeExecute BatchExecuteStagedDispatchMode = "execute"
+	BatchExecuteStagedDispatchModeBuild   BatchExecuteStagedDispatchMode = "build"
+)
 
 type ReleaseOrderConcurrentBatchQueueState string
 
@@ -68,8 +76,10 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 	if len(orderIDs) < 2 {
 		return BatchExecuteReleaseOrdersOutput{}, fmt.Errorf("%w: 至少选择两张待执行发布单", ErrInvalidInput)
 	}
+	mode := normalizeBatchExecuteStagedDispatchMode(input.StagedDispatchMode)
 
 	orders := make([]domain.ReleaseOrder, 0, len(orderIDs))
+	dispatchActions := make(map[string]ReleaseOrderDispatchAction, len(orderIDs))
 	blockedMessages := make([]string, 0)
 	for _, orderID := range orderIDs {
 		item, err := uc.repo.GetByID(ctx, orderID)
@@ -87,7 +97,9 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 		if err != nil {
 			return BatchExecuteReleaseOrdersOutput{}, err
 		}
-		precheck, err := uc.buildOrderPrecheck(ctx, item, executions, params)
+		dispatchAction := resolveBatchExecuteDispatchAction(item, executions, mode)
+		dispatchActions[item.ID] = dispatchAction
+		precheck, err := uc.buildOrderPrecheck(ctx, item, executions, params, dispatchAction)
 		if err != nil {
 			return BatchExecuteReleaseOrdersOutput{}, err
 		}
@@ -123,7 +135,19 @@ func (uc *ReleaseOrderManager) BatchExecute(ctx context.Context, input BatchExec
 		DispatchErrors: make([]string, 0),
 	}
 	for _, item := range orders {
-		updated, err := uc.Execute(ctx, item.ID)
+		action := dispatchActions[item.ID]
+		if action == "" {
+			action = ReleaseOrderDispatchActionExecute
+		}
+		var (
+			updated domain.ReleaseOrder
+			err     error
+		)
+		if action == ReleaseOrderDispatchActionBuild {
+			updated, err = uc.Build(ctx, item.ID, "", "")
+		} else {
+			updated, err = uc.Execute(ctx, item.ID, "", "")
+		}
 		if err != nil {
 			output.DispatchErrors = append(output.DispatchErrors, fmt.Sprintf("%s：%s", item.OrderNo, normalizeBatchDispatchErrorMessage(err)))
 			current, currentErr := uc.repo.GetByID(ctx, item.ID)
@@ -286,6 +310,46 @@ func normalizeBatchDispatchErrorMessage(err error) string {
 	return message
 }
 
+func normalizeBatchExecuteStagedDispatchMode(mode BatchExecuteStagedDispatchMode) BatchExecuteStagedDispatchMode {
+	switch strings.ToLower(strings.TrimSpace(string(mode))) {
+	case string(BatchExecuteStagedDispatchModeBuild):
+		return BatchExecuteStagedDispatchModeBuild
+	default:
+		return BatchExecuteStagedDispatchModeExecute
+	}
+}
+
+func resolveBatchExecuteDispatchAction(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	mode BatchExecuteStagedDispatchMode,
+) ReleaseOrderDispatchAction {
+	if mode != BatchExecuteStagedDispatchModeBuild {
+		return ReleaseOrderDispatchActionExecute
+	}
+	if !supportsBatchStagedDispatch(order, executions) {
+		return ReleaseOrderDispatchActionExecute
+	}
+	return ReleaseOrderDispatchActionBuild
+}
+
+func supportsBatchStagedDispatch(order domain.ReleaseOrder, executions []domain.ReleaseOrderExecution) bool {
+	if order.OperationType != domain.OperationTypeDeploy {
+		return false
+	}
+	hasCI := false
+	hasCD := false
+	for _, item := range executions {
+		switch item.PipelineScope {
+		case domain.PipelineScopeCI:
+			hasCI = true
+		case domain.PipelineScopeCD:
+			hasCD = true
+		}
+	}
+	return hasCI && hasCD
+}
+
 func resolveConcurrentBatchQueueState(
 	status domain.OrderStatus,
 	hasRunningExecution bool,
@@ -299,8 +363,15 @@ func resolveConcurrentBatchQueueState(
 		return ReleaseOrderConcurrentBatchQueueStateCancelled
 	case domain.OrderStatusQueued:
 		return ReleaseOrderConcurrentBatchQueueStateQueued
+	case domain.OrderStatusBuilding:
+		if hasRunningExecution {
+			return ReleaseOrderConcurrentBatchQueueStateExecuting
+		}
+		return ReleaseOrderConcurrentBatchQueueStateQueued
 	case domain.OrderStatusDeploying:
 		return ReleaseOrderConcurrentBatchQueueStateExecuting
+	case domain.OrderStatusBuiltWaitingDeploy:
+		return ReleaseOrderConcurrentBatchQueueStatePending
 	case domain.OrderStatusPending, domain.OrderStatusApproved:
 		return ReleaseOrderConcurrentBatchQueueStatePending
 	}

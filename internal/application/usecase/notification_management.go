@@ -15,19 +15,24 @@ import (
 var notificationTemplatePlaceholderPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
 
 var notificationBuiltinKeys = map[string]struct{}{
-	"app_key":         {},
-	"app_name":        {},
-	"project_name":    {},
-	"env":             {},
-	"env_code":        {},
-	"branch":          {},
-	"git_ref":         {},
-	"image_version":   {},
-	"image_tag":       {},
-	"order_no":        {},
-	"operation_type":  {},
-	"source_order_no": {},
-	"release_status":  {},
+	"app_key":             {},
+	"app_name":            {},
+	"project_name":        {},
+	"env":                 {},
+	"env_code":            {},
+	"branch":              {},
+	"git_ref":             {},
+	"image_version":       {},
+	"image_tag":           {},
+	"order_no":            {},
+	"operation_type":      {},
+	"source_order_no":     {},
+	"executor_user_id":    {},
+	"executor_name":       {},
+	"release_status":      {},
+	"release_stage":       {},
+	"release_status_rich": {},
+	"release_stage_rich":  {},
 }
 
 type NotificationManager struct {
@@ -651,6 +656,16 @@ func normalizeNotificationVariables(values map[string]string) map[string]string 
 			continue
 		}
 		normalized[normalizedKey] = strings.TrimSpace(value)
+	}
+	if strings.TrimSpace(normalized["release_stage_rich"]) == "" {
+		if stage := strings.TrimSpace(normalized["release_stage"]); stage != "" {
+			normalized["release_stage_rich"] = buildNotificationReleaseStageRichValue(stage)
+		}
+	}
+	if strings.TrimSpace(normalized["release_status_rich"]) == "" {
+		if status := strings.TrimSpace(normalized["release_status"]); status != "" {
+			normalized["release_status_rich"] = buildNotificationReleaseStatusRichValue(status)
+		}
 	}
 	return normalized
 }

@@ -117,6 +117,8 @@ type ReleaseTemplateParamConfigInput struct {
 type ReleaseTemplateHookInput struct {
 	HookType         releasedomain.TemplateHookType
 	Name             string
+	ExecuteStage     releasedomain.TemplateHookExecuteStage
+	ExecuteStages    []releasedomain.TemplateHookExecuteStage
 	TriggerCondition releasedomain.TemplateHookTriggerCondition
 	FailurePolicy    releasedomain.TemplateHookFailurePolicy
 	EnvCodes         []string
@@ -233,6 +235,7 @@ func (uc *ReleaseTemplateManager) Create(
 		input.CDParamConfigs,
 		input.GitOpsRules,
 		input.Hooks,
+		nil,
 	)
 	if err != nil {
 		logx.Error("release_template", "create_failed", err,
@@ -363,7 +366,7 @@ func (uc *ReleaseTemplateManager) Update(
 	if id == "" {
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, ErrInvalidID
 	}
-	current, _, _, _, _, err := uc.repo.GetTemplateByID(ctx, id)
+	current, _, _, currentGitOpsRules, _, err := uc.repo.GetTemplateByID(ctx, id)
 	if err != nil {
 		logx.Error("release_template", "update_failed", err, logx.F("template_id", id))
 		return releasedomain.ReleaseTemplate{}, nil, nil, nil, nil, err
@@ -412,6 +415,7 @@ func (uc *ReleaseTemplateManager) Update(
 		input.CDParamConfigs,
 		input.GitOpsRules,
 		input.Hooks,
+		currentGitOpsRules,
 	)
 	if err != nil {
 		logx.Error("release_template", "update_failed", err,
@@ -560,6 +564,7 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	cdParamConfigs []ReleaseTemplateParamConfigInput,
 	gitopsRuleInputs []ReleaseTemplateGitOpsRuleInput,
 	hookInputs []ReleaseTemplateHookInput,
+	existingGitOpsRules []releasedomain.ReleaseTemplateGitOpsRule,
 ) ([]releasedomain.ReleaseTemplateBinding, []releasedomain.ReleaseTemplateParam, []releasedomain.ReleaseTemplateGitOpsRule, []releasedomain.ReleaseTemplateHook, string, error) {
 	bindings := make([]releasedomain.ReleaseTemplateBinding, 0, 2)
 	params := make([]releasedomain.ReleaseTemplateParam, 0)
@@ -617,13 +622,20 @@ func (uc *ReleaseTemplateManager) buildTemplatePayload(
 	if err := uc.validateArgoCDTemplateConfig(ctx, bindings, params, gitopsType); err != nil {
 		return nil, nil, nil, nil, "", err
 	}
-	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsType, gitopsRuleInputs)
+	gitopsRules, err := uc.buildGitOpsRules(ctx, applicationID, bindings, params, gitopsType, gitopsRuleInputs, existingGitOpsRules)
 	if err != nil {
 		return nil, nil, nil, nil, "", err
 	}
 	hooks, err := uc.buildTemplateHooks(ctx, hookInputs)
 	if err != nil {
 		return nil, nil, nil, nil, "", err
+	}
+	if !templateUsesScope(bindings, releasedomain.PipelineScopeCI) {
+		for _, item := range hooks {
+			if releasedomain.TemplateHookHasExecuteStage(item.ExecuteStages, item.ExecuteStage, releasedomain.TemplateHookExecuteStageBuildComplete) {
+				return nil, nil, nil, nil, "", fmt.Errorf("%w: 构建完成 Hook 需要启用 CI 执行单元", ErrInvalidInput)
+			}
+		}
 	}
 	if appName == "" && len(bindings) > 0 {
 		appName = bindings[0].BindingName
@@ -904,6 +916,22 @@ func normalizeHookEnvCodes(values []string) []string {
 	return result
 }
 
+func normalizeTemplateHookExecuteStages(
+	values []releasedomain.TemplateHookExecuteStage,
+	legacy releasedomain.TemplateHookExecuteStage,
+) []releasedomain.TemplateHookExecuteStage {
+	normalized := make([]releasedomain.TemplateHookExecuteStage, 0, len(values))
+	for _, item := range values {
+		stage := releasedomain.TemplateHookExecuteStage(strings.ToLower(strings.TrimSpace(string(item))))
+		if stage == "" {
+			continue
+		}
+		normalized = append(normalized, stage)
+	}
+	legacyStage := releasedomain.TemplateHookExecuteStage(strings.ToLower(strings.TrimSpace(string(legacy))))
+	return releasedomain.NormalizeTemplateHookExecuteStages(normalized, legacyStage)
+}
+
 func (uc *ReleaseTemplateManager) buildTemplateHooks(
 	ctx context.Context,
 	inputs []ReleaseTemplateHookInput,
@@ -918,15 +946,41 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 		if !hookType.Valid() {
 			return nil, fmt.Errorf("%w: unsupported hook_type", ErrInvalidInput)
 		}
+		executeStages := normalizeTemplateHookExecuteStages(input.ExecuteStages, input.ExecuteStage)
+		if len(executeStages) == 0 {
+			return nil, fmt.Errorf("%w: invalid hook execute_stage", ErrInvalidInput)
+		}
+		executeStage := releasedomain.PrimaryTemplateHookExecuteStage(executeStages, "")
 		name := strings.TrimSpace(input.Name)
 		if name == "" {
 			switch hookType {
 			case releasedomain.TemplateHookTypeAgentTask:
-				name = "发布后 Agent 任务"
+				switch {
+				case len(executeStages) > 1:
+					name = "多阶段 Agent 任务"
+				case executeStage == releasedomain.TemplateHookExecuteStageBuildComplete:
+					name = "构建完成 Agent 任务"
+				default:
+					name = "发布后 Agent 任务"
+				}
 			case releasedomain.TemplateHookTypeNotificationHook:
-				name = "发布后通知 Hook"
+				switch {
+				case len(executeStages) > 1:
+					name = "多阶段通知 Hook"
+				case executeStage == releasedomain.TemplateHookExecuteStageBuildComplete:
+					name = "构建完成通知 Hook"
+				default:
+					name = "发布后通知 Hook"
+				}
 			case releasedomain.TemplateHookTypeWebhookNotification:
-				name = "发布后 Webhook 通知"
+				switch {
+				case len(executeStages) > 1:
+					name = "多阶段 Webhook 通知"
+				case executeStage == releasedomain.TemplateHookExecuteStageBuildComplete:
+					name = "构建完成 Webhook 通知"
+				default:
+					name = "发布后 Webhook 通知"
+				}
 			}
 		}
 		nameKey := strings.ToLower(name)
@@ -942,6 +996,11 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 		if !triggerCondition.Valid() {
 			return nil, fmt.Errorf("%w: invalid hook trigger_condition", ErrInvalidInput)
 		}
+		if len(executeStages) == 1 &&
+			executeStages[0] == releasedomain.TemplateHookExecuteStageBuildComplete &&
+			triggerCondition != releasedomain.TemplateHookTriggerOnSuccess {
+			return nil, fmt.Errorf("%w: 构建完成 Hook 仅支持成功后触发", ErrInvalidInput)
+		}
 
 		failurePolicy := releasedomain.TemplateHookFailurePolicy(strings.ToLower(strings.TrimSpace(string(input.FailurePolicy))))
 		if failurePolicy == "" {
@@ -955,6 +1014,8 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			ID:               generateID("rth"),
 			HookType:         hookType,
 			Name:             name,
+			ExecuteStage:     executeStage,
+			ExecuteStages:    append([]releasedomain.TemplateHookExecuteStage(nil), executeStages...),
 			TriggerCondition: triggerCondition,
 			FailurePolicy:    failurePolicy,
 			EnvCodes:         normalizeHookEnvCodes(input.EnvCodes),
@@ -1032,6 +1093,15 @@ func normalizeTemplateGitOpsType(candidate releasedomain.GitOpsType, usesArgoCD 
 	return candidate
 }
 
+func templateUsesScope(bindings []releasedomain.ReleaseTemplateBinding, scope releasedomain.PipelineScope) bool {
+	for _, item := range bindings {
+		if item.Enabled && item.PipelineScope == scope {
+			return true
+		}
+	}
+	return false
+}
+
 func (uc *ReleaseTemplateManager) buildGitOpsRules(
 	ctx context.Context,
 	applicationID string,
@@ -1039,6 +1109,7 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 	params []releasedomain.ReleaseTemplateParam,
 	gitopsType releasedomain.GitOpsType,
 	inputs []ReleaseTemplateGitOpsRuleInput,
+	existingRules []releasedomain.ReleaseTemplateGitOpsRule,
 ) ([]releasedomain.ReleaseTemplateGitOpsRule, error) {
 	if !templateUsesArgoCD(bindings) {
 		if len(inputs) > 0 {
@@ -1112,6 +1183,7 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 
 	result := make([]releasedomain.ReleaseTemplateGitOpsRule, 0, len(inputs))
 	seen := make(map[string]struct{}, len(inputs))
+	existingRuleSet := buildExistingGitOpsRuleSet(gitopsType, existingRules)
 	for idx, input := range inputs {
 		paramKey := strings.ToLower(strings.TrimSpace(input.SourceParamKey))
 		if paramKey == "" {
@@ -1206,7 +1278,9 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 			}
 			candidateKey := buildGitOpsValuesCandidateKey(filePathTemplate, targetPath)
 			if _, ok := valuesCandidateSet[candidateKey]; !ok {
-				return nil, fmt.Errorf("%w: 选中的 values 路径目标不存在或已变更", ErrInvalidInput)
+				if !existingRuleSet[buildExistingGitOpsRuleIdentityKey(gitopsType, paramKey, sourceFrom, locatorParamKey, filePathTemplate, documentKind, documentName, targetPath)] {
+					return nil, fmt.Errorf("%w: 选中的 values 路径目标不存在或已变更", ErrInvalidInput)
+				}
 			}
 			candidateIdentity = candidateKey
 		default:
@@ -1215,7 +1289,9 @@ func (uc *ReleaseTemplateManager) buildGitOpsRules(
 			}
 			candidateKey := buildGitOpsCandidateKey(filePathTemplate, documentKind, documentName, targetPath)
 			if _, ok := fieldCandidateSet[candidateKey]; !ok && !matchGitOpsCandidateTemplate(fieldCandidateSet, filePathTemplate, documentKind, documentName, targetPath, locatorParamKey) {
-				return nil, fmt.Errorf("%w: 选中的 YAML 字段目标不存在或已变更", ErrInvalidInput)
+				if !existingRuleSet[buildExistingGitOpsRuleIdentityKey(gitopsType, paramKey, sourceFrom, locatorParamKey, filePathTemplate, documentKind, documentName, targetPath)] {
+					return nil, fmt.Errorf("%w: 选中的 YAML 字段目标不存在或已变更", ErrInvalidInput)
+				}
 			}
 			candidateIdentity = candidateKey
 		}
@@ -1319,6 +1395,58 @@ func buildGitOpsValuesCandidateKey(filePathTemplate string, targetPath string) s
 		filepathSlash(strings.TrimSpace(filePathTemplate)),
 		strings.TrimSpace(targetPath),
 	}, "::")
+}
+
+func buildExistingGitOpsRuleIdentityKey(
+	gitopsType releasedomain.GitOpsType,
+	sourceParamKey string,
+	sourceFrom releasedomain.GitOpsRuleSourceFrom,
+	locatorParamKey string,
+	filePathTemplate string,
+	documentKind string,
+	documentName string,
+	targetPath string,
+) string {
+	targetIdentity := buildGitOpsCandidateKey(filePathTemplate, documentKind, documentName, targetPath)
+	if gitopsType == releasedomain.GitOpsTypeHelm {
+		targetIdentity = buildGitOpsValuesCandidateKey(filePathTemplate, targetPath)
+	}
+	return strings.Join([]string{
+		targetIdentity,
+		strings.ToLower(strings.TrimSpace(sourceParamKey)),
+		strings.ToLower(strings.TrimSpace(string(sourceFrom))),
+		strings.ToLower(strings.TrimSpace(locatorParamKey)),
+	}, "::")
+}
+
+func buildExistingGitOpsRuleSet(
+	gitopsType releasedomain.GitOpsType,
+	items []releasedomain.ReleaseTemplateGitOpsRule,
+) map[string]bool {
+	result := make(map[string]bool, len(items))
+	for _, item := range items {
+		filePathTemplate := filepathSlash(strings.TrimSpace(item.FilePathTemplate))
+		documentKind := strings.TrimSpace(item.DocumentKind)
+		documentName := strings.TrimSpace(item.DocumentName)
+		targetPath := strings.TrimSpace(item.TargetPath)
+		if gitopsType == releasedomain.GitOpsTypeHelm {
+			filePathTemplate = normalizeHelmValuesFilePathTemplate(filePathTemplate)
+			documentKind = "values"
+			documentName = ""
+		}
+		key := buildExistingGitOpsRuleIdentityKey(
+			gitopsType,
+			item.SourceParamKey,
+			item.SourceFrom,
+			item.LocatorParamKey,
+			filePathTemplate,
+			documentKind,
+			documentName,
+			targetPath,
+		)
+		result[key] = true
+	}
+	return result
 }
 
 func isPlatformValuesFileTemplate(filePathTemplate string) bool {

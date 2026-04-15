@@ -213,6 +213,12 @@ export const router = createRouter({
           meta: { title: '新建发布单', permission: 'release.create' },
         },
         {
+          path: '/releases/:id/edit',
+          name: 'release-order-edit',
+          component: ReleaseOrderCreateView,
+          meta: { title: '编辑发布单' },
+        },
+        {
           path: '/releases/:id',
           name: 'release-order-detail',
           component: ReleaseOrderDetailView,

@@ -25,8 +25,10 @@ import {
 import { useRoute, useRouter } from "vue-router";
 import {
   approveReleaseOrder,
+  buildReleaseOrder,
   buildReleaseOrderLogStreamURL,
   cancelReleaseOrder,
+  deployReleaseOrder,
   executeReleaseOrder,
   getReleaseOrderConcurrentBatchProgress,
   getReleaseOrderByID,
@@ -48,6 +50,7 @@ import { useAuthStore } from "../../stores/auth";
 import type {
   ReleaseOperationType,
   ReleaseOrderApprovalRecord,
+  ReleaseOrderDispatchAction,
   ReleaseOrder,
   ReleaseOrderBusinessStatus,
   ReleaseOrderExecution,
@@ -115,6 +118,7 @@ const recovering = ref(false);
 const approvalActing = ref(false);
 const autoRefreshTimer = ref<number | null>(null);
 const executeLocked = ref(false);
+const currentDispatchAction = ref<ReleaseOrderDispatchAction>("execute");
 
 const order = ref<ReleaseOrder | null>(null);
 const approvalRecords = ref<ReleaseOrderApprovalRecord[]>([]);
@@ -175,6 +179,10 @@ const currentBusinessStatus = computed<ReleaseOrderBusinessStatus>(() => {
       return "approving";
     case "approved":
       return "approved";
+    case "building":
+      return "building";
+    case "built_waiting_deploy":
+      return "built_waiting_deploy";
     case "rejected":
       return "rejected";
     case "queued":
@@ -212,6 +220,14 @@ const canExecutePermission = computed(() =>
         order.value.env_code,
       )
     : false,
+);
+const canEdit = computed(
+  () =>
+    Boolean(order.value) &&
+    (authStore.isAdmin || isCurrentUserCreator.value) &&
+    String(order.value?.status || "").trim() === "pending" &&
+    String(order.value?.operation_type || "").trim() === "deploy" &&
+    !String(order.value?.source_order_id || "").trim(),
 );
 const isCurrentUserApprover = computed(() => {
   if (!order.value || !currentUserID.value) {
@@ -275,12 +291,10 @@ const canRejectOrder = computed(
 const canCancel = computed(
   () =>
     Boolean(order.value) &&
-    authStore.hasApplicationPermission(
-      "release.cancel",
-      order.value?.application_id || "",
-      order.value?.env_code || "",
-    ) &&
+    (authStore.isAdmin || isCurrentUserCreator.value) &&
     (currentBusinessStatus.value === "pending_execution" ||
+      currentBusinessStatus.value === "building" ||
+      currentBusinessStatus.value === "built_waiting_deploy" ||
       currentBusinessStatus.value === "pending_approval" ||
       currentBusinessStatus.value === "approving" ||
       currentBusinessStatus.value === "approved" ||
@@ -297,6 +311,37 @@ const canExecute = computed(
       currentBusinessStatus.value === "approved") &&
     !executeLocked.value &&
     !precheckBlocked.value,
+);
+const supportsStagedDispatch = computed(() => {
+  if (!order.value) {
+    return false;
+  }
+  const hasCI =
+    Boolean(order.value.has_ci_execution) ||
+    Boolean(executions.value.find((item) => item.pipeline_scope === "ci"));
+  const hasCD =
+    Boolean(order.value.has_cd_execution) ||
+    Boolean(executions.value.find((item) => item.pipeline_scope === "cd"));
+  return (
+    String(order.value.operation_type || "").trim() === "deploy" &&
+    hasCI &&
+    hasCD
+  );
+});
+const canBuild = computed(
+  () =>
+    supportsStagedDispatch.value &&
+    canExecutePermission.value &&
+    (currentBusinessStatus.value === "pending_execution" ||
+      currentBusinessStatus.value === "approved") &&
+    !executeLocked.value,
+);
+const canDeploy = computed(
+  () =>
+    supportsStagedDispatch.value &&
+    canExecutePermission.value &&
+    currentBusinessStatus.value === "built_waiting_deploy" &&
+    !executeLocked.value,
 );
 const canRollback = computed(
   () =>
@@ -332,6 +377,7 @@ const shouldAutoRefresh = computed(() => {
     "pending_execution",
     "pending_approval",
     "approving",
+    "building",
     "queued",
     "deploying",
     "approved",
@@ -341,13 +387,13 @@ const shouldKeepLogStreaming = computed(() => {
   if (!order.value) {
     return true;
   }
-  return ["queued", "deploying"].includes(currentBusinessStatus.value);
+  return ["building", "queued", "deploying"].includes(currentBusinessStatus.value);
 });
 const shouldLoadPrecheck = computed(() => {
   if (!order.value) {
     return false;
   }
-  return ["pending_execution", "queued", "deploying"].includes(
+  return ["pending_execution", "built_waiting_deploy", "queued", "deploying"].includes(
     currentBusinessStatus.value,
   );
 });
@@ -355,7 +401,10 @@ const showPrecheckCard = computed(() => {
   if (precheckLoading.value) {
     return true;
   }
-  if (currentBusinessStatus.value === "pending_execution") {
+  if (
+    currentBusinessStatus.value === "pending_execution" ||
+    currentBusinessStatus.value === "built_waiting_deploy"
+  ) {
     return true;
   }
   return Boolean(
@@ -521,6 +570,7 @@ const spotlightTone = computed<"error" | "processing" | "success" | "warning">(
     switch (currentBusinessStatus.value) {
       case "deploy_failed":
         return "error";
+      case "building":
       case "deploying":
         return "processing";
       case "deploy_success":
@@ -543,12 +593,15 @@ const spotlightStatusKey = computed<
   switch (currentBusinessStatus.value) {
     case "deploy_failed":
       return "failed";
+    case "building":
     case "deploying":
       return "running";
     case "deploy_success":
       return "success";
     case "cancelled":
       return "cancelled";
+    case "built_waiting_deploy":
+      return "queued";
     default:
       return "pending";
   }
@@ -581,6 +634,12 @@ const spotlightTitle = computed(() => {
   }
   if (currentBusinessStatus.value === "deploy_failed") {
     return "发布失败，需要人工介入";
+  }
+  if (currentBusinessStatus.value === "building") {
+    return "构建执行中";
+  }
+  if (currentBusinessStatus.value === "built_waiting_deploy") {
+    return "构建已完成，等待部署";
   }
   if (currentBusinessStatus.value === "deploying") {
     return "发布执行中";
@@ -1165,6 +1224,10 @@ function statusText(
       return "审批中";
     case "approved":
       return "已批准";
+    case "building":
+      return "构建中";
+    case "built_waiting_deploy":
+      return "已构建待部署";
     case "rejected":
       return "审批拒绝";
     case "queued":
@@ -1208,11 +1271,14 @@ function statusToneClass(
     case "rejected":
     case "failed":
       return "status-pill-failed";
+    case "building":
+      return "status-pill-running";
     case "deploying":
     case "approving":
     case "running":
       return "status-pill-running";
     case "queued":
+    case "built_waiting_deploy":
     case "approved":
     case "pending_approval":
       return "status-pill-warning";
@@ -1319,26 +1385,45 @@ function concurrentQueueToneClass(
   }
 }
 
+function dispatchActionText(action: ReleaseOrderDispatchAction) {
+  switch (action) {
+    case "build":
+      return "构建";
+    case "deploy":
+      return "部署";
+    default:
+      return "发布";
+  }
+}
+
+const currentPrecheckAction = computed<ReleaseOrderDispatchAction>(() => {
+  if (currentBusinessStatus.value === "built_waiting_deploy") {
+    return "deploy";
+  }
+  return "execute";
+});
+
 const precheckSummaryMessage = computed(() => {
   if (!precheck.value) {
     return "";
   }
+  const actionText = dispatchActionText(currentPrecheckAction.value);
   if (!precheck.value.executable && precheck.value.ahead_count > 0) {
     return (
       precheck.value.conflict_message ||
-      `当前应用前面还有 ${precheck.value.ahead_count} 单，请等待先前执行单结束后再点击发布。`
+      `当前应用前面还有 ${precheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}。`
     );
   }
   if (precheck.value.waiting_for_lock) {
     return (
       precheck.value.conflict_message ||
-      "当前目标已被其他发布占用，系统会在锁释放后继续执行。"
+      `当前目标已被其他发布占用，系统会在锁释放后继续${actionText}。`
     );
   }
   if (precheckBlocked.value) {
     return (
       precheck.value.conflict_message ||
-      "当前发布单未通过执行前预检，请先处理阻塞项。"
+      `当前发布单未通过${actionText}前预检，请先处理阻塞项。`
     );
   }
   if (precheck.value.lock_enabled) {
@@ -1356,6 +1441,8 @@ const precheckSummaryTone = computed<"info" | "warning" | "error">(() => {
   }
   return "info";
 });
+
+const precheckCardTitle = computed(() => `${dispatchActionText(currentPrecheckAction.value)}前预检`);
 
 function triggerTypeText(
   triggerType: ReleaseTriggerType | "" | null | undefined,
@@ -1526,6 +1613,10 @@ const approvalStatusSummary = computed(() => {
       return order.value.approved_by
         ? `审批已通过，最后确认人：${order.value.approved_by}`
         : "审批已通过，可继续触发发布。";
+    case "building":
+      return "审批已通过，当前处于构建阶段。";
+    case "built_waiting_deploy":
+      return "审批与构建均已完成，等待手动触发部署。";
     case "rejected":
       return order.value.rejected_reason
         ? `审批已拒绝：${order.value.rejected_reason}`
@@ -2207,7 +2298,10 @@ async function loadPipelineStageView(options?: { silent?: boolean }) {
   }
 }
 
-async function loadPrecheck(options?: { silent?: boolean }) {
+async function loadPrecheck(options?: {
+  silent?: boolean;
+  action?: ReleaseOrderDispatchAction;
+}) {
   if (!orderID.value || !shouldLoadPrecheck.value) {
     precheck.value = null;
     return;
@@ -2217,7 +2311,10 @@ async function loadPrecheck(options?: { silent?: boolean }) {
     precheckLoading.value = true;
   }
   try {
-    const response = await getReleaseOrderPrecheck(orderID.value);
+    const response = await getReleaseOrderPrecheck(
+      orderID.value,
+      options?.action || currentPrecheckAction.value,
+    );
     precheck.value = response.data;
   } catch (error) {
     if (!silent) {
@@ -2315,26 +2412,46 @@ async function handleCancel() {
 }
 
 async function handleExecute() {
-  await executeCurrentOrder();
+  await executeCurrentOrder("execute");
 }
 
-async function executeCurrentOrder(options?: {
+async function handleBuild() {
+  await executeCurrentOrder("build");
+}
+
+async function handleDeploy() {
+  await executeCurrentOrder("deploy");
+}
+
+async function executeCurrentOrder(
+  action: ReleaseOrderDispatchAction = "execute",
+  options?: {
   skipPrecheck?: boolean;
   successMessage?: string;
   errorMessage?: string;
-}) {
+},
+) {
   if (!order.value || executeLocked.value) {
     return;
   }
+  currentDispatchAction.value = action;
   const skipPrecheck = Boolean(options?.skipPrecheck);
   const allowExecuteByStatus =
-    canExecutePermission.value &&
-    (currentBusinessStatus.value === "pending_execution" ||
-      currentBusinessStatus.value === "approved");
+    action === "build"
+      ? canBuild.value
+      : action === "deploy"
+        ? canDeploy.value
+        : canExecutePermission.value &&
+          (currentBusinessStatus.value === "pending_execution" ||
+            currentBusinessStatus.value === "approved");
   if (!allowExecuteByStatus) {
     message.warning(
       precheckSummaryMessage.value ||
-        "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
+        (action === "build"
+          ? "当前发布单不满足构建条件，无法再次触发构建"
+          : action === "deploy"
+            ? "当前发布单不满足部署条件，无法再次触发部署"
+            : "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布"),
     );
     return;
   }
@@ -2342,21 +2459,60 @@ async function executeCurrentOrder(options?: {
   executing.value = true;
   try {
     if (!skipPrecheck) {
-      await loadPrecheck({ silent: true });
+      await loadPrecheck({ silent: true, action });
     }
     if (!skipPrecheck && precheckBlocked.value) {
       message.warning(
         precheckSummaryMessage.value ||
-          "当前发布单未通过执行前预检，请先处理阻塞项",
+          (action === "build"
+            ? "当前发布单未通过构建前预检，请先处理阻塞项"
+            : action === "deploy"
+              ? "当前发布单未通过部署前预检，请先处理阻塞项"
+              : "当前发布单未通过执行前预检，请先处理阻塞项"),
       );
       return;
     }
-    const response = await executeReleaseOrder(order.value.id);
+    const response =
+      action === "build"
+        ? await buildReleaseOrder(order.value.id)
+        : action === "deploy"
+          ? await deployReleaseOrder(order.value.id)
+          : await executeReleaseOrder(order.value.id);
     order.value = response.data;
-    message.success(options?.successMessage || "发布已提交，正在调度执行");
-    await loadDetail({ silent: true });
+    message.success(
+      options?.successMessage ||
+        (action === "build"
+          ? "构建已提交，正在调度执行"
+          : action === "deploy"
+            ? "部署已提交，正在调度执行"
+            : "发布已提交，正在调度执行"),
+    );
+    try {
+      await loadDetail({ silent: true });
+    } catch (refreshError) {
+      message.warning(
+        extractHTTPErrorMessage(
+          refreshError,
+          action === "build"
+            ? "构建已触发，但详情刷新失败，请稍后手动刷新"
+            : action === "deploy"
+              ? "部署已触发，但详情刷新失败，请稍后手动刷新"
+              : "发布已触发，但详情刷新失败，请稍后手动刷新",
+        ),
+      );
+    }
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, options?.errorMessage || "发布执行失败"));
+    message.error(
+      extractHTTPErrorMessage(
+        error,
+        options?.errorMessage ||
+          (action === "build"
+            ? "构建执行失败"
+            : action === "deploy"
+              ? "部署执行失败"
+              : "发布执行失败"),
+      ),
+    );
   } finally {
     executing.value = false;
     executeLocked.value = false;
@@ -2376,7 +2532,7 @@ async function tryAutoExecuteFastRelease() {
     message.warning("当前模板启用了审批，极速发布已自动取消");
     return;
   }
-  await executeCurrentOrder({
+  await executeCurrentOrder("execute", {
     skipPrecheck: true,
     successMessage: "极速发布已自动开始执行",
     errorMessage: "极速发布自动执行失败",
@@ -2460,6 +2616,14 @@ function goBack() {
   void router.push("/releases");
 }
 
+function handleEdit() {
+  if (!order.value || !canEdit.value) {
+    message.warning("当前发布单不是可编辑的待执行普通发布单");
+    return;
+  }
+  void router.push(`/releases/${order.value.id}/edit`);
+}
+
 function stopAutoRefresh() {
   if (autoRefreshTimer.value !== null) {
     window.clearInterval(autoRefreshTimer.value);
@@ -2520,6 +2684,7 @@ onBeforeUnmount(() => {
           </template>
           刷新
         </a-button>
+        <a-button v-if="canEdit" @click="handleEdit">编辑</a-button>
         <a-button
           v-if="canSubmitApproval"
           :loading="approvalActing && approvalActionMode === 'submit'"
@@ -2544,6 +2709,24 @@ onBeforeUnmount(() => {
         >
           审批拒绝
         </a-button>
+        <a-button
+          v-if="canBuild"
+          :loading="executing && currentDispatchAction === 'build'"
+          :disabled="executeLocked"
+          @click="handleBuild"
+        >
+          构建
+        </a-button>
+        <a-button
+          v-if="canDeploy"
+          type="primary"
+          ghost
+          :loading="executing && currentDispatchAction === 'deploy'"
+          :disabled="executeLocked"
+          @click="handleDeploy"
+        >
+          部署
+        </a-button>
         <a-popconfirm
           v-if="canExecute"
           title="确认执行当前发布单吗？"
@@ -2556,12 +2739,18 @@ onBeforeUnmount(() => {
           </template>
           <a-button
             type="primary"
-            :loading="executing"
+            :loading="executing && currentDispatchAction === 'execute'"
             :disabled="executeLocked"
             >发布</a-button
           >
         </a-popconfirm>
-        <a-button v-else type="primary" disabled>发布</a-button>
+        <a-button
+          v-else-if="!canBuild && !canDeploy"
+          type="primary"
+          disabled
+        >
+          发布
+        </a-button>
         <a-popconfirm
           v-if="canRollback"
           title="确认基于这张成功单创建标准回滚吗？"
@@ -3182,7 +3371,7 @@ onBeforeUnmount(() => {
         <a-card
           v-if="showPrecheckCard"
           class="detail-card"
-          title="执行前预检"
+          :title="precheckCardTitle"
           :loading="precheckLoading"
           :bordered="true"
         >

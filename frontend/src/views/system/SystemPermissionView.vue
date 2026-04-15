@@ -7,8 +7,8 @@ import { listApplicationOptions } from '../../api/application'
 import { getReleaseSettings } from '../../api/system'
 import {
   grantUserPermissions,
+  listUsers,
   listPermissions,
-  listUserOptions,
   listUserPermissions,
   revokeUserPermissions,
 } from '../../api/user'
@@ -223,11 +223,19 @@ function handleApplicationReleaseChange(applicationID: string, values: string[])
 async function loadUsers() {
   usersLoading.value = true
   try {
-    const response = await listUserOptions()
+    const response = await listUsers({
+      role: 'normal',
+      status: 'active',
+      page: 1,
+      page_size: 500,
+    })
     userOptions.value = response.data.map((item) => ({
       label: `${item.display_name} (${item.username})`,
       value: item.id,
     }))
+    if (selectedUserID.value && !userOptions.value.some((item) => item.value === selectedUserID.value)) {
+      selectedUserID.value = ''
+    }
     if (!selectedUserID.value && userOptions.value.length > 0) {
       const first = userOptions.value[0]
       if (first) {

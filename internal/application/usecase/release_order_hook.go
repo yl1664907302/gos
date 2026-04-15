@@ -26,6 +26,7 @@ var hookTaskIDPattern = regexp.MustCompile(`task_id=([A-Za-z0-9-]+)`)
 var hookTaskLabelPattern = regexp.MustCompile(`任务号[:：]\s*([A-Za-z0-9-]+)`)
 var hookSourceTaskIDPattern = regexp.MustCompile(`source_task_id=([A-Za-z0-9-]+)`)
 var hookDispatchBatchIDPattern = regexp.MustCompile(`batch_id=([A-Za-z0-9-]+)`)
+var unresolvedNotificationCorePlaceholderPattern = regexp.MustCompile(`(?i)\{(?:release_stage_rich|release_status_rich)\}`)
 var templateWebhookHTTPTimeout = 10 * time.Second
 
 func (uc *ReleaseOrderManager) syncHooksAfterRelease(
@@ -42,16 +43,8 @@ func (uc *ReleaseOrderManager) syncHooksAfterRelease(
 		return false, false, order.Status, "", err
 	}
 
-	steps, err := uc.repo.ListSteps(ctx, order.ID)
-	if err != nil {
-		return false, false, order.Status, "", err
-	}
-	hookSteps := collectHookSteps(steps)
-	if len(hookSteps) == 0 {
-		return false, true, mainStatus, finalMessage, nil
-	}
-
 	if order.Status.IsTerminal() {
+		var err error
 		now := uc.now()
 		order, err = uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusRunning, order.StartedAt, nil, now)
 		if err != nil {
@@ -59,92 +52,35 @@ func (uc *ReleaseOrderManager) syncHooksAfterRelease(
 		}
 	}
 
-	templateHooks, err := uc.loadTemplateHooksForOrder(ctx, order)
+	updated, finished, blockingHookFailed, err := uc.syncHooksForStage(
+		ctx,
+		order,
+		executions,
+		domain.TemplateHookExecuteStagePostRelease,
+		mainStatus,
+	)
 	if err != nil {
 		return false, false, order.Status, "", err
 	}
-	hookBySort := make(map[int]domain.ReleaseTemplateHook, len(templateHooks))
-	for _, item := range templateHooks {
-		hookBySort[item.SortNo] = item
+	if !finished {
+		return updated, false, domain.OrderStatusRunning, "", nil
 	}
-
-	updated := false
-	blockingHookFailed := false
-	for _, step := range hookSteps {
-		hookCfg, ok := hookBySort[parseHookSortNo(step.StepCode)]
-		if !ok {
-			if step.Status != domain.StepStatusFailed && step.Status != domain.StepStatusSuccess {
-				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, "未找到 Hook 模板快照，无法继续执行"); err != nil {
-					return updated, false, order.Status, "", err
-				}
-				updated = true
-			}
-			blockingHookFailed = true
-			continue
-		}
-
-		if !hookMatchesOrderEnv(hookCfg.EnvCodes, order.EnvCode) {
-			if step.Status != domain.StepStatusSuccess {
-				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, buildTemplateHookEnvSkipMessage(hookCfg.EnvCodes, order.EnvCode)); err != nil {
-					return updated, false, order.Status, "", err
-				}
-				updated = true
-			}
-			continue
-		}
-
-		if !shouldTriggerTemplateHook(hookCfg.TriggerCondition, mainStatus) {
-			if step.Status != domain.StepStatusSuccess {
-				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "已按触发条件跳过"); err != nil {
-					return updated, false, order.Status, "", err
-				}
-				updated = true
-			}
-			continue
-		}
-
-		switch step.Status {
-		case domain.StepStatusPending:
-			stepUpdated, dispatchErr := uc.dispatchTemplateHookStep(ctx, order, executions, hookCfg, step)
-			if dispatchErr != nil {
-				if hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyWarnOnly {
-					if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "Hook 执行失败已忽略："+dispatchErr.Error()); err != nil {
-						return updated, false, order.Status, "", err
-					}
-				} else {
-					if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, dispatchErr.Error()); err != nil {
-						return updated, false, order.Status, "", err
-					}
-					blockingHookFailed = true
-				}
-				updated = true
-				return updated, false, domain.OrderStatusRunning, "", nil
-			}
-			updated = updated || stepUpdated
-			return updated, false, domain.OrderStatusRunning, "", nil
-		case domain.StepStatusRunning:
-			stepUpdated, finished, failed, syncErr := uc.syncRunningHookStep(ctx, order, hookCfg, step)
-			if syncErr != nil {
-				return updated, false, order.Status, "", syncErr
-			}
-			updated = updated || stepUpdated
-			if !finished {
-				return updated, false, domain.OrderStatusRunning, "", nil
-			}
-			if failed && hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyBlockRelease {
-				blockingHookFailed = true
-			}
-		case domain.StepStatusFailed:
-			if hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyBlockRelease {
-				blockingHookFailed = true
-			}
-		}
-	}
-
 	if blockingHookFailed {
 		return updated, true, domain.OrderStatusFailed, "Hook 执行失败", nil
 	}
 	return updated, true, mainStatus, finalMessage, nil
+}
+
+func (uc *ReleaseOrderManager) syncHooksAfterBuild(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+) (bool, bool, bool, error) {
+	ciExecution := findExecutionByScope(executions, domain.PipelineScopeCI)
+	if ciExecution == nil || ciExecution.Status != domain.ExecutionStatusSuccess {
+		return false, true, false, nil
+	}
+	return uc.syncHooksForStage(ctx, order, executions, domain.TemplateHookExecuteStageBuildComplete, domain.OrderStatusSuccess)
 }
 
 func evaluateMainReleaseStatus(executions []domain.ReleaseOrderExecution) (domain.OrderStatus, string, bool) {
@@ -169,6 +105,15 @@ func evaluateMainReleaseStatus(executions []domain.ReleaseOrderExecution) (domai
 		}
 	}
 	return orderStatus, message, true
+}
+
+func findExecutionByScope(items []domain.ReleaseOrderExecution, scope domain.PipelineScope) *domain.ReleaseOrderExecution {
+	for idx := range items {
+		if items[idx].PipelineScope == scope {
+			return &items[idx]
+		}
+	}
+	return nil
 }
 
 func (uc *ReleaseOrderManager) ensureMainReleaseFinishStep(
@@ -200,6 +145,14 @@ func collectHookSteps(steps []domain.ReleaseOrderStep) []domain.ReleaseOrderStep
 		return result[i].CreatedAt.Before(result[j].CreatedAt)
 	})
 	return result
+}
+
+func parseHookExecuteStage(stepCode string) domain.TemplateHookExecuteStage {
+	parts := strings.Split(strings.TrimSpace(stepCode), ":")
+	if len(parts) >= 4 {
+		return domain.TemplateHookExecuteStage(strings.TrimSpace(parts[1]))
+	}
+	return domain.TemplateHookExecuteStagePostRelease
 }
 
 func parseHookSortNo(stepCode string) int {
@@ -255,6 +208,119 @@ func buildTemplateHookEnvSkipMessage(envCodes []string, orderEnvCode string) str
 		return "已按环境条件跳过"
 	}
 	return fmt.Sprintf("当前环境 %s 未命中 Hook 执行环境（%s），已跳过", normalizedOrderEnv, strings.Join(filtered, " / "))
+}
+
+func (uc *ReleaseOrderManager) syncHooksForStage(
+	ctx context.Context,
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	executeStage domain.TemplateHookExecuteStage,
+	triggerStatus domain.OrderStatus,
+) (bool, bool, bool, error) {
+	steps, err := uc.repo.ListSteps(ctx, order.ID)
+	if err != nil {
+		return false, false, false, err
+	}
+	hookSteps := collectHookSteps(steps)
+	if len(hookSteps) == 0 {
+		return false, true, false, nil
+	}
+
+	templateHooks, err := uc.loadTemplateHooksForOrder(ctx, order)
+	if err != nil {
+		return false, false, false, err
+	}
+	hookBySort := make(map[int]domain.ReleaseTemplateHook, len(templateHooks))
+	hasStageHook := false
+	for _, item := range templateHooks {
+		item.ExecuteStages = domain.NormalizeTemplateHookExecuteStages(item.ExecuteStages, item.ExecuteStage)
+		item.ExecuteStage = domain.PrimaryTemplateHookExecuteStage(item.ExecuteStages, item.ExecuteStage)
+		hookBySort[item.SortNo] = item
+		if domain.TemplateHookHasExecuteStage(item.ExecuteStages, item.ExecuteStage, executeStage) {
+			hasStageHook = true
+		}
+	}
+	if !hasStageHook {
+		return false, true, false, nil
+	}
+
+	updated := false
+	blockingHookFailed := false
+	for _, step := range hookSteps {
+		if parseHookExecuteStage(step.StepCode) != executeStage {
+			continue
+		}
+		hookCfg, ok := hookBySort[parseHookSortNo(step.StepCode)]
+		if !ok {
+			if step.Status != domain.StepStatusFailed && step.Status != domain.StepStatusSuccess {
+				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, "未找到 Hook 模板快照，无法继续执行"); err != nil {
+					return updated, false, blockingHookFailed, err
+				}
+				updated = true
+			}
+			blockingHookFailed = true
+			continue
+		}
+
+		if !hookMatchesOrderEnv(hookCfg.EnvCodes, order.EnvCode) {
+			if step.Status != domain.StepStatusSuccess {
+				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, buildTemplateHookEnvSkipMessage(hookCfg.EnvCodes, order.EnvCode)); err != nil {
+					return updated, false, blockingHookFailed, err
+				}
+				updated = true
+			}
+			continue
+		}
+
+		if !shouldTriggerTemplateHook(hookCfg.TriggerCondition, triggerStatus) {
+			if step.Status != domain.StepStatusSuccess {
+				if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "已按触发条件跳过"); err != nil {
+					return updated, false, blockingHookFailed, err
+				}
+				updated = true
+			}
+			continue
+		}
+
+		switch step.Status {
+		case domain.StepStatusPending:
+			stepUpdated, dispatchErr := uc.dispatchTemplateHookStep(ctx, order, executions, hookCfg, step)
+			if dispatchErr != nil {
+				if hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyWarnOnly {
+					if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusSuccess, "Hook 执行失败已忽略："+dispatchErr.Error()); err != nil {
+						return updated, false, blockingHookFailed, err
+					}
+				} else {
+					if err := uc.markStepFinished(ctx, order.ID, step.StepCode, domain.StepStatusFailed, dispatchErr.Error()); err != nil {
+						return updated, false, blockingHookFailed, err
+					}
+					blockingHookFailed = true
+				}
+				updated = true
+				return updated, false, blockingHookFailed, nil
+			}
+			updated = updated || stepUpdated
+			return updated, false, blockingHookFailed, nil
+		case domain.StepStatusRunning:
+			stepUpdated, finished, failed, syncErr := uc.syncRunningHookStep(ctx, order, hookCfg, step)
+			if syncErr != nil {
+				return updated, false, blockingHookFailed, syncErr
+			}
+			updated = updated || stepUpdated
+			if !finished {
+				return updated, false, blockingHookFailed, nil
+			}
+			if failed && hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyBlockRelease {
+				blockingHookFailed = true
+			}
+		case domain.StepStatusFailed:
+			if hookCfg.FailurePolicy == domain.TemplateHookFailurePolicyBlockRelease {
+				blockingHookFailed = true
+			}
+		}
+	}
+
+	return updated, true, blockingHookFailed, nil
 }
 
 func (uc *ReleaseOrderManager) loadTemplateHooksForOrder(ctx context.Context, order domain.ReleaseOrder) ([]domain.ReleaseTemplateHook, error) {
@@ -316,7 +382,7 @@ func (uc *ReleaseOrderManager) dispatchAgentTaskHookStep(
 	if sourceTask.TaskMode != agentdomain.TaskModeTemporary {
 		return false, fmt.Errorf("%w: hook target task must be temporary", ErrInvalidInput)
 	}
-	variables, err := uc.buildHookTaskVariables(ctx, order, executions)
+	variables, err := uc.buildHookTaskVariables(ctx, order, executions, hook, parseHookExecuteStage(step.StepCode))
 	if err != nil {
 		return false, err
 	}
@@ -367,7 +433,7 @@ func (uc *ReleaseOrderManager) dispatchWebhookHookStep(
 	if webhookURL == "" {
 		return false, fmt.Errorf("%w: webhook url is required", ErrInvalidInput)
 	}
-	variables, err := uc.buildHookTaskVariables(ctx, order, executions)
+	variables, err := uc.buildHookTaskVariables(ctx, order, executions, hook, parseHookExecuteStage(step.StepCode))
 	if err != nil {
 		return false, err
 	}
@@ -437,11 +503,16 @@ func (uc *ReleaseOrderManager) dispatchNotificationHookStep(
 		return false, fmt.Errorf("%w: notification markdown template is disabled", ErrInvalidInput)
 	}
 
-	variables, err := uc.buildHookTaskVariables(ctx, order, executions)
+	executeStage := parseHookExecuteStage(step.StepCode)
+	variables, err := uc.buildHookTaskVariables(ctx, order, executions, hook, executeStage)
 	if err != nil {
 		return false, err
 	}
+	enforceNotificationCoreVariables(order, executions, executeStage, variables)
 	title, body := renderNotificationMarkdownTemplate(variables, template)
+	if containsUnresolvedNotificationCorePlaceholder(title) || containsUnresolvedNotificationCorePlaceholder(body) {
+		return false, fmt.Errorf("%w: notification markdown has unresolved core placeholders", ErrInvalidInput)
+	}
 	if strings.TrimSpace(title) == "" && strings.TrimSpace(body) == "" {
 		return false, fmt.Errorf("%w: notification markdown content is empty", ErrInvalidInput)
 	}
@@ -717,6 +788,8 @@ func (uc *ReleaseOrderManager) buildHookTaskVariables(
 	ctx context.Context,
 	order domain.ReleaseOrder,
 	executions []domain.ReleaseOrderExecution,
+	hook domain.ReleaseTemplateHook,
+	executeStage domain.TemplateHookExecuteStage,
 ) (map[string]string, error) {
 	orderParams, err := uc.repo.ListParams(ctx, order.ID)
 	if err != nil {
@@ -749,9 +822,14 @@ func (uc *ReleaseOrderManager) buildHookTaskVariables(
 	values["order_no"] = strings.TrimSpace(order.OrderNo)
 	values["operation_type"] = strings.TrimSpace(string(order.OperationType))
 	values["source_order_no"] = strings.TrimSpace(order.SourceOrderNo)
-	mainStatus, _, mainDone := evaluateMainReleaseStatus(executions)
-	if mainDone {
-		values["release_status"] = strings.TrimSpace(string(mainStatus))
+	values["executor_user_id"] = strings.TrimSpace(firstNonEmpty(order.ExecutorUserID, order.CreatorUserID))
+	values["executor_name"] = strings.TrimSpace(firstNonEmpty(order.ExecutorName, order.TriggeredBy))
+	releaseStage := string(normalizeHookExecuteStage(executeStage))
+	values["release_stage"] = releaseStage
+	values["release_stage_rich"] = buildNotificationReleaseStageRichValue(releaseStage)
+	if releaseStatus := deriveHookReleaseStatus(order, executions, executeStage); releaseStatus != "" {
+		values["release_status"] = releaseStatus
+		values["release_status_rich"] = buildNotificationReleaseStatusRichValue(releaseStatus)
 	}
 	for _, item := range orderParams {
 		key := strings.ToLower(strings.TrimSpace(item.ParamKey))
@@ -768,6 +846,130 @@ func (uc *ReleaseOrderManager) buildHookTaskVariables(
 		values[key] = value
 	}
 	return values, nil
+}
+
+func enforceNotificationCoreVariables(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	executeStage domain.TemplateHookExecuteStage,
+	values map[string]string,
+) {
+	if values == nil {
+		return
+	}
+	releaseStage := strings.TrimSpace(string(normalizeHookExecuteStage(executeStage)))
+	if releaseStage != "" {
+		values["release_stage"] = releaseStage
+	}
+	if strings.TrimSpace(values["release_stage_rich"]) == "" && releaseStage != "" {
+		values["release_stage_rich"] = buildNotificationReleaseStageRichValue(releaseStage)
+	}
+	releaseStatus := strings.TrimSpace(values["release_status"])
+	if releaseStatus == "" {
+		releaseStatus = deriveHookReleaseStatus(order, executions, executeStage)
+		if strings.TrimSpace(releaseStatus) != "" {
+			values["release_status"] = strings.TrimSpace(releaseStatus)
+		}
+	}
+	if strings.TrimSpace(values["release_status_rich"]) == "" && strings.TrimSpace(releaseStatus) != "" {
+		values["release_status_rich"] = buildNotificationReleaseStatusRichValue(releaseStatus)
+	}
+}
+
+func containsUnresolvedNotificationCorePlaceholder(text string) bool {
+	return unresolvedNotificationCorePlaceholderPattern.MatchString(strings.TrimSpace(text))
+}
+
+func normalizeHookExecuteStage(stage domain.TemplateHookExecuteStage) domain.TemplateHookExecuteStage {
+	if stage == "" {
+		return domain.TemplateHookExecuteStagePostRelease
+	}
+	return stage
+}
+
+func deriveHookReleaseStatus(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	executeStage domain.TemplateHookExecuteStage,
+) string {
+	mainStatus, _, mainDone := evaluateMainReleaseStatus(executions)
+	if mainDone {
+		return strings.TrimSpace(string(mainStatus))
+	}
+
+	if executeStage == domain.TemplateHookExecuteStageBuildComplete {
+		ciExecution := findExecutionByScope(executions, domain.PipelineScopeCI)
+		if ciExecution != nil {
+			switch ciExecution.Status {
+			case domain.ExecutionStatusSuccess:
+				return strings.TrimSpace(string(domain.OrderStatusSuccess))
+			case domain.ExecutionStatusFailed:
+				return strings.TrimSpace(string(domain.OrderStatusFailed))
+			case domain.ExecutionStatusCancelled:
+				return strings.TrimSpace(string(domain.OrderStatusCancelled))
+			case domain.ExecutionStatusRunning:
+				return strings.TrimSpace(string(domain.OrderStatusBuilding))
+			}
+		}
+	}
+
+	status := strings.TrimSpace(string(order.Status))
+	if status != "" {
+		return status
+	}
+	return strings.TrimSpace(string(domain.OrderStatusRunning))
+}
+
+func buildNotificationReleaseStageRichValue(stage string) string {
+	switch strings.ToLower(strings.TrimSpace(stage)) {
+	case string(domain.TemplateHookExecuteStageBuildComplete):
+		return "🟠 构建完成"
+	case string(domain.TemplateHookExecuteStagePostRelease):
+		return "🔵 发布完成"
+	default:
+		stage = strings.TrimSpace(stage)
+		if stage == "" {
+			return ""
+		}
+		return "🟡 " + stage
+	}
+}
+
+func buildNotificationReleaseStatusRichValue(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case string(domain.OrderStatusSuccess), string(domain.OrderStatusDeploySuccess):
+		return "🟢 成功"
+	case string(domain.OrderStatusFailed), string(domain.OrderStatusDeployFailed):
+		return "🔴 失败"
+	case string(domain.OrderStatusCancelled):
+		return "⚪ 已取消"
+	case string(domain.OrderStatusBuilding):
+		return "🟠 构建中"
+	case string(domain.OrderStatusBuiltWaitingDeploy):
+		return "🟠 已构建待部署"
+	case string(domain.OrderStatusDeploying):
+		return "🔵 部署中"
+	case string(domain.OrderStatusPending):
+		return "🟡 待执行"
+	case string(domain.OrderStatusRunning):
+		return "🔵 执行中"
+	case string(domain.OrderStatusPendingApproval):
+		return "🟣 待审批"
+	case string(domain.OrderStatusApproving):
+		return "🟣 审批中"
+	case string(domain.OrderStatusApproved):
+		return "🟢 审批通过"
+	case string(domain.OrderStatusRejected):
+		return "🔴 审批拒绝"
+	case string(domain.OrderStatusQueued):
+		return "🟡 排队中"
+	default:
+		status = strings.TrimSpace(status)
+		if status == "" {
+			return ""
+		}
+		return "🟡 " + status
+	}
 }
 
 func renderHookString(values map[string]string, template string) string {

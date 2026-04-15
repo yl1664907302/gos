@@ -72,17 +72,19 @@ func (t OperationType) Valid() bool {
 type ReleaseBusinessStatus string
 
 const (
-	ReleaseBusinessStatusDraft            ReleaseBusinessStatus = "draft"
-	ReleaseBusinessStatusPendingExecution ReleaseBusinessStatus = "pending_execution"
-	ReleaseBusinessStatusPendingApproval  ReleaseBusinessStatus = "pending_approval"
-	ReleaseBusinessStatusApproving        ReleaseBusinessStatus = "approving"
-	ReleaseBusinessStatusApproved         ReleaseBusinessStatus = "approved"
-	ReleaseBusinessStatusRejected         ReleaseBusinessStatus = "rejected"
-	ReleaseBusinessStatusQueued           ReleaseBusinessStatus = "queued"
-	ReleaseBusinessStatusDeploying        ReleaseBusinessStatus = "deploying"
-	ReleaseBusinessStatusDeploySuccess    ReleaseBusinessStatus = "deploy_success"
-	ReleaseBusinessStatusDeployFailed     ReleaseBusinessStatus = "deploy_failed"
-	ReleaseBusinessStatusCancelled        ReleaseBusinessStatus = "cancelled"
+	ReleaseBusinessStatusDraft              ReleaseBusinessStatus = "draft"
+	ReleaseBusinessStatusPendingExecution   ReleaseBusinessStatus = "pending_execution"
+	ReleaseBusinessStatusPendingApproval    ReleaseBusinessStatus = "pending_approval"
+	ReleaseBusinessStatusApproving          ReleaseBusinessStatus = "approving"
+	ReleaseBusinessStatusApproved           ReleaseBusinessStatus = "approved"
+	ReleaseBusinessStatusBuilding           ReleaseBusinessStatus = "building"
+	ReleaseBusinessStatusBuiltWaitingDeploy ReleaseBusinessStatus = "built_waiting_deploy"
+	ReleaseBusinessStatusRejected           ReleaseBusinessStatus = "rejected"
+	ReleaseBusinessStatusQueued             ReleaseBusinessStatus = "queued"
+	ReleaseBusinessStatusDeploying          ReleaseBusinessStatus = "deploying"
+	ReleaseBusinessStatusDeploySuccess      ReleaseBusinessStatus = "deploy_success"
+	ReleaseBusinessStatusDeployFailed       ReleaseBusinessStatus = "deploy_failed"
+	ReleaseBusinessStatusCancelled          ReleaseBusinessStatus = "cancelled"
 )
 
 func (s ReleaseBusinessStatus) Valid() bool {
@@ -92,6 +94,8 @@ func (s ReleaseBusinessStatus) Valid() bool {
 		ReleaseBusinessStatusPendingApproval,
 		ReleaseBusinessStatusApproving,
 		ReleaseBusinessStatusApproved,
+		ReleaseBusinessStatusBuilding,
+		ReleaseBusinessStatusBuiltWaitingDeploy,
 		ReleaseBusinessStatusRejected,
 		ReleaseBusinessStatusQueued,
 		ReleaseBusinessStatusDeploying,
@@ -107,20 +111,22 @@ func (s ReleaseBusinessStatus) Valid() bool {
 type OrderStatus string
 
 const (
-	OrderStatusPending         OrderStatus = "pending"
-	OrderStatusRunning         OrderStatus = "running"
-	OrderStatusSuccess         OrderStatus = "success"
-	OrderStatusFailed          OrderStatus = "failed"
-	OrderStatusCancelled       OrderStatus = "cancelled"
-	OrderStatusDraft           OrderStatus = "draft"
-	OrderStatusPendingApproval OrderStatus = "pending_approval"
-	OrderStatusApproving       OrderStatus = "approving"
-	OrderStatusApproved        OrderStatus = "approved"
-	OrderStatusRejected        OrderStatus = "rejected"
-	OrderStatusQueued          OrderStatus = "queued"
-	OrderStatusDeploying       OrderStatus = "deploying"
-	OrderStatusDeploySuccess   OrderStatus = "deploy_success"
-	OrderStatusDeployFailed    OrderStatus = "deploy_failed"
+	OrderStatusPending            OrderStatus = "pending"
+	OrderStatusRunning            OrderStatus = "running"
+	OrderStatusSuccess            OrderStatus = "success"
+	OrderStatusFailed             OrderStatus = "failed"
+	OrderStatusCancelled          OrderStatus = "cancelled"
+	OrderStatusDraft              OrderStatus = "draft"
+	OrderStatusPendingApproval    OrderStatus = "pending_approval"
+	OrderStatusApproving          OrderStatus = "approving"
+	OrderStatusApproved           OrderStatus = "approved"
+	OrderStatusBuilding           OrderStatus = "building"
+	OrderStatusBuiltWaitingDeploy OrderStatus = "built_waiting_deploy"
+	OrderStatusRejected           OrderStatus = "rejected"
+	OrderStatusQueued             OrderStatus = "queued"
+	OrderStatusDeploying          OrderStatus = "deploying"
+	OrderStatusDeploySuccess      OrderStatus = "deploy_success"
+	OrderStatusDeployFailed       OrderStatus = "deploy_failed"
 )
 
 func (s OrderStatus) Valid() bool {
@@ -134,6 +140,8 @@ func (s OrderStatus) Valid() bool {
 		OrderStatusPendingApproval,
 		OrderStatusApproving,
 		OrderStatusApproved,
+		OrderStatusBuilding,
+		OrderStatusBuiltWaitingDeploy,
 		OrderStatusRejected,
 		OrderStatusQueued,
 		OrderStatusDeploying,
@@ -242,6 +250,8 @@ type ReleaseOrder struct {
 	ConcurrentBatchNo     string
 	ConcurrentBatchSeq    int
 	CDProvider            string
+	HasCIExecution        bool
+	HasCDExecution        bool
 	ApplicationID         string
 	ApplicationName       string
 	TemplateID            string
@@ -269,6 +279,8 @@ type ReleaseOrder struct {
 	Remark                string
 	CreatorUserID         string
 	TriggeredBy           string
+	ExecutorUserID        string
+	ExecutorName          string
 	StartedAt             *time.Time
 	FinishedAt            *time.Time
 	CreatedAt             time.Time
@@ -642,6 +654,61 @@ func (s TemplateHookTriggerCondition) Valid() bool {
 	}
 }
 
+type TemplateHookExecuteStage string
+
+const (
+	TemplateHookExecuteStagePostRelease   TemplateHookExecuteStage = "post_release"
+	TemplateHookExecuteStageBuildComplete TemplateHookExecuteStage = "build_complete"
+)
+
+func (s TemplateHookExecuteStage) Valid() bool {
+	switch s {
+	case TemplateHookExecuteStagePostRelease, TemplateHookExecuteStageBuildComplete:
+		return true
+	default:
+		return false
+	}
+}
+
+func NormalizeTemplateHookExecuteStages(stages []TemplateHookExecuteStage, legacy TemplateHookExecuteStage) []TemplateHookExecuteStage {
+	result := make([]TemplateHookExecuteStage, 0, len(stages))
+	seen := make(map[TemplateHookExecuteStage]struct{}, len(stages))
+	for _, item := range stages {
+		if !item.Valid() {
+			continue
+		}
+		if _, exists := seen[item]; exists {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	if len(result) > 0 {
+		return result
+	}
+	if legacy.Valid() {
+		return []TemplateHookExecuteStage{legacy}
+	}
+	return []TemplateHookExecuteStage{TemplateHookExecuteStagePostRelease}
+}
+
+func PrimaryTemplateHookExecuteStage(stages []TemplateHookExecuteStage, legacy TemplateHookExecuteStage) TemplateHookExecuteStage {
+	normalized := NormalizeTemplateHookExecuteStages(stages, legacy)
+	if len(normalized) == 0 {
+		return TemplateHookExecuteStagePostRelease
+	}
+	return normalized[0]
+}
+
+func TemplateHookHasExecuteStage(stages []TemplateHookExecuteStage, legacy TemplateHookExecuteStage, target TemplateHookExecuteStage) bool {
+	for _, item := range NormalizeTemplateHookExecuteStages(stages, legacy) {
+		if item == target {
+			return true
+		}
+	}
+	return false
+}
+
 type TemplateHookFailurePolicy string
 
 const (
@@ -663,6 +730,8 @@ type ReleaseTemplateHook struct {
 	TemplateID       string
 	HookType         TemplateHookType
 	Name             string
+	ExecuteStage     TemplateHookExecuteStage
+	ExecuteStages    []TemplateHookExecuteStage
 	TriggerCondition TemplateHookTriggerCondition
 	FailurePolicy    TemplateHookFailurePolicy
 	EnvCodes         []string

@@ -192,6 +192,8 @@ func TestCreateTemplate_PersistsHookEnvCodes(t *testing.T) {
 			TemplateID:       template.ID,
 			HookType:         domain.TemplateHookTypeWebhookNotification,
 			Name:             "prod hook",
+			ExecuteStage:     domain.TemplateHookExecuteStageBuildComplete,
+			ExecuteStages:    []domain.TemplateHookExecuteStage{domain.TemplateHookExecuteStageBuildComplete, domain.TemplateHookExecuteStagePostRelease},
 			TriggerCondition: domain.TemplateHookTriggerOnSuccess,
 			FailurePolicy:    domain.TemplateHookFailurePolicyWarnOnly,
 			EnvCodes:         []string{"prod", "pre"},
@@ -217,6 +219,12 @@ func TestCreateTemplate_PersistsHookEnvCodes(t *testing.T) {
 	}
 	if got := storedHooks[0].EnvCodes; len(got) != 2 || got[0] != "prod" || got[1] != "pre" {
 		t.Fatalf("stored hook env codes = %#v, want [prod pre]", got)
+	}
+	if storedHooks[0].ExecuteStage != domain.TemplateHookExecuteStageBuildComplete {
+		t.Fatalf("stored hook execute stage = %s, want %s", storedHooks[0].ExecuteStage, domain.TemplateHookExecuteStageBuildComplete)
+	}
+	if got := storedHooks[0].ExecuteStages; len(got) != 2 || got[0] != domain.TemplateHookExecuteStageBuildComplete || got[1] != domain.TemplateHookExecuteStagePostRelease {
+		t.Fatalf("stored hook execute stages = %#v, want [build_complete post_release]", got)
 	}
 }
 

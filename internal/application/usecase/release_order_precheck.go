@@ -53,7 +53,31 @@ type releaseDispatchGuard struct {
 	Message        string
 }
 
+type ReleaseOrderDispatchAction string
+
+const (
+	ReleaseOrderDispatchActionExecute ReleaseOrderDispatchAction = "execute"
+	ReleaseOrderDispatchActionBuild   ReleaseOrderDispatchAction = "build"
+	ReleaseOrderDispatchActionDeploy  ReleaseOrderDispatchAction = "deploy"
+)
+
 func (uc *ReleaseOrderManager) PrecheckExecute(ctx context.Context, id string) (ReleaseOrderPrecheckOutput, error) {
+	return uc.precheckOrderDispatch(ctx, id, ReleaseOrderDispatchActionExecute)
+}
+
+func (uc *ReleaseOrderManager) PrecheckBuild(ctx context.Context, id string) (ReleaseOrderPrecheckOutput, error) {
+	return uc.precheckOrderDispatch(ctx, id, ReleaseOrderDispatchActionBuild)
+}
+
+func (uc *ReleaseOrderManager) PrecheckDeploy(ctx context.Context, id string) (ReleaseOrderPrecheckOutput, error) {
+	return uc.precheckOrderDispatch(ctx, id, ReleaseOrderDispatchActionDeploy)
+}
+
+func (uc *ReleaseOrderManager) precheckOrderDispatch(
+	ctx context.Context,
+	id string,
+	action ReleaseOrderDispatchAction,
+) (ReleaseOrderPrecheckOutput, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return ReleaseOrderPrecheckOutput{}, ErrInvalidID
@@ -70,7 +94,7 @@ func (uc *ReleaseOrderManager) PrecheckExecute(ctx context.Context, id string) (
 	if err != nil {
 		return ReleaseOrderPrecheckOutput{}, err
 	}
-	return uc.buildOrderPrecheck(ctx, order, executions, params)
+	return uc.buildOrderPrecheck(ctx, order, executions, params, action)
 }
 
 func (uc *ReleaseOrderManager) buildOrderPrecheck(
@@ -78,6 +102,7 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 	order domain.ReleaseOrder,
 	executions []domain.ReleaseOrderExecution,
 	params []domain.ReleaseOrderParam,
+	action ReleaseOrderDispatchAction,
 ) (ReleaseOrderPrecheckOutput, error) {
 	output := ReleaseOrderPrecheckOutput{
 		OrderID:    order.ID,
@@ -86,59 +111,17 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 		Items:      make([]ReleaseOrderPrecheckItem, 0, 4),
 	}
 
-	statusItem := ReleaseOrderPrecheckItem{
-		Key:     "order_status",
-		Name:    "发布单状态",
-		Status:  ReleaseOrderPrecheckItemStatusPass,
-		Message: "发布单处于可执行状态",
-	}
-	switch order.Status {
-	case domain.OrderStatusPending:
-		statusItem.Message = "发布单处于待执行状态"
-	case domain.OrderStatusApproved:
-		statusItem.Message = "发布单已审批通过，可进入执行阶段"
-	case domain.OrderStatusQueued:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusWarn
-		statusItem.Message = "发布单已进入等待队列"
-	case domain.OrderStatusRunning:
-		statusItem.Message = "发布单已进入调度中"
-	case domain.OrderStatusPendingApproval:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "发布单待审批，审批通过后才允许触发"
-		output.Executable = false
-	case domain.OrderStatusApproving:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "发布单审批中，审批完成后才允许触发"
-		output.Executable = false
-	case domain.OrderStatusRejected:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "发布单审批已拒绝，无法继续触发"
-		output.Executable = false
-	case domain.OrderStatusDeploying:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "发布单已进入发布中，无法再次触发"
-		output.Executable = false
-	default:
-		statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		statusItem.Message = "当前发布单不是可执行状态，无法再次触发"
+	statusItem, executionItem, pendingExecution := uc.resolveDispatchPrecheckItems(order, executions, action)
+	if statusItem.Status == ReleaseOrderPrecheckItemStatusBlocked {
 		output.Executable = false
 	}
 	output.Items = append(output.Items, statusItem)
 
-	executionItem := ReleaseOrderPrecheckItem{
-		Key:     "execution_units",
-		Name:    "执行单元",
-		Status:  ReleaseOrderPrecheckItemStatusPass,
-		Message: fmt.Sprintf("已配置 %d 个执行单元", len(executions)),
-	}
-	if len(executions) == 0 || findExecutionByStatus(executions, domain.ExecutionStatusPending) == nil {
-		executionItem.Status = ReleaseOrderPrecheckItemStatusBlocked
-		executionItem.Message = "未找到可执行的待执行单元"
+	if executionItem.Status == ReleaseOrderPrecheckItemStatusBlocked {
 		output.Executable = false
 	}
 	output.Items = append(output.Items, executionItem)
 
-	pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
 	if pendingExecution != nil {
 		if referenceItem, ok, err := uc.buildExecutionReferencePrecheckItem(ctx, *pendingExecution); err != nil {
 			return ReleaseOrderPrecheckOutput{}, err
@@ -204,11 +187,153 @@ func (uc *ReleaseOrderManager) buildOrderPrecheck(
 	return output, nil
 }
 
+func (uc *ReleaseOrderManager) resolveDispatchPrecheckItems(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	action ReleaseOrderDispatchAction,
+) (ReleaseOrderPrecheckItem, ReleaseOrderPrecheckItem, *domain.ReleaseOrderExecution) {
+	statusItem := ReleaseOrderPrecheckItem{
+		Key:     "order_status",
+		Name:    "发布单状态",
+		Status:  ReleaseOrderPrecheckItemStatusPass,
+		Message: "发布单处于可执行状态",
+	}
+	executionItem := ReleaseOrderPrecheckItem{
+		Key:     "execution_units",
+		Name:    "执行单元",
+		Status:  ReleaseOrderPrecheckItemStatusPass,
+		Message: fmt.Sprintf("已配置 %d 个执行单元", len(executions)),
+	}
+
+	switch action {
+	case ReleaseOrderDispatchActionBuild:
+		hasCI := hasExecutionForScope(executions, domain.PipelineScopeCI)
+		hasCD := hasExecutionForScope(executions, domain.PipelineScopeCD)
+		switch {
+		case order.OperationType != domain.OperationTypeDeploy:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "仅普通发布单支持先构建后部署"
+		case !hasCI || !hasCD:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前发布单未同时配置 CI / CD 执行单元，无法分段构建"
+		default:
+			switch order.Status {
+			case domain.OrderStatusPending:
+				statusItem.Message = "发布单处于待执行状态，可进入构建阶段"
+			case domain.OrderStatusApproved:
+				statusItem.Message = "发布单已审批通过，可进入构建阶段"
+			case domain.OrderStatusBuilding:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "构建已发起，正在等待构建结果"
+			case domain.OrderStatusBuiltWaitingDeploy:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "构建已完成，请使用部署操作继续执行"
+			case domain.OrderStatusPendingApproval:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "发布单待审批，审批通过后才允许构建"
+			case domain.OrderStatusApproving:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "发布单审批中，审批完成后才允许构建"
+			case domain.OrderStatusRejected:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "发布单审批已拒绝，无法继续触发构建"
+			case domain.OrderStatusQueued, domain.OrderStatusRunning, domain.OrderStatusDeploying:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "发布单已进入执行中，无法重复触发构建"
+			default:
+				statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+				statusItem.Message = "当前发布单不是可构建状态，无法再次触发构建"
+			}
+		}
+		target := findExecutionByScopeAndStatus(executions, domain.PipelineScopeCI, domain.ExecutionStatusPending)
+		if target == nil {
+			executionItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			executionItem.Message = "未找到可执行的 CI 构建单元"
+		} else {
+			executionItem.Message = "已选定 CI 构建单元，将只触发构建阶段"
+		}
+		return statusItem, executionItem, target
+	case ReleaseOrderDispatchActionDeploy:
+		switch order.Status {
+		case domain.OrderStatusBuiltWaitingDeploy:
+			statusItem.Message = "构建已完成，可进入部署阶段"
+		case domain.OrderStatusBuilding:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前仍在构建中，构建完成后才允许部署"
+		case domain.OrderStatusPending, domain.OrderStatusApproved:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "请先完成构建，再执行部署"
+		case domain.OrderStatusPendingApproval:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单待审批，审批通过并完成构建后才允许部署"
+		case domain.OrderStatusApproving:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单审批中，审批完成并构建成功后才允许部署"
+		case domain.OrderStatusRejected:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单审批已拒绝，无法继续部署"
+		case domain.OrderStatusQueued, domain.OrderStatusRunning, domain.OrderStatusDeploying:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "部署已发起，无法重复触发"
+		default:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前发布单不是可部署状态，无法再次触发部署"
+		}
+		target := findExecutionByScopeAndStatus(executions, domain.PipelineScopeCD, domain.ExecutionStatusPending)
+		if target == nil {
+			executionItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			executionItem.Message = "未找到可执行的 CD 部署单元"
+		} else {
+			executionItem.Message = "已选定 CD 部署单元，将只触发部署阶段"
+		}
+		return statusItem, executionItem, target
+	default:
+		switch order.Status {
+		case domain.OrderStatusPending:
+			statusItem.Message = "发布单处于待执行状态"
+		case domain.OrderStatusApproved:
+			statusItem.Message = "发布单已审批通过，可进入执行阶段"
+		case domain.OrderStatusQueued:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusWarn
+			statusItem.Message = "发布单已进入等待队列"
+		case domain.OrderStatusRunning:
+			statusItem.Message = "发布单已进入调度中"
+		case domain.OrderStatusPendingApproval:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单待审批，审批通过后才允许触发"
+		case domain.OrderStatusApproving:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单审批中，审批完成后才允许触发"
+		case domain.OrderStatusRejected:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单审批已拒绝，无法继续触发"
+		case domain.OrderStatusBuilding:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前发布单正在构建中，无法再次触发完整发布"
+		case domain.OrderStatusBuiltWaitingDeploy:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前发布单已完成构建，请改用部署操作继续执行"
+		case domain.OrderStatusDeploying:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "发布单已进入发布中，无法再次触发"
+		default:
+			statusItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			statusItem.Message = "当前发布单不是可执行状态，无法再次触发"
+		}
+		target := findExecutionByStatus(executions, domain.ExecutionStatusPending)
+		if len(executions) == 0 || target == nil {
+			executionItem.Status = ReleaseOrderPrecheckItemStatusBlocked
+			executionItem.Message = "未找到可执行的待执行单元"
+		}
+		return statusItem, executionItem, target
+	}
+}
+
 func (uc *ReleaseOrderManager) buildExecutionReferencePrecheckItem(
 	ctx context.Context,
 	execution domain.ReleaseOrderExecution,
 ) (ReleaseOrderPrecheckItem, bool, error) {
-	if strings.TrimSpace(execution.BindingID) == "" {
+	if uc == nil || uc.pipelineRepo == nil || strings.TrimSpace(execution.BindingID) == "" {
 		return ReleaseOrderPrecheckItem{}, false, nil
 	}
 	item := ReleaseOrderPrecheckItem{

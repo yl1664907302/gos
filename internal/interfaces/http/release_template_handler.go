@@ -172,6 +172,8 @@ type ReleaseTemplateGitOpsRuleResponse struct {
 type ReleaseTemplateHookRequest struct {
 	HookType         string   `json:"hook_type"`
 	Name             string   `json:"name"`
+	ExecuteStage     string   `json:"execute_stage"`
+	ExecuteStages    []string `json:"execute_stages"`
 	TriggerCondition string   `json:"trigger_condition"`
 	FailurePolicy    string   `json:"failure_policy"`
 	EnvCodes         []string `json:"env_codes"`
@@ -187,6 +189,8 @@ type ReleaseTemplateHookResponse struct {
 	TemplateID       string    `json:"template_id"`
 	HookType         string    `json:"hook_type"`
 	Name             string    `json:"name"`
+	ExecuteStage     string    `json:"execute_stage"`
+	ExecuteStages    []string  `json:"execute_stages"`
 	TriggerCondition string    `json:"trigger_condition"`
 	FailurePolicy    string    `json:"failure_policy"`
 	EnvCodes         []string  `json:"env_codes"`
@@ -565,6 +569,8 @@ func toReleaseTemplateHookInputs(items []ReleaseTemplateHookRequest) []usecase.R
 		result = append(result, usecase.ReleaseTemplateHookInput{
 			HookType:         releasedomain.TemplateHookType(strings.ToLower(strings.TrimSpace(item.HookType))),
 			Name:             item.Name,
+			ExecuteStage:     releasedomain.TemplateHookExecuteStage(strings.ToLower(strings.TrimSpace(item.ExecuteStage))),
+			ExecuteStages:    normalizeReleaseTemplateHookExecuteStages(item.ExecuteStages),
 			TriggerCondition: releasedomain.TemplateHookTriggerCondition(strings.ToLower(strings.TrimSpace(item.TriggerCondition))),
 			FailurePolicy:    releasedomain.TemplateHookFailurePolicy(strings.ToLower(strings.TrimSpace(item.FailurePolicy))),
 			EnvCodes:         append([]string(nil), item.EnvCodes...),
@@ -623,6 +629,8 @@ func toReleaseTemplateHookResponse(item releasedomain.ReleaseTemplateHook) Relea
 		TemplateID:       item.TemplateID,
 		HookType:         string(item.HookType),
 		Name:             item.Name,
+		ExecuteStage:     string(releasedomain.PrimaryTemplateHookExecuteStage(item.ExecuteStages, item.ExecuteStage)),
+		ExecuteStages:    releaseTemplateHookExecuteStagesToStrings(item.ExecuteStages, item.ExecuteStage),
 		TriggerCondition: string(item.TriggerCondition),
 		FailurePolicy:    string(item.FailurePolicy),
 		EnvCodes:         append([]string(nil), item.EnvCodes...),
@@ -636,6 +644,27 @@ func toReleaseTemplateHookResponse(item releasedomain.ReleaseTemplateHook) Relea
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}
+}
+
+func normalizeReleaseTemplateHookExecuteStages(values []string) []releasedomain.TemplateHookExecuteStage {
+	result := make([]releasedomain.TemplateHookExecuteStage, 0, len(values))
+	for _, item := range values {
+		value := strings.ToLower(strings.TrimSpace(item))
+		if value == "" {
+			continue
+		}
+		result = append(result, releasedomain.TemplateHookExecuteStage(value))
+	}
+	return result
+}
+
+func releaseTemplateHookExecuteStagesToStrings(values []releasedomain.TemplateHookExecuteStage, legacy releasedomain.TemplateHookExecuteStage) []string {
+	stages := releasedomain.NormalizeTemplateHookExecuteStages(values, legacy)
+	result := make([]string, 0, len(stages))
+	for _, item := range stages {
+		result = append(result, string(item))
+	}
+	return result
 }
 
 func toReleaseTemplateDataResponse(

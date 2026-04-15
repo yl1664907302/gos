@@ -55,6 +55,8 @@ type CreateReleaseOrderInput struct {
 	Steps           []CreateReleaseOrderStepInput
 }
 
+type UpdateReleaseOrderInput = CreateReleaseOrderInput
+
 type CreateReleaseOrderParamInput struct {
 	PipelineScope     domain.PipelineScope
 	ParamKey          string
@@ -296,7 +298,7 @@ func (uc *ReleaseOrderManager) Create(
 		PipelineID:            primaryExecution.PipelineID,
 		EnvCode:               envCode,
 		SonService:            firstNonEmpty(summary.ProjectName, strings.TrimSpace(input.SonService)),
-		GitRef:                firstNonEmpty(summary.GitRef, strings.TrimSpace(input.GitRef)),
+		GitRef:                firstNonEmpty(strings.TrimSpace(input.GitRef), summary.GitRef),
 		ImageTag:              firstNonEmpty(summary.ImageTag, strings.TrimSpace(input.ImageTag)),
 		TriggerType:           triggerType,
 		Status:                initialStatus,
@@ -357,6 +359,243 @@ func (uc *ReleaseOrderManager) Create(
 		}
 	}
 	logx.Info("release_order", "create_success",
+		logx.F("order_id", order.ID),
+		logx.F("order_no", order.OrderNo),
+		logx.F("application_id", order.ApplicationID),
+		logx.F("template_id", order.TemplateID),
+		logx.F("env_code", order.EnvCode),
+		logx.F("executions_count", len(executions)),
+		logx.F("params_count", len(params)),
+		logx.F("steps_count", len(steps)),
+	)
+	return uc.repo.GetByID(ctx, order.ID)
+}
+
+func (uc *ReleaseOrderManager) Update(
+	ctx context.Context,
+	orderID string,
+	input UpdateReleaseOrderInput,
+) (domain.ReleaseOrder, error) {
+	orderID = strings.TrimSpace(orderID)
+	if orderID == "" {
+		return domain.ReleaseOrder{}, ErrInvalidID
+	}
+
+	existing, err := uc.repo.GetByID(ctx, orderID)
+	if err != nil {
+		return domain.ReleaseOrder{}, err
+	}
+	if !isEditableOrderStatus(existing.Status) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: only pending release orders can be edited", ErrInvalidStatus)
+	}
+	if existing.OperationType != domain.OperationTypeDeploy || strings.TrimSpace(existing.SourceOrderID) != "" {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: only original deploy release orders can be edited", ErrInvalidInput)
+	}
+
+	applicationID := strings.TrimSpace(input.ApplicationID)
+	templateID := strings.TrimSpace(input.TemplateID)
+	logx.Info("release_order", "update_start",
+		logx.F("order_id", existing.ID),
+		logx.F("order_no", existing.OrderNo),
+		logx.F("application_id", applicationID),
+		logx.F("template_id", templateID),
+		logx.F("operator_user_id", input.CreatorUserID),
+		logx.F("env_code", input.EnvCode),
+		logx.F("params_count", len(input.Params)),
+	)
+	if applicationID == "" || templateID == "" {
+		err := fmt.Errorf("%w: application_id and template_id are required", ErrInvalidInput)
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	if applicationID != strings.TrimSpace(existing.ApplicationID) {
+		err := fmt.Errorf("%w: application_id cannot be changed when editing release order", ErrInvalidInput)
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+			logx.F("existing_application_id", existing.ApplicationID),
+			logx.F("requested_application_id", applicationID),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	input.EnvCode = strings.TrimSpace(input.EnvCode)
+
+	app, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+
+	triggerType := existing.TriggerType
+	if strings.TrimSpace(string(input.TriggerType)) != "" {
+		triggerType = input.TriggerType
+	}
+	if triggerType == "" {
+		triggerType = domain.TriggerTypeManual
+	}
+	if !triggerType.Valid() {
+		logx.Error("release_order", "update_failed", ErrInvalidInput,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+			logx.F("reason", "invalid_trigger_type"),
+			logx.F("trigger_type", triggerType),
+		)
+		return domain.ReleaseOrder{}, ErrInvalidInput
+	}
+
+	template, templateBindings, templateParams, templateHooks, err := uc.resolveTemplateForCreate(ctx, applicationID, templateID)
+	if err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	if err := uc.validateCreateTemplateParams(ctx, template.ID, templateBindings, templateParams, input.Params); err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+			logx.F("template_name", template.Name),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	executions := uc.buildCreateExecutions("", uc.now(), templateBindings)
+	inputSummary := resolveReleaseOrderSummaryFields(input.Params)
+	envCode := firstNonEmpty(input.EnvCode, inputSummary.EnvCode)
+	if envCode == "" {
+		err := fmt.Errorf("%w: env_code is required", ErrInvalidInput)
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	resolvedParams, err := uc.materializeCreateTemplateParams(
+		ctx,
+		app,
+		templateParams,
+		input.Params,
+		envCode,
+		firstNonEmpty(strings.TrimSpace(input.GitRef), inputSummary.GitRef),
+		firstNonEmpty(strings.TrimSpace(input.SonService), inputSummary.ProjectName),
+		firstNonEmpty(strings.TrimSpace(input.ImageTag), inputSummary.ImageTag),
+	)
+	if err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+			logx.F("template_name", template.Name),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	summary := resolveReleaseOrderSummaryFields(resolvedParams)
+	primaryExecution, ok := pickPrimaryExecution(executions)
+	if !ok {
+		err := fmt.Errorf("%w: release template has no enabled executions", ErrInvalidInput)
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", existing.ID),
+			logx.F("order_no", existing.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+
+	now := uc.now()
+	autoApproved := shouldAutoApproveOnCreate(template.ApprovalEnabled, template.ApprovalApproverIDs, strings.TrimSpace(existing.CreatorUserID))
+	initialStatus := resolveInitialReleaseOrderStatus(template, strings.TrimSpace(existing.CreatorUserID))
+	var approvedAt *time.Time
+	approvedBy := ""
+	if autoApproved {
+		approvedAt = &now
+		approvedBy = firstNonEmpty(strings.TrimSpace(existing.TriggeredBy), strings.TrimSpace(existing.CreatorUserID))
+	}
+	order := domain.ReleaseOrder{
+		ID:                    existing.ID,
+		OrderNo:               existing.OrderNo,
+		PreviousOrderNo:       existing.PreviousOrderNo,
+		OperationType:         existing.OperationType,
+		SourceOrderID:         existing.SourceOrderID,
+		SourceOrderNo:         existing.SourceOrderNo,
+		ApplicationID:         applicationID,
+		ApplicationName:       app.Name,
+		TemplateID:            template.ID,
+		TemplateName:          template.Name,
+		BindingID:             primaryExecution.BindingID,
+		PipelineID:            primaryExecution.PipelineID,
+		EnvCode:               envCode,
+		SonService:            firstNonEmpty(summary.ProjectName, strings.TrimSpace(input.SonService)),
+		GitRef:                firstNonEmpty(strings.TrimSpace(input.GitRef), summary.GitRef),
+		ImageTag:              firstNonEmpty(summary.ImageTag, strings.TrimSpace(input.ImageTag)),
+		TriggerType:           triggerType,
+		Status:                initialStatus,
+		ApprovalRequired:      template.ApprovalEnabled,
+		ApprovalMode:          template.ApprovalMode,
+		ApprovalApproverIDs:   append([]string(nil), template.ApprovalApproverIDs...),
+		ApprovalApproverNames: append([]string(nil), template.ApprovalApproverNames...),
+		ApprovedAt:            approvedAt,
+		ApprovedBy:            approvedBy,
+		RejectedAt:            nil,
+		RejectedBy:            "",
+		RejectedReason:        "",
+		QueuePosition:         0,
+		QueuedReason:          "",
+		Remark:                strings.TrimSpace(input.Remark),
+		CreatorUserID:         existing.CreatorUserID,
+		TriggeredBy:           existing.TriggeredBy,
+		StartedAt:             nil,
+		FinishedAt:            nil,
+		CreatedAt:             existing.CreatedAt,
+		UpdatedAt:             now,
+	}
+
+	executions = uc.buildCreateExecutions(order.ID, now, templateBindings)
+	params, err := uc.buildCreateParams(order.ID, now, resolvedParams, executions)
+	if err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	steps, err := uc.buildCreateSteps(order.ID, now, executions, template.GitOpsType, templateHooks, input.Steps, order.EnvCode)
+	if err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+
+	if err := uc.repo.UpdateEditable(ctx, order, executions, params, steps); err != nil {
+		logx.Error("release_order", "update_failed", err,
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+	if autoApproved {
+		if err := uc.repo.CreateApprovalRecord(ctx, domain.ReleaseOrderApprovalRecord{
+			ID:             generateID("rapr"),
+			ReleaseOrderID: order.ID,
+			Action:         domain.ReleaseOrderApprovalActionApprove,
+			OperatorUserID: strings.TrimSpace(existing.CreatorUserID),
+			OperatorName:   approvedBy,
+			Comment:        "发起人即审批人，系统已自动通过审批",
+			CreatedAt:      now,
+		}); err != nil {
+			logx.Error("release_order", "update_auto_approval_record_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
+			return domain.ReleaseOrder{}, err
+		}
+	}
+	logx.Info("release_order", "update_success",
 		logx.F("order_id", order.ID),
 		logx.F("order_no", order.OrderNo),
 		logx.F("application_id", order.ApplicationID),
@@ -888,7 +1127,7 @@ func resolveReleaseOrderSummaryFields(params []CreateReleaseOrderParamInput) rel
 			if result.ProjectName == "" {
 				result.ProjectName = value
 			}
-		case "branch":
+		case "git_ref":
 			if result.GitRef == "" {
 				result.GitRef = value
 			}
@@ -1553,6 +1792,8 @@ func (uc *ReleaseOrderManager) Cancel(ctx context.Context, id string) (domain.Re
 	case domain.OrderStatusPending,
 		domain.OrderStatusRunning,
 		domain.OrderStatusQueued,
+		domain.OrderStatusBuilding,
+		domain.OrderStatusBuiltWaitingDeploy,
 		domain.OrderStatusDeploying,
 		domain.OrderStatusApproved,
 		domain.OrderStatusPendingApproval,
@@ -1666,6 +1907,19 @@ func shouldFinishStepOnCancel(step domain.ReleaseOrderStep) bool {
 	return step.StepScope != domain.StepScopeGlobal || step.StepCode == "global:release_finish"
 }
 
+func shouldFinishStepOnFailure(step domain.ReleaseOrderStep) bool {
+	if strings.HasPrefix(strings.TrimSpace(step.StepCode), "hook:") {
+		return false
+	}
+	if step.Status == domain.StepStatusRunning {
+		return true
+	}
+	if step.Status != domain.StepStatusPending {
+		return false
+	}
+	return step.StepScope != domain.StepScopeGlobal || step.StepCode == "global:release_finish"
+}
+
 func (uc *ReleaseOrderManager) abortExecution(ctx context.Context, execution domain.ReleaseOrderExecution) string {
 	if uc.jenkins == nil {
 		return ""
@@ -1690,12 +1944,33 @@ func (uc *ReleaseOrderManager) abortExecution(ctx context.Context, execution dom
 	return "已发送 Jenkins 取消队列请求"
 }
 
-func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.ReleaseOrder, error) {
+func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string, operatorUserID string, operatorName string) (domain.ReleaseOrder, error) {
+	return uc.dispatchOrder(ctx, id, ReleaseOrderDispatchActionExecute, operatorUserID, operatorName)
+}
+
+func (uc *ReleaseOrderManager) Build(ctx context.Context, id string, operatorUserID string, operatorName string) (domain.ReleaseOrder, error) {
+	return uc.dispatchOrder(ctx, id, ReleaseOrderDispatchActionBuild, operatorUserID, operatorName)
+}
+
+func (uc *ReleaseOrderManager) Deploy(ctx context.Context, id string, operatorUserID string, operatorName string) (domain.ReleaseOrder, error) {
+	return uc.dispatchOrder(ctx, id, ReleaseOrderDispatchActionDeploy, operatorUserID, operatorName)
+}
+
+func (uc *ReleaseOrderManager) dispatchOrder(
+	ctx context.Context,
+	id string,
+	action ReleaseOrderDispatchAction,
+	operatorUserID string,
+	operatorName string,
+) (domain.ReleaseOrder, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return domain.ReleaseOrder{}, ErrInvalidID
 	}
-	logx.Info("release_order", "execute_start", logx.F("order_id", id))
+	logx.Info("release_order", "execute_start",
+		logx.F("order_id", id),
+		logx.F("action", action),
+	)
 	if uc.jenkins == nil && uc.argocdFactory == nil {
 		err := fmt.Errorf("%w: release executor is not configured", ErrInvalidInput)
 		logx.Error("release_order", "execute_failed", err, logx.F("order_id", id))
@@ -1705,16 +1980,6 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 	order, err := uc.repo.GetByID(ctx, id)
 	if err != nil {
 		logx.Error("release_order", "execute_failed", err, logx.F("order_id", id))
-		return domain.ReleaseOrder{}, err
-	}
-	if !isExecutableOrderStatus(order.Status) {
-		err := fmt.Errorf("%w: only pending or approved release order can be executed", ErrInvalidInput)
-		logx.Warn("release_order", "execute_failed",
-			logx.F("order_id", order.ID),
-			logx.F("order_no", order.OrderNo),
-			logx.F("status", order.Status),
-			logx.F("reason", err.Error()),
-		)
 		return domain.ReleaseOrder{}, err
 	}
 	executions, err := uc.repo.ListExecutions(ctx, order.ID)
@@ -1733,14 +1998,6 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		)
 		return domain.ReleaseOrder{}, err
 	}
-	if findExecutionByStatus(executions, domain.ExecutionStatusPending) == nil {
-		err := fmt.Errorf("%w: release order has no pending executions to dispatch", ErrInvalidInput)
-		logx.Error("release_order", "execute_failed", err,
-			logx.F("order_id", order.ID),
-			logx.F("order_no", order.OrderNo),
-		)
-		return domain.ReleaseOrder{}, err
-	}
 
 	orderParams, err := uc.repo.ListParams(ctx, order.ID)
 	if err != nil {
@@ -1751,7 +2008,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	precheck, err := uc.buildOrderPrecheck(ctx, order, executions, orderParams)
+	precheck, err := uc.buildOrderPrecheck(ctx, order, executions, orderParams, action)
 	if err != nil {
 		logx.Error("release_order", "execute_failed", err,
 			logx.F("order_id", order.ID),
@@ -1770,7 +2027,7 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 			}
 		}
 		if reason == "" {
-			reason = "当前发布单未通过执行前预检"
+			reason = currentDispatchBlockedMessage(action)
 		}
 		err := fmt.Errorf("%w: %s", ErrConcurrentReleaseBlocked, reason)
 		logx.Warn("release_order", "execute_failed",
@@ -1781,8 +2038,17 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		return domain.ReleaseOrder{}, err
 	}
 
-	pendingExecution := findExecutionByStatus(executions, domain.ExecutionStatusPending)
-	dispatchStatus := domain.OrderStatusDeploying
+	pendingExecution, dispatchStatus, err := resolveDispatchExecution(order, executions, action)
+	if err != nil {
+		logx.Warn("release_order", "execute_failed",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("reason", err.Error()),
+			logx.F("action", action),
+		)
+		return domain.ReleaseOrder{}, err
+	}
+
 	var dispatchStartedAt *time.Time
 	var dispatchGuard releaseDispatchGuard
 	if pendingExecution != nil {
@@ -1799,27 +2065,72 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		}
 		if acquired {
 			startedAt := uc.now()
-			dispatchStartedAt = &startedAt
+			dispatchStartedAt = firstNonNilTime(order.StartedAt, &startedAt)
 		} else {
-			dispatchStatus = domain.OrderStatusQueued
+			dispatchStartedAt = order.StartedAt
+			if action != ReleaseOrderDispatchActionBuild {
+				dispatchStatus = domain.OrderStatusQueued
+			}
 		}
 	}
 	updatedAt := uc.now()
-	order, err = uc.repo.UpdateStatus(ctx, order.ID, dispatchStatus, dispatchStartedAt, nil, updatedAt)
+	updatedOrder, err := uc.repo.UpdateStatus(ctx, order.ID, dispatchStatus, dispatchStartedAt, nil, updatedAt)
 	if err != nil {
-		if dispatchStartedAt != nil {
-			_ = uc.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased)
+		if errors.Is(err, domain.ErrOrderNotFound) {
+			logx.Warn("release_order", "execute_status_reload_failed",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("action", action),
+				logx.F("status", dispatchStatus),
+			)
+			order.Status = dispatchStatus
+			order.StartedAt = dispatchStartedAt
+			order.FinishedAt = nil
+			order.UpdatedAt = updatedAt
+		} else {
+			if dispatchStartedAt != nil {
+				_ = uc.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased)
+			}
+			logx.Error("release_order", "execute_failed", err,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+			)
+			return domain.ReleaseOrder{}, err
 		}
-		logx.Error("release_order", "execute_failed", err,
-			logx.F("order_id", order.ID),
-			logx.F("order_no", order.OrderNo),
-		)
-		return domain.ReleaseOrder{}, err
+	} else {
+		order = updatedOrder
+	}
+	if strings.TrimSpace(operatorUserID) != "" || strings.TrimSpace(operatorName) != "" {
+		updatedOrder, err = uc.repo.UpdateExecutor(ctx, order.ID, strings.TrimSpace(operatorUserID), strings.TrimSpace(operatorName), updatedAt)
+		if err != nil {
+			if errors.Is(err, domain.ErrOrderNotFound) {
+				logx.Warn("release_order", "execute_executor_reload_failed",
+					logx.F("order_id", order.ID),
+					logx.F("order_no", order.OrderNo),
+					logx.F("action", action),
+				)
+				order.ExecutorUserID = strings.TrimSpace(operatorUserID)
+				order.ExecutorName = strings.TrimSpace(operatorName)
+				order.UpdatedAt = updatedAt
+			} else {
+				if dispatchStartedAt != nil {
+					_ = uc.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased)
+				}
+				logx.Error("release_order", "execute_failed", err,
+					logx.F("order_id", order.ID),
+					logx.F("order_no", order.OrderNo),
+				)
+				return domain.ReleaseOrder{}, err
+			}
+		} else {
+			order = updatedOrder
+		}
 	}
 
 	_ = uc.markStepRunning(ctx, order.ID, "global:param_resolve", "开始解析发布参数")
-	paramResolveMessage := fmt.Sprintf("参数解析完成，总计 %d 项", len(orderParams))
-	if dispatchStatus == domain.OrderStatusQueued && strings.TrimSpace(dispatchGuard.Message) != "" {
+	paramResolveMessage := currentDispatchResolveMessage(action, len(orderParams))
+	if (dispatchStatus == domain.OrderStatusQueued || (action == ReleaseOrderDispatchActionBuild && strings.TrimSpace(dispatchGuard.Message) != "")) &&
+		strings.TrimSpace(dispatchGuard.Message) != "" {
 		paramResolveMessage = strings.TrimSpace(dispatchGuard.Message)
 	}
 	_ = uc.markStepFinished(ctx, order.ID, "global:param_resolve", domain.StepStatusSuccess, paramResolveMessage)
@@ -1831,8 +2142,80 @@ func (uc *ReleaseOrderManager) Execute(ctx context.Context, id string) (domain.R
 		logx.F("params_count", len(orderParams)),
 		logx.F("dispatch_status", dispatchStatus),
 		logx.F("dispatch_mode", "async_tracker"),
+		logx.F("action", action),
 	)
-	return uc.repo.GetByID(ctx, order.ID)
+	reloadedOrder, reloadErr := uc.repo.GetByID(ctx, order.ID)
+	if reloadErr != nil {
+		logx.Warn("release_order", "execute_dispatched_reload_failed",
+			logx.F("order_id", order.ID),
+			logx.F("order_no", order.OrderNo),
+			logx.F("action", action),
+			logx.F("reload_error", reloadErr.Error()),
+		)
+		return order, nil
+	}
+	return reloadedOrder, nil
+}
+
+func resolveDispatchExecution(
+	order domain.ReleaseOrder,
+	executions []domain.ReleaseOrderExecution,
+	action ReleaseOrderDispatchAction,
+) (*domain.ReleaseOrderExecution, domain.OrderStatus, error) {
+	switch action {
+	case ReleaseOrderDispatchActionBuild:
+		if !isBuildExecutableOrderStatus(order.Status, order.ApprovalRequired) {
+			return nil, "", fmt.Errorf("%w: only pending or approved release order can be built", ErrInvalidInput)
+		}
+		target := findExecutionByScopeAndStatus(executions, domain.PipelineScopeCI, domain.ExecutionStatusPending)
+		if target == nil {
+			return nil, "", fmt.Errorf("%w: release order has no pending ci execution to build", ErrInvalidInput)
+		}
+		if !hasExecutionForScope(executions, domain.PipelineScopeCD) {
+			return nil, "", fmt.Errorf("%w: release order has no cd execution to deploy after build", ErrInvalidInput)
+		}
+		return target, domain.OrderStatusBuilding, nil
+	case ReleaseOrderDispatchActionDeploy:
+		if order.Status != domain.OrderStatusBuiltWaitingDeploy {
+			return nil, "", fmt.Errorf("%w: only built release order can be deployed", ErrInvalidInput)
+		}
+		target := findExecutionByScopeAndStatus(executions, domain.PipelineScopeCD, domain.ExecutionStatusPending)
+		if target == nil {
+			return nil, "", fmt.Errorf("%w: release order has no pending cd execution to deploy", ErrInvalidInput)
+		}
+		return target, domain.OrderStatusDeploying, nil
+	default:
+		if !isExecutableOrderStatus(order.Status) {
+			return nil, "", fmt.Errorf("%w: only pending or approved release order can be executed", ErrInvalidInput)
+		}
+		target := findExecutionByStatus(executions, domain.ExecutionStatusPending)
+		if target == nil {
+			return nil, "", fmt.Errorf("%w: release order has no pending executions to dispatch", ErrInvalidInput)
+		}
+		return target, domain.OrderStatusDeploying, nil
+	}
+}
+
+func currentDispatchBlockedMessage(action ReleaseOrderDispatchAction) string {
+	switch action {
+	case ReleaseOrderDispatchActionBuild:
+		return "当前发布单未通过构建前预检"
+	case ReleaseOrderDispatchActionDeploy:
+		return "当前发布单未通过部署前预检"
+	default:
+		return "当前发布单未通过执行前预检"
+	}
+}
+
+func currentDispatchResolveMessage(action ReleaseOrderDispatchAction, paramCount int) string {
+	switch action {
+	case ReleaseOrderDispatchActionBuild:
+		return fmt.Sprintf("构建参数解析完成，总计 %d 项", paramCount)
+	case ReleaseOrderDispatchActionDeploy:
+		return fmt.Sprintf("部署参数解析完成，总计 %d 项", paramCount)
+	default:
+		return fmt.Sprintf("参数解析完成，总计 %d 项", paramCount)
+	}
 }
 
 func (uc *ReleaseOrderManager) ListParams(ctx context.Context, orderID string) ([]domain.ReleaseOrderParam, error) {
@@ -2006,8 +2389,9 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			return guardErr
 		}
 		if !acquired {
-			if order.Status != domain.OrderStatusQueued {
-				if _, updateErr := uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusQueued, order.StartedAt, nil, uc.now()); updateErr != nil {
+			queuedStatus := nextQueuedOrderStatus(order.Status)
+			if order.Status != queuedStatus {
+				if _, updateErr := uc.repo.UpdateStatus(ctx, order.ID, queuedStatus, order.StartedAt, nil, uc.now()); updateErr != nil {
 					return updateErr
 				}
 			}
@@ -2024,13 +2408,37 @@ func (uc *ReleaseOrderManager) startNextPendingExecution(
 			)
 			return nil
 		}
-		if order.Status != domain.OrderStatusDeploying {
+		claimTime := uc.now()
+		claimedExecution, claimed, claimErr := uc.repo.ClaimExecutionByScope(ctx, order.ID, execution.PipelineScope, claimTime, claimTime)
+		if claimErr != nil {
+			uc.markExecutionStartFailed(ctx, order, execution, claimErr.Error())
+			logx.Error("release_order", "execution_claim_failed", claimErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", execution.ID),
+				logx.F("pipeline_scope", execution.PipelineScope),
+			)
+			return claimErr
+		}
+		if !claimed {
+			logx.Warn("release_order", "execution_claim_skipped_already_taken",
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("execution_id", claimedExecution.ID),
+				logx.F("pipeline_scope", claimedExecution.PipelineScope),
+				logx.F("current_status", claimedExecution.Status),
+			)
+			return nil
+		}
+		execution = claimedExecution
+		runningStatus := nextRunningOrderStatus(order.Status)
+		if order.Status != runningStatus {
 			startedAt := order.StartedAt
-			now := uc.now()
+			now := claimTime
 			if startedAt == nil {
 				startedAt = &now
 			}
-			updatedOrder, updateErr := uc.repo.UpdateStatus(ctx, order.ID, domain.OrderStatusDeploying, startedAt, nil, now)
+			updatedOrder, updateErr := uc.repo.UpdateStatus(ctx, order.ID, runningStatus, startedAt, nil, now)
 			if updateErr != nil {
 				return updateErr
 			}
@@ -3074,31 +3482,62 @@ func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderEx
 	}
 
 	appendStep(domain.StepScopeGlobal, "", "global:param_resolve", "参数解析")
+	buildStageHooks := make([]domain.ReleaseTemplateHook, 0)
+	postReleaseHooks := make([]domain.ReleaseTemplateHook, 0)
+	for _, item := range templateHooks {
+		if !hookMatchesEnv(item.EnvCodes, orderEnvCode) {
+			continue
+		}
+		stages := domain.NormalizeTemplateHookExecuteStages(item.ExecuteStages, item.ExecuteStage)
+		for _, stage := range stages {
+			switch stage {
+			case domain.TemplateHookExecuteStageBuildComplete:
+				buildStageHooks = append(buildStageHooks, item)
+			default:
+				postReleaseHooks = append(postReleaseHooks, item)
+			}
+		}
+	}
+
 	for _, execution := range orderExecutionsByScope(executions) {
 		stepScope := domain.StepScope(strings.ToLower(string(execution.PipelineScope)))
 		for _, stepDef := range defaultExecutionStepDefs(execution, gitopsType) {
 			appendStep(stepScope, execution.ID, scopeStepCode(execution.PipelineScope, stepDef.Suffix), stepDef.Name)
 		}
+		if execution.PipelineScope == domain.PipelineScopeCI {
+			for _, item := range buildStageHooks {
+				stepName := strings.TrimSpace(item.Name)
+				if stepName == "" {
+					stepName = "构建完成 Hook"
+				}
+				items = append(items, domain.ReleaseOrderStep{
+					ID:             generateID("ros"),
+					ReleaseOrderID: orderID,
+					StepScope:      domain.StepScopeGlobal,
+					StepCode:       fmt.Sprintf("hook:%s:%s:%d", domain.TemplateHookExecuteStageBuildComplete, strings.TrimSpace(string(item.HookType)), item.SortNo),
+					StepName:       stepName,
+					Status:         domain.StepStatusPending,
+					Message:        buildTemplateHookStepMessage(item, domain.TemplateHookExecuteStageBuildComplete),
+					SortNo:         sortNo,
+					CreatedAt:      now,
+				})
+				sortNo++
+			}
+		}
 	}
-	for idx, item := range templateHooks {
+	for _, item := range postReleaseHooks {
 		stepName := strings.TrimSpace(item.Name)
 		if stepName == "" {
 			stepName = "发布后 Hook"
 		}
-
-		// 检查环境匹配，不匹配则跳过创建 step
-		if !hookMatchesEnv(item.EnvCodes, orderEnvCode) {
-			continue
-		}
-
 		items = append(items, domain.ReleaseOrderStep{
 			ID:             generateID("ros"),
 			ReleaseOrderID: orderID,
 			StepScope:      domain.StepScopeGlobal,
-			StepCode:       fmt.Sprintf("hook:%s:%d", strings.TrimSpace(string(item.HookType)), idx+1),
+			StepCode:       fmt.Sprintf("hook:%s:%s:%d", domain.TemplateHookExecuteStagePostRelease, strings.TrimSpace(string(item.HookType)), item.SortNo),
 			StepName:       stepName,
 			Status:         domain.StepStatusPending,
-			Message:        buildTemplateHookStepMessage(item),
+			Message:        buildTemplateHookStepMessage(item, domain.TemplateHookExecuteStagePostRelease),
 			SortNo:         sortNo,
 			CreatedAt:      now,
 		})
@@ -3108,7 +3547,11 @@ func defaultReleaseOrderSteps(orderID string, executions []domain.ReleaseOrderEx
 	return items
 }
 
-func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook) string {
+func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook, stage domain.TemplateHookExecuteStage) string {
+	stageLabel := "发布完成时"
+	if stage == domain.TemplateHookExecuteStageBuildComplete {
+		stageLabel = "构建完成时"
+	}
 	switch item.HookType {
 	case domain.TemplateHookTypeAgentTask:
 		target := strings.TrimSpace(item.TargetName)
@@ -3118,7 +3561,7 @@ func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook) string {
 		if target == "" {
 			target = "未命名 Agent 任务"
 		}
-		return fmt.Sprintf("Agent 任务：%s", target)
+		return fmt.Sprintf("%s · Agent 任务：%s", stageLabel, target)
 	case domain.TemplateHookTypeNotificationHook:
 		target := strings.TrimSpace(item.TargetName)
 		if target == "" {
@@ -3127,7 +3570,7 @@ func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook) string {
 		if target == "" {
 			target = "未命名通知 Hook"
 		}
-		return fmt.Sprintf("通知 Hook：%s", target)
+		return fmt.Sprintf("%s · 通知 Hook：%s", stageLabel, target)
 	case domain.TemplateHookTypeWebhookNotification:
 		method := strings.ToUpper(strings.TrimSpace(item.WebhookMethod))
 		if method == "" {
@@ -3137,7 +3580,7 @@ func buildTemplateHookStepMessage(item domain.ReleaseTemplateHook) string {
 		if target == "" {
 			target = "未配置 Webhook URL"
 		}
-		return fmt.Sprintf("Webhook：%s %s", method, target)
+		return fmt.Sprintf("%s · Webhook：%s %s", stageLabel, method, target)
 	default:
 		return strings.TrimSpace(item.Note)
 	}
@@ -3210,6 +3653,54 @@ func deriveOrderStatusFromSteps(steps []domain.ReleaseOrderStep) (domain.OrderSt
 func isExecutableOrderStatus(status domain.OrderStatus) bool {
 	normalized := strings.ToLower(strings.TrimSpace(string(status)))
 	return normalized == "pending" || normalized == "pengding" || normalized == "approved"
+}
+
+func isBuildExecutableOrderStatus(status domain.OrderStatus, approvalRequired bool) bool {
+	if approvalRequired {
+		return status == domain.OrderStatusApproved
+	}
+	return status == domain.OrderStatusPending || status == domain.OrderStatusApproved
+}
+
+func isEditableOrderStatus(status domain.OrderStatus) bool {
+	normalized := strings.ToLower(strings.TrimSpace(string(status)))
+	return normalized == "pending" || normalized == "pengding"
+}
+
+func nextQueuedOrderStatus(current domain.OrderStatus) domain.OrderStatus {
+	if current == domain.OrderStatusBuilding {
+		return domain.OrderStatusBuilding
+	}
+	return domain.OrderStatusQueued
+}
+
+func nextRunningOrderStatus(current domain.OrderStatus) domain.OrderStatus {
+	if current == domain.OrderStatusBuilding {
+		return domain.OrderStatusBuilding
+	}
+	return domain.OrderStatusDeploying
+}
+
+func findExecutionByScopeAndStatus(
+	items []domain.ReleaseOrderExecution,
+	scope domain.PipelineScope,
+	status domain.ExecutionStatus,
+) *domain.ReleaseOrderExecution {
+	for idx := range items {
+		if items[idx].PipelineScope == scope && items[idx].Status == status {
+			return &items[idx]
+		}
+	}
+	return nil
+}
+
+func hasExecutionForScope(items []domain.ReleaseOrderExecution, scope domain.PipelineScope) bool {
+	for _, item := range items {
+		if item.PipelineScope == scope {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveInitialReleaseOrderStatus(template domain.ReleaseTemplate, creatorUserID string) domain.OrderStatus {
