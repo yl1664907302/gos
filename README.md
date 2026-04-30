@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>GOS Release · 内部发布治理平台</h1>
+<h1>GOS Release · 发布治理平台</h1>
 
 <p><strong>一张发布单，串起交付全链路。</strong></p>
 
@@ -254,7 +254,7 @@ docker run -d \
   -e GOS_SECURITY_ENCRYPTION_KEY='replace-with-a-strong-key' \
   -v /data/deploy-manifests:/gitops/deploy-manifests \
   -e GOS_GITOPS_PATH_MAPS='/data/deploy-manifests=/gitops/deploy-manifests' \
-  gos-release:latest
+  yl10115658529/gos-release:latest
 ```
 
 SQLite 演示模式：
