@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -60,6 +61,10 @@ func NewReleaseOrderHandler(
 
 func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/applications/:id/release-orders/rollback", h.CreateRollbackByApplication)
+	router.POST("/applications/:id/rollback-capability", h.GetApplicationRollbackCapability)
+	router.POST("/applications/:id/rollback-precheck", h.GetApplicationRollbackPrecheck)
+	router.POST("/applications/:id/rollback-orders", h.CreateApplicationRollbackOrder)
+	router.GET("/app-release-states/summaries", h.ListAppReleaseStateSummaries)
 	router.POST("/release-orders", h.Create)
 	router.PUT("/release-orders/:id", h.Update)
 	router.DELETE("/release-orders/:id", h.Delete)
@@ -68,6 +73,7 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/release-orders/:id/rollback", h.CreateRollbackByOrder)
 	router.POST("/release-orders/:id/replay", h.CreateReplayByOrder)
 	router.GET("/release-orders", h.List)
+	router.GET("/release-orders/stats", h.Stats)
 	router.GET("/release-approval-records", h.ListApprovalRecordSummaries)
 	router.GET("/release-orders/:id", h.GetByID)
 	router.GET("/release-orders/:id/precheck", h.GetPrecheck)
@@ -77,6 +83,7 @@ func (h *ReleaseOrderHandler) RegisterRoutes(router gin.IRouter) {
 	router.POST("/release-orders/:id/approve", h.Approve)
 	router.POST("/release-orders/:id/reject", h.Reject)
 	router.POST("/release-orders/:id/cancel", h.Cancel)
+	router.POST("/release-orders/:id/confirm-live", h.ConfirmLive)
 	router.POST("/release-orders/:id/build", h.Build)
 	router.POST("/release-orders/:id/deploy", h.Deploy)
 	router.POST("/release-orders/:id/execute", h.Execute)
@@ -130,6 +137,11 @@ type FinishReleaseOrderStepRequest struct {
 	Message string `json:"message"`
 }
 
+type ApplicationRollbackRequest struct {
+	EnvCode string `json:"env_code"`
+	Action  string `json:"action"`
+}
+
 type BatchExecuteReleaseOrdersRequest struct {
 	OrderIDs           []string `json:"order_ids"`
 	StagedDispatchMode string   `json:"staged_dispatch_mode"`
@@ -180,6 +192,11 @@ type ReleaseOrderResponse struct {
 	Remark                string     `json:"remark"`
 	CreatorUserID         string     `json:"creator_user_id"`
 	TriggeredBy           string     `json:"triggered_by"`
+	LiveStateStatus       string     `json:"live_state_status"`
+	LiveStateIsCurrent    bool       `json:"live_state_is_current"`
+	LiveStateCanConfirm   bool       `json:"live_state_can_confirm"`
+	LiveStateConfirmedAt  *time.Time `json:"live_state_confirmed_at"`
+	LiveStateConfirmedBy  string     `json:"live_state_confirmed_by"`
 	StartedAt             *time.Time `json:"started_at"`
 	FinishedAt            *time.Time `json:"finished_at"`
 	CreatedAt             time.Time  `json:"created_at"`
@@ -226,6 +243,15 @@ type ReleaseOrderListResponse struct {
 	Page     int                    `json:"page"`
 	PageSize int                    `json:"page_size"`
 	Total    int64                  `json:"total"`
+}
+
+type ReleaseOrderStatsResponse struct {
+	Total     int64 `json:"total"`
+	Pending   int64 `json:"pending"`
+	Running   int64 `json:"running"`
+	Success   int64 `json:"success"`
+	Failed    int64 `json:"failed"`
+	Cancelled int64 `json:"cancelled"`
 }
 
 type ReleaseOrderParamListResponse struct {
@@ -372,6 +398,93 @@ type ReleaseOrderApprovalRecordSummaryListResponse struct {
 	Total    int64                                       `json:"total"`
 }
 
+type AppReleaseStateSummaryResponse struct {
+	ApplicationID          string     `json:"application_id"`
+	ApplicationName        string     `json:"application_name"`
+	EnvCode                string     `json:"env_code"`
+	CurrentStateID         string     `json:"current_state_id"`
+	CurrentReleaseOrderID  string     `json:"current_release_order_id"`
+	CurrentReleaseOrderNo  string     `json:"current_release_order_no"`
+	CurrentImageTag        string     `json:"current_image_tag"`
+	CurrentConfirmedAt     *time.Time `json:"current_confirmed_at"`
+	CurrentConfirmedBy     string     `json:"current_confirmed_by"`
+	PreviousStateID        string     `json:"previous_state_id"`
+	PreviousReleaseOrderID string     `json:"previous_release_order_id"`
+	PreviousReleaseOrderNo string     `json:"previous_release_order_no"`
+	PreviousImageTag       string     `json:"previous_image_tag"`
+	PreviousConfirmedAt    *time.Time `json:"previous_confirmed_at"`
+}
+
+type AppReleaseStateSummaryListResponse struct {
+	Data []AppReleaseStateSummaryResponse `json:"data"`
+}
+
+type ApplicationRollbackStateResponse struct {
+	StateID        string     `json:"state_id"`
+	ReleaseOrderID string     `json:"release_order_id"`
+	ReleaseOrderNo string     `json:"release_order_no"`
+	TemplateID     string     `json:"template_id"`
+	TemplateName   string     `json:"template_name"`
+	CDProvider     string     `json:"cd_provider"`
+	GitRef         string     `json:"git_ref"`
+	HasCIExecution bool       `json:"has_ci_execution"`
+	HasCDExecution bool       `json:"has_cd_execution"`
+	ImageTag       string     `json:"image_tag"`
+	ConfirmedAt    *time.Time `json:"confirmed_at"`
+	ConfirmedBy    string     `json:"confirmed_by"`
+}
+
+type ApplicationRollbackCapabilityResponse struct {
+	ApplicationID   string                           `json:"application_id"`
+	ApplicationName string                           `json:"application_name"`
+	EnvCode         string                           `json:"env_code"`
+	SupportedAction string                           `json:"supported_action"`
+	Reason          string                           `json:"reason"`
+	CurrentState    ApplicationRollbackStateResponse `json:"current_state"`
+	TargetState     ApplicationRollbackStateResponse `json:"target_state"`
+}
+
+type ApplicationRollbackCapabilityDataResponse struct {
+	Data ApplicationRollbackCapabilityResponse `json:"data"`
+}
+
+type ApplicationRollbackPrecheckParamResponse struct {
+	PipelineScope     string `json:"pipeline_scope"`
+	ParamKey          string `json:"param_key"`
+	ExecutorParamName string `json:"executor_param_name"`
+	ParamValue        string `json:"param_value"`
+	ValueSource       string `json:"value_source"`
+}
+
+type ApplicationRollbackPrecheckResponse struct {
+	ApplicationID    string                                     `json:"application_id"`
+	ApplicationName  string                                     `json:"application_name"`
+	EnvCode          string                                     `json:"env_code"`
+	Action           string                                     `json:"action"`
+	SupportedAction  string                                     `json:"supported_action"`
+	Reason           string                                     `json:"reason"`
+	Executable       bool                                       `json:"executable"`
+	WaitingForLock   bool                                       `json:"waiting_for_lock"`
+	AheadCount       int                                        `json:"ahead_count"`
+	LockEnabled      bool                                       `json:"lock_enabled"`
+	LockScope        string                                     `json:"lock_scope"`
+	ConflictStrategy string                                     `json:"conflict_strategy"`
+	LockKey          string                                     `json:"lock_key"`
+	ConflictOrderNo  string                                     `json:"conflict_order_no"`
+	ConflictMessage  string                                     `json:"conflict_message"`
+	PreviewScope     string                                     `json:"preview_scope"`
+	TemplateID       string                                     `json:"template_id"`
+	TemplateName     string                                     `json:"template_name"`
+	CurrentState     ApplicationRollbackStateResponse           `json:"current_state"`
+	TargetState      ApplicationRollbackStateResponse           `json:"target_state"`
+	Items            []ReleaseOrderPrecheckItemResponse         `json:"items"`
+	Params           []ApplicationRollbackPrecheckParamResponse `json:"params"`
+}
+
+type ApplicationRollbackPrecheckDataResponse struct {
+	Data ApplicationRollbackPrecheckResponse `json:"data"`
+}
+
 // Create godoc
 // @Summary      Create release order
 // @Tags         release-orders
@@ -512,11 +625,6 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "order_ids is required"})
 		return
 	}
-	currentUser, ok := getCurrentUser(c)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
 	for _, orderID := range req.OrderIDs {
 		item, err := h.manager.GetByID(c.Request.Context(), orderID)
 		if err != nil {
@@ -524,9 +632,6 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 			return
 		}
 		if !ensureReleaseOrderVisible(c, h.authz, item) {
-			return
-		}
-		if !ensureReleaseOrderExecuteActor(c, currentUser, item) {
 			return
 		}
 		if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", item.ApplicationID, item.EnvCode) {
@@ -564,7 +669,158 @@ func (h *ReleaseOrderHandler) BatchExecute(c *gin.Context) {
 // @Failure      500  {object}  ErrorResponse
 // @Router       /applications/{id}/release-orders/rollback [post]
 func (h *ReleaseOrderHandler) CreateRollbackByApplication(c *gin.Context) {
-	c.JSON(http.StatusBadRequest, gin.H{"error": "按应用自动回滚已废弃，请从成功发布单发起恢复"})
+	c.JSON(http.StatusBadRequest, gin.H{"error": "按应用自动恢复已废弃，请基于指定发布单发起重放"})
+}
+
+func (h *ReleaseOrderHandler) GetApplicationRollbackCapability(c *gin.Context) {
+	applicationID := strings.TrimSpace(c.Param("id"))
+	var req ApplicationRollbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	envCode := strings.TrimSpace(req.EnvCode)
+	if applicationID == "" || envCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "application_id and env_code are required"})
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", applicationID, envCode) {
+		return
+	}
+	output, err := h.manager.GetApplicationRollbackCapability(c.Request.Context(), applicationID, envCode)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": toApplicationRollbackCapabilityResponse(output)})
+}
+
+func (h *ReleaseOrderHandler) GetApplicationRollbackPrecheck(c *gin.Context) {
+	applicationID := strings.TrimSpace(c.Param("id"))
+	var req ApplicationRollbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	envCode := strings.TrimSpace(req.EnvCode)
+	if applicationID == "" || envCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "application_id and env_code are required"})
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", applicationID, envCode) {
+		return
+	}
+	output, err := h.manager.GetApplicationRollbackPrecheck(
+		c.Request.Context(),
+		applicationID,
+		envCode,
+		usecase.RollbackSupportedAction(strings.ToLower(strings.TrimSpace(req.Action))),
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": toApplicationRollbackPrecheckResponse(output)})
+}
+
+func (h *ReleaseOrderHandler) CreateApplicationRollbackOrder(c *gin.Context) {
+	applicationID := strings.TrimSpace(c.Param("id"))
+	var req ApplicationRollbackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	envCode := strings.TrimSpace(req.EnvCode)
+	if applicationID == "" || envCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "application_id and env_code are required"})
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.create", applicationID, envCode) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	order, err := h.manager.CreateApplicationRollbackOrder(
+		c.Request.Context(),
+		applicationID,
+		envCode,
+		usecase.RollbackSupportedAction(strings.ToLower(strings.TrimSpace(req.Action))),
+		strings.TrimSpace(currentUser.ID),
+		resolveTriggeredBy(currentUser),
+	)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	order = h.enrichReleaseOrderResponseMeta(c.Request.Context(), order)
+	c.JSON(http.StatusCreated, gin.H{"data": h.toReleaseOrderResponse(c.Request.Context(), order)})
+}
+
+func (h *ReleaseOrderHandler) ListAppReleaseStateSummaries(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	allowAll, visibleApplicationIDs, _, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	if !ok {
+		return
+	}
+	requestedIDs := splitTrimmedCSV(c.Query("application_ids"))
+	if !allowAll {
+		if len(requestedIDs) == 0 {
+			requestedIDs = append([]string(nil), visibleApplicationIDs...)
+		} else {
+			allowed := make(map[string]struct{}, len(visibleApplicationIDs))
+			for _, item := range visibleApplicationIDs {
+				allowed[item] = struct{}{}
+			}
+			filtered := make([]string, 0, len(requestedIDs))
+			for _, item := range requestedIDs {
+				if _, exists := allowed[item]; exists {
+					filtered = append(filtered, item)
+				}
+			}
+			requestedIDs = filtered
+		}
+	}
+	items, err := h.manager.ListCurrentAppReleaseStateSummaries(c.Request.Context(), requestedIDs)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	resp := make([]AppReleaseStateSummaryResponse, 0, len(items))
+	for _, item := range items {
+		resp = append(resp, toAppReleaseStateSummaryResponse(item))
+	}
+	c.JSON(http.StatusOK, gin.H{"data": resp})
+}
+
+func (h *ReleaseOrderHandler) ConfirmLive(c *gin.Context) {
+	orderID := strings.TrimSpace(c.Param("id"))
+	existing, err := h.manager.GetByID(c.Request.Context(), orderID)
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	state, err := h.manager.ConfirmAppReleaseState(c.Request.Context(), orderID, resolveTriggeredBy(currentUser))
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	existing = h.enrichReleaseOrderResponseMeta(c.Request.Context(), existing)
+	resp := toReleaseOrderResponse(existing, &state)
+	resp.LiveStateCanConfirm = false
+	c.JSON(http.StatusOK, gin.H{"data": resp})
 }
 
 func (h *ReleaseOrderHandler) CreateRollbackByOrder(c *gin.Context) {
@@ -635,13 +891,17 @@ func (h *ReleaseOrderHandler) CreateReplayByOrder(c *gin.Context) {
 // @Summary      List release orders
 // @Tags         release-orders
 // @Produce      json
-// @Param        application_id  query     string  false  "Application ID"
-// @Param        binding_id      query     string  false  "Pipeline binding ID"
-// @Param        env_code        query     string  false  "Environment code"
-// @Param        status          query     string  false  "Release status"
-// @Param        trigger_type    query     string  false  "Trigger type"
-// @Param        page            query     int     false  "Page number"
-// @Param        page_size       query     int     false  "Page size"
+// @Param        application_id    query     string  false  "Application ID"
+// @Param        keyword           query     string  false  "Order keyword"
+// @Param        triggered_by      query     string  false  "Triggered by"
+// @Param        env_code          query     string  false  "Environment code"
+// @Param        operation_type    query     string  false  "Operation type"
+// @Param        status            query     string  false  "Release status"
+// @Param        trigger_type      query     string  false  "Trigger type"
+// @Param        created_at_from   query     string  false  "Created at from (RFC3339)"
+// @Param        created_at_to     query     string  false  "Created at to (RFC3339)"
+// @Param        page              query     int     false  "Page number"
+// @Param        page_size         query     int     false  "Page size"
 // @Success      200  {object}  ReleaseOrderListResponse
 // @Failure      400  {object}  ErrorResponse
 // @Failure      500  {object}  ErrorResponse
@@ -682,10 +942,14 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 		VisibleToUserID:             visibleToUserID,
 		ApprovalApproverUserID:      strings.TrimSpace(c.Query("approval_approver_user_id")),
 		CreatorUserID:               resolveReleaseOrderCreatorFilter(currentUser),
-		BindingID:                   c.Query("binding_id"),
+		Keyword:                     strings.TrimSpace(c.Query("keyword")),
+		TriggeredBy:                 strings.TrimSpace(c.Query("triggered_by")),
 		EnvCode:                     c.Query("env_code"),
+		OperationType:               domain.OperationType(strings.TrimSpace(c.Query("operation_type"))),
 		Status:                      domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
 		TriggerType:                 domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
+		CreatedAtFrom:               parseOptionalTime(c.Query("created_at_from")),
+		CreatedAtTo:                 parseOptionalTime(c.Query("created_at_to")),
 		Page:                        page,
 		PageSize:                    pageSize,
 	})
@@ -699,7 +963,7 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 
 	resp := make([]ReleaseOrderResponse, 0, len(items))
 	for _, item := range items {
-		resp = append(resp, toReleaseOrderResponse(item))
+		resp = append(resp, h.toReleaseOrderResponse(c.Request.Context(), item))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"data":      resp,
@@ -707,6 +971,47 @@ func (h *ReleaseOrderHandler) List(c *gin.Context) {
 		"page_size": resolvedPageSize(pageSize),
 		"total":     total,
 	})
+}
+
+func (h *ReleaseOrderHandler) Stats(c *gin.Context) {
+	if !ensureAnyReleaseOrderDisplayPermission(c, h.authz) {
+		return
+	}
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	applicationID := strings.TrimSpace(c.Query("application_id"))
+	allowAll, visibleApplicationIDs, visibleEnvScopes, ok := resolveVisibleReleaseOrderApplicationIDs(c, h.authz)
+	if !ok {
+		return
+	}
+	visibleToUserID := ""
+	if !allowAll {
+		visibleToUserID = currentUser.ID
+	}
+	stats, err := h.manager.ListStats(c.Request.Context(), usecase.ListReleaseOrderInput{
+		ApplicationID:               applicationID,
+		ApplicationIDs:              resolveReleaseListApplicationIDs(applicationID, allowAll, visibleApplicationIDs),
+		VisibleApplicationEnvScopes: visibleEnvScopes,
+		VisibleToUserID:             visibleToUserID,
+		ApprovalApproverUserID:      strings.TrimSpace(c.Query("approval_approver_user_id")),
+		CreatorUserID:               resolveReleaseOrderCreatorFilter(currentUser),
+		Keyword:                     strings.TrimSpace(c.Query("keyword")),
+		TriggeredBy:                 strings.TrimSpace(c.Query("triggered_by")),
+		EnvCode:                     c.Query("env_code"),
+		OperationType:               domain.OperationType(strings.TrimSpace(c.Query("operation_type"))),
+		Status:                      domain.OrderStatus(strings.TrimSpace(c.Query("status"))),
+		TriggerType:                 domain.TriggerType(strings.TrimSpace(c.Query("trigger_type"))),
+		CreatedAtFrom:               parseOptionalTime(c.Query("created_at_from")),
+		CreatedAtTo:                 parseOptionalTime(c.Query("created_at_to")),
+	})
+	if err != nil {
+		writeReleaseOrderHTTPError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, ReleaseOrderStatsResponse(stats))
 }
 
 func (h *ReleaseOrderHandler) ListApprovalRecordSummaries(c *gin.Context) {
@@ -787,7 +1092,7 @@ func (h *ReleaseOrderHandler) GetByID(c *gin.Context) {
 		return
 	}
 	item = h.enrichReleaseOrderResponseMeta(c.Request.Context(), item)
-	c.JSON(http.StatusOK, gin.H{"data": toReleaseOrderResponse(item)})
+	c.JSON(http.StatusOK, gin.H{"data": h.toReleaseOrderResponse(c.Request.Context(), item)})
 }
 
 func (h *ReleaseOrderHandler) GetPrecheck(c *gin.Context) {
@@ -1078,9 +1383,6 @@ func (h *ReleaseOrderHandler) Execute(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
-		return
-	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
@@ -1107,9 +1409,6 @@ func (h *ReleaseOrderHandler) Build(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
-	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
-		return
-	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
 		return
 	}
@@ -1134,9 +1433,6 @@ func (h *ReleaseOrderHandler) Deploy(c *gin.Context) {
 	currentUser, ok := getCurrentUser(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
-	if !ensureReleaseOrderExecuteActor(c, currentUser, existing) {
 		return
 	}
 	if !ensureReleaseApplicationPermission(c, h.authz, "release.execute", existing.ApplicationID, existing.EnvCode) {
@@ -1420,8 +1716,8 @@ func (h *ReleaseOrderHandler) FinishStep(c *gin.Context) {
 	})
 }
 
-func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
-	return ReleaseOrderResponse{
+func toReleaseOrderResponse(item domain.ReleaseOrder, states ...*domain.AppReleaseState) ReleaseOrderResponse {
+	resp := ReleaseOrderResponse{
 		ID:                    item.ID,
 		OrderNo:               item.OrderNo,
 		PreviousOrderNo:       item.PreviousOrderNo,
@@ -1467,6 +1763,194 @@ func toReleaseOrderResponse(item domain.ReleaseOrder) ReleaseOrderResponse {
 		CreatedAt:             item.CreatedAt,
 		UpdatedAt:             item.UpdatedAt,
 	}
+	if len(states) > 0 && states[0] != nil {
+		resp.LiveStateStatus = string(states[0].StateStatus)
+		resp.LiveStateIsCurrent = states[0].IsCurrentLive
+		resp.LiveStateConfirmedAt = states[0].ConfirmedAt
+		resp.LiveStateConfirmedBy = states[0].ConfirmedBy
+	}
+	return resp
+}
+
+func toAppReleaseStateSummaryResponse(item domain.AppReleaseStateSummary) AppReleaseStateSummaryResponse {
+	return AppReleaseStateSummaryResponse{
+		ApplicationID:          item.ApplicationID,
+		ApplicationName:        item.ApplicationName,
+		EnvCode:                item.EnvCode,
+		CurrentStateID:         item.CurrentStateID,
+		CurrentReleaseOrderID:  item.CurrentReleaseOrderID,
+		CurrentReleaseOrderNo:  item.CurrentReleaseOrderNo,
+		CurrentImageTag:        item.CurrentImageTag,
+		CurrentConfirmedAt:     item.CurrentConfirmedAt,
+		CurrentConfirmedBy:     item.CurrentConfirmedBy,
+		PreviousStateID:        item.PreviousStateID,
+		PreviousReleaseOrderID: item.PreviousReleaseOrderID,
+		PreviousReleaseOrderNo: item.PreviousReleaseOrderNo,
+		PreviousImageTag:       item.PreviousImageTag,
+		PreviousConfirmedAt:    item.PreviousConfirmedAt,
+	}
+}
+
+func toApplicationRollbackCapabilityResponse(item usecase.ApplicationRollbackCapabilityOutput) ApplicationRollbackCapabilityResponse {
+	return ApplicationRollbackCapabilityResponse{
+		ApplicationID:   item.ApplicationID,
+		ApplicationName: item.ApplicationName,
+		EnvCode:         item.EnvCode,
+		SupportedAction: string(item.SupportedAction),
+		Reason:          item.Reason,
+		CurrentState: ApplicationRollbackStateResponse{
+			StateID:        item.CurrentState.StateID,
+			ReleaseOrderID: item.CurrentState.ReleaseOrderID,
+			ReleaseOrderNo: item.CurrentState.ReleaseOrderNo,
+			TemplateID:     item.CurrentState.TemplateID,
+			TemplateName:   item.CurrentState.TemplateName,
+			CDProvider:     item.CurrentState.CDProvider,
+			GitRef:         item.CurrentState.GitRef,
+			HasCIExecution: item.CurrentState.HasCIExecution,
+			HasCDExecution: item.CurrentState.HasCDExecution,
+			ImageTag:       item.CurrentState.ImageTag,
+			ConfirmedAt:    item.CurrentState.ConfirmedAt,
+			ConfirmedBy:    item.CurrentState.ConfirmedBy,
+		},
+		TargetState: ApplicationRollbackStateResponse{
+			StateID:        item.TargetState.StateID,
+			ReleaseOrderID: item.TargetState.ReleaseOrderID,
+			ReleaseOrderNo: item.TargetState.ReleaseOrderNo,
+			TemplateID:     item.TargetState.TemplateID,
+			TemplateName:   item.TargetState.TemplateName,
+			CDProvider:     item.TargetState.CDProvider,
+			GitRef:         item.TargetState.GitRef,
+			HasCIExecution: item.TargetState.HasCIExecution,
+			HasCDExecution: item.TargetState.HasCDExecution,
+			ImageTag:       item.TargetState.ImageTag,
+			ConfirmedAt:    item.TargetState.ConfirmedAt,
+			ConfirmedBy:    item.TargetState.ConfirmedBy,
+		},
+	}
+}
+
+func toApplicationRollbackPrecheckResponse(item usecase.ApplicationRollbackPrecheckOutput) ApplicationRollbackPrecheckResponse {
+	resp := ApplicationRollbackPrecheckResponse{
+		ApplicationID:    item.ApplicationID,
+		ApplicationName:  item.ApplicationName,
+		EnvCode:          item.EnvCode,
+		Action:           string(item.Action),
+		SupportedAction:  string(item.SupportedAction),
+		Reason:           item.Reason,
+		Executable:       item.Executable,
+		WaitingForLock:   item.WaitingForLock,
+		AheadCount:       item.AheadCount,
+		LockEnabled:      item.LockEnabled,
+		LockScope:        item.LockScope,
+		ConflictStrategy: item.ConflictStrategy,
+		LockKey:          item.LockKey,
+		ConflictOrderNo:  item.ConflictOrderNo,
+		ConflictMessage:  item.ConflictMessage,
+		PreviewScope:     item.PreviewScope,
+		TemplateID:       item.TemplateID,
+		TemplateName:     item.TemplateName,
+		CurrentState: ApplicationRollbackStateResponse{
+			StateID:        item.CurrentState.StateID,
+			ReleaseOrderID: item.CurrentState.ReleaseOrderID,
+			ReleaseOrderNo: item.CurrentState.ReleaseOrderNo,
+			TemplateID:     item.CurrentState.TemplateID,
+			TemplateName:   item.CurrentState.TemplateName,
+			CDProvider:     item.CurrentState.CDProvider,
+			GitRef:         item.CurrentState.GitRef,
+			HasCIExecution: item.CurrentState.HasCIExecution,
+			HasCDExecution: item.CurrentState.HasCDExecution,
+			ImageTag:       item.CurrentState.ImageTag,
+			ConfirmedAt:    item.CurrentState.ConfirmedAt,
+			ConfirmedBy:    item.CurrentState.ConfirmedBy,
+		},
+		TargetState: ApplicationRollbackStateResponse{
+			StateID:        item.TargetState.StateID,
+			ReleaseOrderID: item.TargetState.ReleaseOrderID,
+			ReleaseOrderNo: item.TargetState.ReleaseOrderNo,
+			TemplateID:     item.TargetState.TemplateID,
+			TemplateName:   item.TargetState.TemplateName,
+			CDProvider:     item.TargetState.CDProvider,
+			GitRef:         item.TargetState.GitRef,
+			HasCIExecution: item.TargetState.HasCIExecution,
+			HasCDExecution: item.TargetState.HasCDExecution,
+			ImageTag:       item.TargetState.ImageTag,
+			ConfirmedAt:    item.TargetState.ConfirmedAt,
+			ConfirmedBy:    item.TargetState.ConfirmedBy,
+		},
+		Items:  make([]ReleaseOrderPrecheckItemResponse, 0, len(item.Items)),
+		Params: make([]ApplicationRollbackPrecheckParamResponse, 0, len(item.Params)),
+	}
+	for _, precheckItem := range item.Items {
+		resp.Items = append(resp.Items, ReleaseOrderPrecheckItemResponse{
+			Key:     precheckItem.Key,
+			Name:    precheckItem.Name,
+			Status:  string(precheckItem.Status),
+			Message: precheckItem.Message,
+		})
+	}
+	for _, param := range item.Params {
+		resp.Params = append(resp.Params, ApplicationRollbackPrecheckParamResponse{
+			PipelineScope:     param.PipelineScope,
+			ParamKey:          param.ParamKey,
+			ExecutorParamName: param.ExecutorParamName,
+			ParamValue:        param.ParamValue,
+			ValueSource:       param.ValueSource,
+		})
+	}
+	return resp
+}
+
+func (h *ReleaseOrderHandler) toReleaseOrderResponse(ctx context.Context, item domain.ReleaseOrder) ReleaseOrderResponse {
+	state := h.lookupAppReleaseStateByOrderID(ctx, item.ID)
+	resp := toReleaseOrderResponse(item, state)
+	resp.LiveStateCanConfirm = h.canConfirmLiveForOrder(ctx, item.ID, state)
+	return resp
+}
+
+func (h *ReleaseOrderHandler) canConfirmLiveForOrder(
+	ctx context.Context,
+	releaseOrderID string,
+	state *domain.AppReleaseState,
+) bool {
+	if h == nil || h.manager == nil || state == nil {
+		return false
+	}
+	if state.StateStatus != domain.AppReleaseStateStatusPendingConfirm {
+		return false
+	}
+	ok, err := h.manager.CanConfirmAppReleaseState(ctx, releaseOrderID)
+	if err != nil {
+		return false
+	}
+	return ok
+}
+
+func (h *ReleaseOrderHandler) lookupAppReleaseStateByOrderID(ctx context.Context, releaseOrderID string) *domain.AppReleaseState {
+	if h == nil || h.manager == nil || strings.TrimSpace(releaseOrderID) == "" {
+		return nil
+	}
+	state, err := h.manager.GetAppReleaseStateByOrderID(ctx, strings.TrimSpace(releaseOrderID))
+	if err != nil {
+		return nil
+	}
+	return &state
+}
+
+func splitTrimmedCSV(value string) []string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return nil
+	}
+	raw := strings.Split(text, ",")
+	result := make([]string, 0, len(raw))
+	for _, item := range raw {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		result = append(result, trimmed)
+	}
+	return result
 }
 
 func (h *ReleaseOrderHandler) enrichReleaseOrderResponseMeta(ctx context.Context, item domain.ReleaseOrder) domain.ReleaseOrder {
@@ -1683,11 +2167,13 @@ func writeReleaseOrderHTTPError(c *gin.Context, err error) {
 		errors.Is(err, domain.ErrStepNotFound),
 		errors.Is(err, domain.ErrPipelineStageNotFound),
 		errors.Is(err, domain.ErrTemplateNotFound),
-		errors.Is(err, domain.ErrDeploySnapshotNotFound):
+		errors.Is(err, domain.ErrDeploySnapshotNotFound),
+		errors.Is(err, domain.ErrAppReleaseStateNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 
 	case errors.Is(err, domain.ErrOrderDuplicated),
 		errors.Is(err, domain.ErrTemplateDuplicated),
+		errors.Is(err, domain.ErrAppReleaseStateNotConfirmable),
 		errors.Is(err, usecase.ErrConcurrentReleaseBlocked):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 
@@ -1942,6 +2428,7 @@ func resolveVisibleReleaseOrderApplicationIDs(
 		"release.cancel":  {},
 	}
 	applicationIDs, envScopes = collectApplicationScopesFromPermissions(items, accepted)
+	applicationIDs = mergeReleaseVisibleApplicationIDs(applicationIDs, envScopes)
 	return false, applicationIDs, envScopes, true
 }
 
@@ -1990,6 +2477,10 @@ func canViewReleaseOrderApplication(
 	if user.Role == userdomain.RoleAdmin {
 		return true, nil
 	}
+	appID := strings.TrimSpace(applicationID)
+	if appID == "" {
+		return false, nil
+	}
 	manageAllowed, err := authz.HasPermission(ctx, user, "application.manage", "", "")
 	if err != nil {
 		return false, err
@@ -1997,22 +2488,74 @@ func canViewReleaseOrderApplication(
 	if manageAllowed {
 		return true, nil
 	}
+
+	accepted := map[string]struct{}{
+		"release.view":    {},
+		"release.create":  {},
+		"release.execute": {},
+		"release.cancel":  {},
+	}
+	items, err := authz.ListEffectivePermissions(ctx, user)
+	if err != nil {
+		return false, err
+	}
+	applicationIDs, envScopes := collectApplicationScopesFromPermissions(items, accepted)
+	applicationIDs = mergeReleaseVisibleApplicationIDs(applicationIDs, envScopes)
+	if containsString(applicationIDs, appID) {
+		return true, nil
+	}
+
 	for _, code := range []string{"release.view", "release.create", "release.execute", "release.cancel"} {
-		scopeType := "application"
-		scopeValue := strings.TrimSpace(applicationID)
-		if strings.TrimSpace(envCode) != "" {
-			scopeType = "application_env"
-			scopeValue = buildApplicationEnvScopeValue(applicationID, envCode)
-		}
-		allowed, err := authz.HasPermission(ctx, user, code, scopeType, scopeValue)
+		allowed, err := authz.HasPermission(ctx, user, code, "application", appID)
 		if err != nil {
 			return false, err
 		}
 		if allowed {
 			return true, nil
 		}
+		if env := strings.TrimSpace(envCode); env != "" {
+			allowed, err = authz.HasPermission(ctx, user, code, "application_env", buildApplicationEnvScopeValue(appID, env))
+			if err != nil {
+				return false, err
+			}
+			if allowed {
+				return true, nil
+			}
+		}
 	}
 	return false, nil
+}
+
+func mergeReleaseVisibleApplicationIDs(
+	applicationIDs []string,
+	envScopes []domain.ApplicationEnvScope,
+) []string {
+	seen := make(map[string]struct{}, len(applicationIDs)+len(envScopes))
+	result := make([]string, 0, len(applicationIDs)+len(envScopes))
+	for _, item := range applicationIDs {
+		appID := strings.TrimSpace(item)
+		if appID == "" {
+			continue
+		}
+		if _, exists := seen[appID]; exists {
+			continue
+		}
+		seen[appID] = struct{}{}
+		result = append(result, appID)
+	}
+	for _, item := range envScopes {
+		appID := strings.TrimSpace(item.ApplicationID)
+		if appID == "" {
+			continue
+		}
+		if _, exists := seen[appID]; exists {
+			continue
+		}
+		seen[appID] = struct{}{}
+		result = append(result, appID)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func writeEmptyReleaseOrderList(c *gin.Context, page int, pageSize int) {

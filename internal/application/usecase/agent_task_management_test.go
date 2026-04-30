@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"database/sql"
+	"reflect"
 	"testing"
 	"time"
 
@@ -161,5 +162,131 @@ func TestExecuteBoundTemporaryTaskDispatchesToAllBoundAgents(t *testing.T) {
 	}
 	if reloadedSource.SuccessCount != 1 {
 		t.Fatalf("source SuccessCount = %d, want 1", reloadedSource.SuccessCount)
+	}
+}
+
+func TestUpdateTemporaryTaskCanChangeTargetAgents(t *testing.T) {
+	t.Parallel()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	repo := sqlrepo.NewAgentRepository(db, "sqlite")
+	ctx := context.Background()
+	if err := repo.InitSchema(ctx); err != nil {
+		t.Fatalf("InitSchema failed: %v", err)
+	}
+
+	now := time.Now().UTC()
+	manager := NewAgentTaskManager(repo)
+	manager.now = func() time.Time { return now }
+
+	agentA := agentdomain.Instance{
+		ID:              "agt-a",
+		AgentCode:       "agent-a",
+		Name:            "Agent A",
+		EnvironmentCode: "dev",
+		WorkDir:         "/tmp/agent-a",
+		Token:           "token-a",
+		Status:          agentdomain.StatusActive,
+		LastTaskStatus:  agentdomain.LastTaskStatusUnknown,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	agentB := agentdomain.Instance{
+		ID:              "agt-b",
+		AgentCode:       "agent-b",
+		Name:            "Agent B",
+		EnvironmentCode: "dev",
+		WorkDir:         "/tmp/agent-b",
+		Token:           "token-b",
+		Status:          agentdomain.StatusActive,
+		LastTaskStatus:  agentdomain.LastTaskStatusUnknown,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if _, err := repo.CreateInstance(ctx, agentA); err != nil {
+		t.Fatalf("CreateInstance agentA failed: %v", err)
+	}
+	if _, err := repo.CreateInstance(ctx, agentB); err != nil {
+		t.Fatalf("CreateInstance agentB failed: %v", err)
+	}
+
+	script, err := repo.CreateScript(ctx, agentdomain.Script{
+		ID:         "ags-edit-target-script",
+		Name:       "edit-target-script",
+		TaskType:   string(agentdomain.TaskTypeShellScript),
+		ShellType:  "sh",
+		ScriptPath: "scripts/edit_target.sh",
+		ScriptText: "echo edit-target",
+		CreatedBy:  "tester",
+		UpdatedBy:  "tester",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	})
+	if err != nil {
+		t.Fatalf("CreateScript failed: %v", err)
+	}
+
+	task, err := repo.CreateTask(ctx, agentdomain.Task{
+		ID:             "agtask-edit-target",
+		Name:           "edit-target-task",
+		TaskMode:       agentdomain.TaskModeTemporary,
+		TaskType:       string(agentdomain.TaskTypeShellScript),
+		ShellType:      "sh",
+		WorkDir:        "/tmp/task",
+		ScriptID:       script.ID,
+		ScriptName:     script.Name,
+		ScriptPath:     script.ScriptPath,
+		ScriptText:     script.ScriptText,
+		Variables:      map[string]string{"k": "v"},
+		TargetAgentIDs: []string{agentA.ID},
+		TimeoutSec:     120,
+		Status:         agentdomain.TaskStatusDraft,
+		CreatedBy:      "tester",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	})
+	if err != nil {
+		t.Fatalf("CreateTask failed: %v", err)
+	}
+
+	updated, err := manager.UpdateTemporaryTask(ctx, task.ID, UpdateAgentTaskInput{
+		Name:           "edit-target-task-updated",
+		ScriptID:       script.ID,
+		WorkDir:        "/tmp/task-updated",
+		Variables:      map[string]string{"k": "v2"},
+		TargetAgentIDs: []string{agentB.ID},
+		TimeoutSec:     180,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTemporaryTask failed: %v", err)
+	}
+
+	if updated.AgentID != "" {
+		t.Fatalf("updated.AgentID = %q, want empty", updated.AgentID)
+	}
+	if updated.AgentCode != "" {
+		t.Fatalf("updated.AgentCode = %q, want empty", updated.AgentCode)
+	}
+	if !reflect.DeepEqual(updated.TargetAgentIDs, []string{agentB.ID}) {
+		t.Fatalf("updated.TargetAgentIDs = %v, want [%s]", updated.TargetAgentIDs, agentB.ID)
+	}
+
+	reloaded, err := repo.GetTaskByID(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("GetTaskByID failed: %v", err)
+	}
+	if reloaded.AgentID != "" {
+		t.Fatalf("reloaded.AgentID = %q, want empty", reloaded.AgentID)
+	}
+	if reloaded.AgentCode != "" {
+		t.Fatalf("reloaded.AgentCode = %q, want empty", reloaded.AgentCode)
+	}
+	if !reflect.DeepEqual(reloaded.TargetAgentIDs, []string{agentB.ID}) {
+		t.Fatalf("reloaded.TargetAgentIDs = %v, want [%s]", reloaded.TargetAgentIDs, agentB.ID)
 	}
 }

@@ -75,13 +75,14 @@ type CreateAgentTaskInput struct {
 }
 
 type UpdateAgentTaskInput struct {
-	AgentID    string
-	Name       string
-	TaskMode   string
-	WorkDir    string
-	ScriptID   string
-	Variables  map[string]string
-	TimeoutSec int
+	AgentID        string
+	TargetAgentIDs []string
+	Name           string
+	TaskMode       string
+	WorkDir        string
+	ScriptID       string
+	Variables      map[string]string
+	TimeoutSec     int
 }
 
 type StopAgentTaskInput struct {
@@ -481,6 +482,12 @@ func (uc *AgentTaskManager) UpdateTemporaryTask(ctx context.Context, taskID stri
 	current.ScriptPath = script.ScriptPath
 	current.ScriptText = script.ScriptText
 	current.Variables = normalizeTaskVariables(input.Variables)
+	targetAgentIDs := normalizeTaskTargetAgentIDs(input.TargetAgentIDs)
+	current.TargetAgentIDs = targetAgentIDs
+	if len(targetAgentIDs) > 0 {
+		current.AgentID = ""
+		current.AgentCode = ""
+	}
 	current.TimeoutSec = timeoutSec
 	current.UpdatedAt = uc.now()
 	updated, err := uc.repo.UpdateTask(ctx, current)

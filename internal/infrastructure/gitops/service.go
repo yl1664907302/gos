@@ -40,6 +40,8 @@ type Config struct {
 	AuthorEmail           string
 	CommitMessageTemplate string
 	CommandTimeoutSec     int
+	HelmScanPath          string
+	KustomizeScanPath     string
 }
 
 type Service struct {
@@ -54,6 +56,8 @@ type Service struct {
 	authorEmail           string
 	commitMessageTemplate string
 	commandTimeoutSec     int
+	helmScanPath          string
+	kustomizeScanPath     string
 }
 
 type Status struct {
@@ -92,6 +96,14 @@ var commitTemplateTokenPattern = regexp.MustCompile(`\{([a-zA-Z0-9_]+)\}`)
 var repoBranchLocks sync.Map
 
 func NewService(cfg Config) *Service {
+	helmPath := strings.TrimSpace(cfg.HelmScanPath)
+	if helmPath == "" {
+		helmPath = "apps/helm"
+	}
+	kustomizePath := strings.TrimSpace(cfg.KustomizeScanPath)
+	if kustomizePath == "" {
+		kustomizePath = "apps/{app_key}/overlays/{env}"
+	}
 	return &Service{
 		enabled:               cfg.Enabled,
 		localRoot:             strings.TrimSpace(cfg.LocalRoot),
@@ -103,6 +115,8 @@ func NewService(cfg Config) *Service {
 		authorEmail:           strings.TrimSpace(cfg.AuthorEmail),
 		commitMessageTemplate: NormalizeCommitMessageTemplate(cfg.CommitMessageTemplate),
 		commandTimeoutSec:     cfg.CommandTimeoutSec,
+		helmScanPath:          strings.TrimRight(helmPath, "/"),
+		kustomizeScanPath:     strings.TrimRight(kustomizePath, "/"),
 	}
 }
 
@@ -134,6 +148,33 @@ func (s *Service) UpdateCommitMessageTemplate(template string) string {
 	s.commitMessageTemplate = normalized
 	s.mu.Unlock()
 	return normalized
+}
+
+func (s *Service) UpdateScanPaths(helmPath string, kustomizePath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	helmPath = strings.TrimSpace(helmPath)
+	if helmPath == "" {
+		helmPath = "apps/helm"
+	}
+	kustomizePath = strings.TrimSpace(kustomizePath)
+	if kustomizePath == "" {
+		kustomizePath = "apps/{app_key}/overlays/{env}"
+	}
+	s.helmScanPath = strings.TrimRight(helmPath, "/")
+	s.kustomizeScanPath = strings.TrimRight(kustomizePath, "/")
+}
+
+func (s *Service) helmScanPathValue() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.helmScanPath
+}
+
+func (s *Service) kustomizeScanPathValue() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.kustomizeScanPath
 }
 
 // GetStatus 返回 GitOps 工作目录的当前可见状态，供组件管理页展示。
@@ -327,7 +368,11 @@ func (s *Service) ListFieldCandidates(ctx context.Context, appKey string) ([]git
 		return []gitopsdomain.FieldCandidate{}, nil
 	}
 
-	overlayRoot := filepath.Join(scanRoot, "apps", resolvedAppDir, "overlays")
+	kustomizePathTemplate := s.kustomizeScanPathValue()
+	kustomizePathTemplate = strings.ReplaceAll(kustomizePathTemplate, "{app_key}", resolvedAppDir)
+	kustomizePathTemplate = strings.Replace(kustomizePathTemplate, "/{env}", "", 1)
+	kustomizePathTemplate = strings.Replace(kustomizePathTemplate, "/{env}/", "/", 1)
+	overlayRoot := filepath.Join(scanRoot, filepath.FromSlash(kustomizePathTemplate))
 	envEntries, err := os.ReadDir(overlayRoot)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -419,8 +464,12 @@ func (s *Service) ListValuesCandidates(ctx context.Context, appKey string) ([]gi
 	defer cleanup()
 
 	resolvedAppDir := ""
-	appRoot := filepath.Join(scanRoot, "apps", "helm")
-	if info, statErr := os.Stat(appRoot); statErr == nil && info.IsDir() {
+	var appRoot string
+	helmPathTemplate := s.helmScanPathValue()
+	helmPathTemplate = strings.ReplaceAll(helmPathTemplate, "{app_key}", appKey)
+	helmResolved := filepath.Join(scanRoot, filepath.FromSlash(helmPathTemplate))
+	if info, statErr := os.Stat(helmResolved); statErr == nil && info.IsDir() {
+		appRoot = helmResolved
 		resolvedAppDir = "helm"
 	} else {
 		resolvedAppDir, err = s.resolveAppDirectory(scanRoot, appKey)
@@ -1952,4 +2001,57 @@ func renderCommitMessageTemplate(template string, fields map[string]string) stri
 		}
 		return token
 	})
+}
+
+// CheckScanPath 检查配置的扫描路径在 master 分支中是否存在。
+// 返回解析后的路径模板、是否存在、可能的错误。
+func (s *Service) CheckScanPath(ctx context.Context, appKey string, gitopsType string) (string, bool, error) {
+	status, err := s.GetStatus(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	if !status.Enabled || !status.PathExists || !status.IsGitRepo {
+		return "", false, nil
+	}
+
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return "", false, nil
+	}
+
+	scanRoot := strings.TrimSpace(status.LocalRoot)
+	cleanup := func() {}
+	scanRoot, cleanup, err = s.prepareConfigCandidateScanRoot(ctx, scanRoot)
+	if err != nil {
+		return "", false, err
+	}
+	defer cleanup()
+
+	switch strings.ToLower(strings.TrimSpace(gitopsType)) {
+	case "helm":
+		helmPathTemplate := s.helmScanPathValue()
+		helmPathTemplate = strings.ReplaceAll(helmPathTemplate, "{app_key}", appKey)
+		helmResolved := filepath.Join(scanRoot, filepath.FromSlash(helmPathTemplate))
+		if info, statErr := os.Stat(helmResolved); statErr == nil && info.IsDir() {
+			return helmPathTemplate, true, nil
+		}
+		return helmPathTemplate, false, nil
+	default:
+		resolvedAppDir, resolveErr := s.resolveAppDirectory(scanRoot, appKey)
+		if resolveErr != nil {
+			return "", false, resolveErr
+		}
+		if resolvedAppDir == "" {
+			return "", false, nil
+		}
+		kustomizePathTemplate := s.kustomizeScanPathValue()
+		kustomizePathTemplate = strings.ReplaceAll(kustomizePathTemplate, "{app_key}", resolvedAppDir)
+		kustomizePathTemplate = strings.Replace(kustomizePathTemplate, "/{env}", "", 1)
+		kustomizePathTemplate = strings.Replace(kustomizePathTemplate, "/{env}/", "/", 1)
+		kustomizeResolved := filepath.Join(scanRoot, filepath.FromSlash(kustomizePathTemplate))
+		if info, statErr := os.Stat(kustomizeResolved); statErr == nil && info.IsDir() {
+			return kustomizePathTemplate, true, nil
+		}
+		return kustomizePathTemplate, false, nil
+	}
 }

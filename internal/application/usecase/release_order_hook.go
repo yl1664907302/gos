@@ -379,22 +379,14 @@ func (uc *ReleaseOrderManager) dispatchAgentTaskHookStep(
 	if err != nil {
 		return false, err
 	}
-	if sourceTask.TaskMode != agentdomain.TaskModeTemporary {
-		return false, fmt.Errorf("%w: hook target task must be temporary", ErrInvalidInput)
+	if !isReusableAgentTaskHookTarget(sourceTask) {
+		return false, fmt.Errorf("%w: hook target task must be a manual temporary task", ErrInvalidInput)
 	}
 	variables, err := uc.buildHookTaskVariables(ctx, order, executions, hook, parseHookExecuteStage(step.StepCode))
 	if err != nil {
 		return false, err
 	}
-	for key, value := range sourceTask.Variables {
-		normalizedKey := strings.TrimSpace(key)
-		if normalizedKey == "" {
-			continue
-		}
-		if _, exists := variables[normalizedKey]; !exists {
-			variables[normalizedKey] = strings.TrimSpace(value)
-		}
-	}
+	mergeAgentTaskVariables(variables, sourceTask.Variables)
 	targets, err := resolveTaskDispatchTargets(ctx, uc.agentRepo, sourceTask)
 	if err != nil {
 		return false, err
@@ -420,6 +412,19 @@ func (uc *ReleaseOrderManager) dispatchAgentTaskHookStep(
 		return true, uc.markStep(ctx, order.ID, step.StepCode, domain.StepStatusRunning, message, &now, nil)
 	}
 	return true, uc.markStep(ctx, order.ID, step.StepCode, domain.StepStatusRunning, message, step.StartedAt, nil)
+}
+
+func mergeAgentTaskVariables(target map[string]string, taskVariables map[string]string) {
+	if len(taskVariables) == 0 {
+		return
+	}
+	for key, value := range taskVariables {
+		normalizedKey := strings.TrimSpace(key)
+		if normalizedKey == "" {
+			continue
+		}
+		target[normalizedKey] = strings.TrimSpace(value)
+	}
 }
 
 func (uc *ReleaseOrderManager) dispatchWebhookHookStep(

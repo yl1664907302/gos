@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { CopyOutlined, ExclamationCircleOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import {
+  ArrowDownOutlined,
+  ArrowUpOutlined,
+  DeploymentUnitOutlined,
+  ExclamationCircleOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  RocketOutlined,
+} from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
-import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { listApplications } from '../../api/application'
 import { listAllAgentTasks } from '../../api/agent'
-import { listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api/gitops'
+import { checkGitOpsScanPath, listGitOpsFieldCandidates, listGitOpsValuesCandidates } from '../../api/gitops'
 import { listNotificationHooks } from '../../api/notification'
 import { listPlatformParamDicts } from '../../api/platform-param'
 import { getPipelineBindingByID, listPipelineBindings, listApplicationExecutorParamDefs } from '../../api/pipeline'
@@ -45,6 +53,7 @@ import type {
   UpdateReleaseTemplatePayload,
 } from '../../types/release'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
+import { useAuthStore } from '../../stores/auth'
 
 type FormMode = 'create' | 'edit'
 type CDMode = 'pipeline' | 'argocd'
@@ -115,6 +124,13 @@ interface HookFormItem {
   webhook_url: string
   webhook_body_template: string
   note: string
+}
+
+type TemplateExecutionUnitKey = 'ci' | 'cd'
+
+interface TemplateExecutionUnit {
+  key: TemplateExecutionUnitKey
+  label: string
 }
 
 const builtinTemplateSourceKeys = new Set([
@@ -196,11 +212,13 @@ const gitOpsFieldCandidates = ref<GitOpsFieldCandidate[]>([])
 const gitOpsValuesCandidates = ref<GitOpsValuesCandidate[]>([])
 const loadingGitOpsFieldCandidates = ref(false)
 const gitopsRules = ref<GitOpsRuleFormItem[]>([])
+const gitopsRulesByType = ref<Record<string, GitOpsRuleFormItem[]>>({ helm: [], kustomize: [] })
 const gitOpsType = ref<ReleaseTemplateGitOpsType>('kustomize')
 const cdMode = ref<CDMode>('argocd')
 const argocdInfoActiveKeys = ref<string[]>([])
-const releasePageGuideActiveKeys = ref<string[]>([])
 const gitopsRuleActiveKeys = ref<string[]>([])
+const gitopsScanPathExists = ref<boolean | null>(null)
+const gitopsScanPathTemplate = ref('')
 const templateHooks = ref<HookFormItem[]>([])
 const hookTypePickerVisible = ref(false)
 const pendingHookType = ref<ReleaseTemplateHookTypePreview>('agent_task')
@@ -215,6 +233,26 @@ const selectableParamsCache = ref<Record<string, ExecutorParamDef[]>>({})
 const gitOpsFieldCandidateCache = ref<Record<string, GitOpsFieldCandidate[]>>({})
 const gitOpsValuesCandidateCache = ref<Record<string, GitOpsValuesCandidate[]>>({})
 const bindingLookupCache = ref<Record<string, boolean>>({})
+const authStore = useAuthStore()
+const route = useRoute()
+const canManageTemplate = computed(() => authStore.hasPermission('release.template.manage'))
+const templateEditorViewportInset = ref(0)
+const templateEditorMaskStyle = computed(() => ({
+  left: `${templateEditorViewportInset.value}px`,
+  width: `calc(100% - ${templateEditorViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: modalVisible.value ? 'auto' : 'none',
+}))
+const templateEditorWrapProps = computed(() => ({
+  style: {
+    left: `${templateEditorViewportInset.value}px`,
+    width: `calc(100% - ${templateEditorViewportInset.value}px)`,
+    pointerEvents: modalVisible.value ? 'auto' : 'none',
+  },
+}))
+let templateEditorViewportObserver: ResizeObserver | null = null
 
 const scopeTitles: Record<ReleasePipelineScope, string> = {
   ci: 'CI 配置',
@@ -222,8 +260,8 @@ const scopeTitles: Record<ReleasePipelineScope, string> = {
 }
 
 const scopeDescriptions: Record<ReleasePipelineScope, string> = {
-  ci: 'CI 固定使用 Jenkins；参数必须已完成平台标准 Key 映射，并可继续映射发布基础字段、固定值或发布时填写。',
-  cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或发布基础字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容。',
+  ci: 'CI 固定使用 Jenkins；参数必须已完成平台标准 Key 映射，并可继续映射发布基础字段、固定值或发布时填写',
+  cd: '先明确当前模板的 CD 方式：选择管线时可配置发布时填写、固定值、沿用 CI 字段或发布基础字段；选择 ArgoCD 时只配置 GitOps / ArgoCD 相关内容',
 }
 
 const hookVariableSourceTags = ['固定值', '标准字段', '内置字段']
@@ -236,10 +274,7 @@ const initialColumns: TableColumnsType<ReleaseTemplate> = [
   { title: '模板名称', dataIndex: 'name', key: 'name', width: 220 },
   { title: '应用', dataIndex: 'application_name', key: 'application_name', width: 180 },
   { title: '执行单元', dataIndex: 'binding_name', key: 'binding_name', width: 180 },
-  { title: '类型', dataIndex: 'binding_type', key: 'binding_type', width: 120 },
-  { title: '参数数', dataIndex: 'param_count', key: 'param_count', width: 100 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 100 },
-  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 180 },
   { title: '操作', key: 'actions', width: 200, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 560, hitArea: 10 })
@@ -258,10 +293,33 @@ const statusOptions = [
   { label: 'inactive', value: 'inactive' },
 ] as const
 
+const templateApplicationFilterOptions = computed<SelectOption[]>(() => applicationOptions.value)
+
+const templateStatusFilterOptions = computed<SelectOption[]>(() => [...statusOptions])
+
+const applicationFilterValue = computed<string | undefined>({
+  get: () => filters.application_id || undefined,
+  set: (value) => {
+    filters.application_id = String(value || '').trim()
+  },
+})
+
+const statusFilterValue = computed<ReleaseTemplateStatus | undefined>({
+  get: () => filters.status || undefined,
+  set: (value) => {
+    filters.status = (value || '') as '' | ReleaseTemplateStatus
+  },
+})
+
 const approvalModeOptions = [
   { label: '任一人通过', value: 'any' },
   { label: '全部通过', value: 'all' },
 ] as const
+
+const templateExecutionUnitLabels: Record<TemplateExecutionUnitKey, string> = {
+  ci: 'CI',
+  cd: 'CD',
+}
 
 const userOptionChoices = computed(() =>
   userOptions.value.map((item) => ({
@@ -269,6 +327,40 @@ const userOptionChoices = computed(() =>
     value: item.id,
   })),
 )
+
+function templateExecutionUnits(record: ReleaseTemplate) {
+  const scopeKeys = new Set<TemplateExecutionUnitKey>()
+
+  String(record.binding_type || '')
+    .split(/[^a-z]+/i)
+    .map((item) => item.trim().toLowerCase())
+    .forEach((item) => {
+      if (item === 'ci' || item === 'cd') {
+        scopeKeys.add(item)
+      }
+    })
+
+  if (!scopeKeys.size) {
+    const fallback = String(record.binding_name || '').trim().toUpperCase()
+    if (fallback.includes('CI')) {
+      scopeKeys.add('ci')
+    }
+    if (fallback.includes('CD')) {
+      scopeKeys.add('cd')
+    }
+  }
+
+  return (['ci', 'cd'] as TemplateExecutionUnitKey[])
+    .filter((key) => scopeKeys.has(key))
+    .map((key) => ({
+      key,
+      label: templateExecutionUnitLabels[key],
+    })) satisfies TemplateExecutionUnit[]
+}
+
+function templateExecutionSummary(record: ReleaseTemplate) {
+  return String(record.binding_name || '').trim() || '-'
+}
 
 function hookTypeLabel(type: ReleaseTemplateHookTypePreview) {
   switch (type) {
@@ -413,8 +505,12 @@ function agentTaskTypeLabel(taskType: string) {
   }
 }
 
+function isAgentTaskTemplateCandidate(item: AgentTask) {
+  return item.task_mode === 'temporary' && !String(item.source_task_id || '').trim()
+}
+
 const agentTaskTemplateOptions = computed<SelectOption[]>(() => {
-  const temps = agentTaskTemplates.value.filter((item) => item.task_mode === 'temporary')
+  const temps = agentTaskTemplates.value.filter(isAgentTaskTemplateCandidate)
   const nameKeyCounts = new Map<string, number>()
   temps.forEach((item) => {
     const key = String(item.name || '')
@@ -497,6 +593,20 @@ function confirmAddHook() {
 
 function removeHook(localID: string) {
   templateHooks.value = templateHooks.value.filter((item) => item.local_id !== localID)
+}
+
+function moveHook(index: number, direction: -1 | 1) {
+  const targetIndex = index + direction
+  if (index < 0 || targetIndex < 0 || index >= templateHooks.value.length || targetIndex >= templateHooks.value.length) {
+    return
+  }
+  const next = [...templateHooks.value]
+  const [item] = next.splice(index, 1)
+  if (!item) {
+    return
+  }
+  next.splice(targetIndex, 0, item)
+  templateHooks.value = next
 }
 
 function hookStageLabel(type: ReleaseTemplateHookExecuteStagePreview) {
@@ -657,30 +767,6 @@ const builtinTemplateSourceOptions = computed<SelectOption[]>(() =>
     })),
 )
 
-const selectedApplicationRecord = computed(() =>
-  applicationRecords.value.find((item) => item.id === formState.application_id.trim()) || null,
-)
-
-const argocdInstallCommand = computed(() => {
-  const appKey = selectedApplicationRecord.value?.key?.trim() || 'java-nantong-test'
-  const serviceName = 'gateway'
-  const env = 'dev'
-  const repoURL = 'http://192.168.1.195/sre/deploy-manifests.git'
-  const namespace = 'nantong-20'
-  return [
-    `argocd app create ${appKey}-${env}-${serviceName} \\`,
-    `  --repo ${repoURL} \\`,
-    `  --path apps/helm \\`,
-    `  --dest-server https://kubernetes.default.svc \\`,
-    `  --dest-namespace ${namespace} \\`,
-    `  --project default \\`,
-    `  --helm-set-string fullnameOverride=${serviceName} \\`,
-    `  --values values-${env}.yaml \\`,
-    `  --values ${serviceName}.values-${env}.yaml \\`,
-    `  --values platform.values-${env}.yaml`,
-  ].join('\n')
-})
-
 function selectedBinding(scope: ReleasePipelineScope) {
   return bindingOptionsByScope.value[scope].find((item) => item.value === scopeStates[scope].binding_id)
 }
@@ -807,13 +893,6 @@ function isUnsupportedKustomizeGitOps() {
 
 function statusColor(status: ReleaseTemplateStatus) {
   return status === 'active' ? 'green' : 'default'
-}
-
-function formatTime(value: string) {
-  if (!value) {
-    return '-'
-  }
-  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
 
 function resolvePlatformParamName(paramKey: string) {
@@ -1011,9 +1090,26 @@ async function reloadCurrentGitOpsCandidates() {
   }
   if (isHelmGitOps()) {
     await loadGitOpsValuesCandidates(appID, false, true)
+  } else {
+    await loadGitOpsFieldCandidates(appID, false, true)
+  }
+  void checkCurrentScanPath()
+}
+
+async function checkCurrentScanPath() {
+  const appID = String(formState.application_id || '').trim()
+  if (!appID) {
     return
   }
-  await loadGitOpsFieldCandidates(appID, false, true)
+  const type = isHelmGitOps() ? 'helm' : 'kustomize'
+  try {
+    const result = await checkGitOpsScanPath(appID, type)
+    gitopsScanPathExists.value = result.exists
+    gitopsScanPathTemplate.value = result.path_template || (type === 'helm' ? 'apps/helm' : 'apps/{app_key}/overlays/{env}')
+  } catch {
+    gitopsScanPathExists.value = true
+    gitopsScanPathTemplate.value = type === 'helm' ? 'apps/helm' : 'apps/{app_key}/overlays/{env}'
+  }
 }
 
 function resolveGitOpsSourceLabel(paramKey: string) {
@@ -1037,17 +1133,8 @@ function resolveGitOpsValueTemplatePlaceholder(rule: GitOpsRuleFormItem) {
 
 function resolveArgoCDModeDescription() {
   return isHelmGitOps()
-    ? '当前 GitOps 类型为 Helm。平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例，并按规则修改 Helm values 文件后触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
-    : '当前 GitOps 类型为 Kustomize。该模式当前在模板页暂不支持配置，请先切换到 Helm。'
-}
-
-async function copyArgoCDInstallCommand() {
-  try {
-    await navigator.clipboard.writeText(argocdInstallCommand.value)
-    message.success('ArgoCD 创建命令已复制')
-  } catch {
-    message.error('复制失败，请手工复制命令')
-  }
+    ? '当前 GitOps 类型为 Helm，平台会在发布时根据基础环境 env 自动命中已配置的 ArgoCD 实例，并按规则修改 Helm values 文件后触发同步，不会直接修改 Helm 渲染后的 Kubernetes YAML。image_version 在 Jenkins CI 下默认取本次构建号 BUILD_NUMBER。'
+    : '当前 GitOps 类型为 Kustomize，平台会在发布时自动更新 kustomization.yaml 的 images[0].newTag 并触发 ArgoCD Sync。如需替换其他 YAML 字段（如 replicas、resources 等），可在下方「新增规则」中添加可选的 manifest 替换规则。'
 }
 
 function matchesGitOpsRuleCandidate(rule: GitOpsRuleFormItem, candidate: GitOpsFieldCandidate) {
@@ -1176,8 +1263,8 @@ async function refreshScopeBindingWarning(scope: ReleasePipelineScope) {
     )
     const pipelineID = templateBinding?.pipeline_id?.trim()
     scopeBindingWarnings[scope] = pipelineID
-      ? `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定。`
-      : `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定。`
+      ? `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定`
+      : `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定`
     return
   }
   try {
@@ -1191,10 +1278,10 @@ async function refreshScopeBindingWarning(scope: ReleasePipelineScope) {
     )
     const pipelineID = templateBinding?.pipeline_id?.trim()
     if (pipelineID) {
-      scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定。`
+      scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，将在执行时回退到快照管线 ${pipelineID}；建议尽快重新选择有效绑定`
       return
     }
-    scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定。`
+    scopeBindingWarnings[scope] = `当前模板引用的 ${scope.toUpperCase()} 绑定已失效，且未保存可回退的管线 ID；发布预检会拦截执行，请尽快重新选择有效绑定`
   }
 }
 
@@ -1209,7 +1296,7 @@ function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGi
   let documentName = String(item.document_name || '').trim()
 
   // 兼容历史或异常态：如果 Values 路径下拉把组合值直接落进了 target_path，
-  // 提交前在前端再兜底解析一次，避免保存时因为候选键不匹配而失败。
+  // 提交前在前端再兜底解析一次，避免保存时因为候选键不匹配而失败
   if (normalizedGitOpsType(gitOpsType.value) === 'helm' && targetPath.startsWith('{')) {
     try {
       const parsed = JSON.parse(targetPath)
@@ -1218,7 +1305,7 @@ function normalizeGitOpsRulePayload(item: GitOpsRuleFormItem): ReleaseTemplateGi
       documentKind = 'values'
       documentName = ''
     } catch {
-      // noop: 保留原值，由后端继续兜底校验。
+      // noop: 保留原值，由后端继续兜底校验
     }
   }
 
@@ -1258,7 +1345,10 @@ function buildPayload(): ReleaseTemplatePayload | UpdateReleaseTemplatePayload {
     cd_param_configs: scopeStates.cd.enabled && isCDUsingPipeline() ? buildTemplateParamConfigs('cd') : [],
     gitops_rules:
       scopeStates.cd.enabled && isCDUsingArgoCD()
-        ? gitopsRules.value.map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item))
+        ? [
+            ...(gitopsRulesByType.value['helm'] || []).map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item)),
+            ...(gitopsRulesByType.value['kustomize'] || []).map<ReleaseTemplateGitOpsRulePayload>((item) => normalizeGitOpsRulePayload(item)),
+          ]
         : [],
     hooks: templateHooks.value.map<ReleaseTemplateHookPayload>((item) => ({
       hook_type: item.hook_type,
@@ -1317,7 +1407,7 @@ async function loadAgentTaskTemplates(force = false) {
   loadingAgentTaskTemplates.value = true
   try {
     const response = await listAllAgentTasks({ page: 1, page_size: 200 })
-    agentTaskTemplates.value = response.data
+    agentTaskTemplates.value = (response.data || []).filter(isAgentTaskTemplateCandidate)
   } catch (error) {
     agentTaskTemplates.value = []
     message.error(extractHTTPErrorMessage(error, 'Agent 任务模板加载失败'))
@@ -1664,17 +1754,31 @@ function handleGitOpsTypeChange(value: ReleaseTemplateGitOpsType) {
   if (nextType === gitOpsType.value) {
     return
   }
+  swapGitOpsTypeRules(nextType)
+}
+
+function swapGitOpsTypeRules(nextType: ReleaseTemplateGitOpsType) {
+  const prevType = normalizedGitOpsType(gitOpsType.value)
+  if (prevType) {
+    gitopsRulesByType.value[prevType] = [...gitopsRules.value]
+  }
   gitOpsType.value = nextType
-  gitopsRules.value = gitopsRules.value.map((item) =>
-    createGitOpsRuleFormItem({
-      ...item,
-      document_kind: nextType === 'helm' ? 'values' : '',
-      document_name: nextType === 'helm' ? '' : item.document_name,
-      target_path: '',
-    }),
-  )
+  gitopsRules.value = gitopsRulesByType.value[nextType] ? [...gitopsRulesByType.value[nextType]] : []
   void reloadCurrentGitOpsCandidates()
 }
+
+watch(gitOpsType, (value, oldValue) => {
+  const nextType = normalizedGitOpsType(value)
+  const prevType = normalizedGitOpsType(oldValue)
+  if (nextType === prevType) {
+    return
+  }
+  if (prevType) {
+    gitopsRulesByType.value[prevType] = [...gitopsRules.value]
+  }
+  gitopsRules.value = gitopsRulesByType.value[nextType] ? [...gitopsRulesByType.value[nextType]] : []
+  void reloadCurrentGitOpsCandidates()
+})
 
 function getRowSelection(scope: ReleasePipelineScope) {
   return {
@@ -1776,19 +1880,69 @@ function handleSearch() {
   void loadTemplates()
 }
 
-function handleReset() {
-  filters.application_id = ''
-  filters.status = ''
-  filters.page = 1
-  filters.pageSize = 20
-  void loadTemplates()
-}
-
-
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
   void loadTemplates()
+}
+
+function applyTemplateFiltersFromRouteQuery() {
+  filters.application_id = String(route.query.application_id || '').trim()
+  filters.page = 1
+}
+
+function readTemplateEditorViewportInset() {
+  if (typeof document === 'undefined') {
+    return 0
+  }
+
+  const appLayout = document.querySelector('.app-layout')
+  if (appLayout) {
+    const rawWidth = window.getComputedStyle(appLayout).getPropertyValue('--layout-sider-width').trim()
+    const parsedWidth = Number.parseFloat(rawWidth)
+    if (Number.isFinite(parsedWidth) && parsedWidth >= 0) {
+      return parsedWidth
+    }
+  }
+
+  const sider = document.querySelector('.app-sider')
+  if (!sider) {
+    return 0
+  }
+  return Math.max(sider.getBoundingClientRect().width, 0)
+}
+
+function syncTemplateEditorViewportInset() {
+  templateEditorViewportInset.value = readTemplateEditorViewportInset()
+}
+
+function observeTemplateEditorViewportInset() {
+  if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') {
+    return
+  }
+
+  const appLayout = document.querySelector('.app-layout')
+  const sider = document.querySelector('.app-sider')
+  if (!appLayout && !sider) {
+    return
+  }
+
+  templateEditorViewportObserver?.disconnect()
+  templateEditorViewportObserver = new ResizeObserver(() => {
+    syncTemplateEditorViewportInset()
+  })
+
+  if (appLayout) {
+    templateEditorViewportObserver.observe(appLayout)
+  }
+  if (sider) {
+    templateEditorViewportObserver.observe(sider)
+  }
+}
+
+function stopObservingTemplateEditorViewportInset() {
+  templateEditorViewportObserver?.disconnect()
+  templateEditorViewportObserver = null
 }
 
 function openCreateModal() {
@@ -1861,6 +2015,7 @@ async function openEditModal(record: ReleaseTemplate) {
     await Promise.all(loadTasks)
     applyBindingsToForm(bindings)
     void refreshBindingWarnings()
+    void checkCurrentScanPath()
 
     scopeStates.ci.selected_param_def_ids = params
       .filter((item) => item.pipeline_scope === 'ci')
@@ -1898,7 +2053,7 @@ async function openEditModal(record: ReleaseTemplate) {
     }
     await Promise.all(paramLoadTasks)
 
-    gitopsRules.value = (gitops_rules || []).map((item: ReleaseTemplateGitOpsRule) =>
+    const allRules = (gitops_rules || []).map((item: ReleaseTemplateGitOpsRule) =>
       createGitOpsRuleFormItem({
         source_param_key: item.source_param_key,
         source_from: item.source_from,
@@ -1909,6 +2064,13 @@ async function openEditModal(record: ReleaseTemplate) {
         value_template: item.value_template,
       }),
     )
+    gitopsRulesByType.value = {
+      helm: allRules.filter((r) => r.document_kind === 'values'),
+      kustomize: allRules.filter((r) => r.document_kind !== 'values'),
+    }
+    gitopsRules.value = normalizedGitOpsType(gitOpsType.value) === 'helm'
+      ? [...gitopsRulesByType.value.helm]
+      : [...gitopsRulesByType.value.kustomize]
     await loadHookEnvOptions((hooks || []).flatMap((item: ReleaseTemplateHook) => item.env_codes || []), true)
     templateHooks.value = (hooks || []).map((item: ReleaseTemplateHook) => createHookFormItemFromResponse(item))
     templateHooks.value.forEach((item) => syncHookTargetName(item))
@@ -1916,8 +2078,8 @@ async function openEditModal(record: ReleaseTemplate) {
     if (gitopsRules.value.some((item) => formatGitOpsRuleTargetSummary(item).stale)) {
       message.warning(
         isHelmGitOps()
-          ? '检测到部分 GitOps 规则引用的 Values 路径已变化，请在保存前重新确认。'
-          : '检测到部分 GitOps 规则引用的 YAML 字段已变化，请在保存前重新确认。',
+          ? '检测到部分 GitOps 规则引用的 Values 路径已变化，请在保存前重新确认'
+          : '检测到部分 GitOps 规则引用的 YAML 字段已变化，请在保存前重新确认',
       )
     }
   } catch (error) {
@@ -1931,7 +2093,12 @@ async function openEditModal(record: ReleaseTemplate) {
 function closeModal() {
   modalVisible.value = false
   modalLoading.value = false
+}
+
+function handleTemplateEditorAfterClose() {
+  submitting.value = false
   resetFormState()
+  formRef.value?.clearValidate()
 }
 
 function validateScopeState() {
@@ -2045,87 +2212,58 @@ async function handleDelete(record: ReleaseTemplate) {
 }
 
 onMounted(async () => {
+  syncTemplateEditorViewportInset()
+  observeTemplateEditorViewportInset()
+  applyTemplateFiltersFromRouteQuery()
   await loadApplications()
   await loadTemplates()
+})
+
+onBeforeUnmount(() => {
+  stopObservingTemplateEditorViewportInset()
 })
 </script>
 
 <template>
   <div class="page-wrapper">
-    <div class="page-header-card page-header">
+    <div class="page-header-card page-header release-template-page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">发布模板</h2>
-        <p class="page-subtitle">按应用维护可复用的 CI/CD 发布结构，模板会决定本次发布启用哪些执行单元以及暴露哪些参数</p>
+        <h2 class="page-title">模板</h2>
       </div>
-      <a-button type="primary" @click="openCreateModal">
-        <template #icon>
-          <PlusOutlined />
-        </template>
-        新增发布模板
-      </a-button>
+      <div class="page-header-actions release-template-header-actions">
+        <a-select
+          v-model:value="applicationFilterValue"
+          class="release-template-toolbar-select release-template-toolbar-select-wide"
+          show-search
+          option-filter-prop="label"
+          placeholder="应用"
+          :options="templateApplicationFilterOptions"
+        />
+        <a-select
+          v-model:value="statusFilterValue"
+          class="release-template-toolbar-select"
+          placeholder="状态"
+          :options="templateStatusFilterOptions"
+        />
+        <a-button class="release-template-toolbar-query-btn" @click="handleSearch">查询</a-button>
+        <a-button v-if="canManageTemplate" class="application-toolbar-action-btn release-template-create-btn" @click="openCreateModal">
+          <template #icon>
+            <PlusOutlined />
+          </template>
+          新增发布模板
+        </a-button>
+      </div>
     </div>
 
-    <a-collapse v-model:activeKey="releasePageGuideActiveKeys" class="release-page-guide-collapse" ghost>
-      <a-collapse-panel key="install-guide">
-        <template #header>
-          <div class="collapse-header-block">
-            <div class="collapse-header-title">异地集群创建 ArgoCD Application 示例</div>
-            <div class="collapse-header-subtitle">
-              网络不通的目标集群，可先在目标侧 ArgoCD 创建 Application，再由平台改 GitOps 并触发 Sync。
-            </div>
-          </div>
-        </template>
-        <div class="argocd-install-panel">
-          <div class="argocd-install-header">
-            <div class="argocd-install-subtitle">
-              如果目标 K8s 集群与发布平台网络不通，需要先在目标集群侧可访问的 ArgoCD 环境里执行一次 `argocd app create`，
-              让该集群先拥有对应的 Application。平台后续发布时只负责改 GitOps 配置并触发 Sync。
-            </div>
-            <a-button size="small" @click.stop="copyArgoCDInstallCommand">
-              <template #icon><CopyOutlined /></template>
-              复制命令
-            </a-button>
-          </div>
-          <pre class="argocd-install-code"><code>{{ argocdInstallCommand }}</code></pre>
-        </div>
-      </a-collapse-panel>
-    </a-collapse>
-
-    <a-card class="filter-card" :bordered="true">
-      <div class="advanced-search-panel">
-        <a-form layout="inline" class="filter-form">
-          <a-form-item label="应用">
-            <a-select
-              v-model:value="filters.application_id"
-              class="filter-select-wide"
-              allow-clear
-              show-search
-              option-filter-prop="label"
-              placeholder="全部应用"
-              :options="applicationOptions"
-            />
-          </a-form-item>
-          <a-form-item label="状态">
-            <a-select v-model:value="filters.status" class="filter-select" allow-clear placeholder="全部" :options="statusOptions" />
-          </a-form-item>
-          <a-form-item class="filter-form-actions">
-            <a-space>
-              <a-button type="primary" @click="handleSearch">查询</a-button>
-              <a-button @click="handleReset">重置</a-button>
-            </a-space>
-          </a-form-item>
-        </a-form>
-      </div>
-    </a-card>
-
-    <a-card class="table-card" :bordered="true">
+    <div class="release-template-table-section">
       <a-table
         row-key="id"
+        class="release-template-table"
         :columns="columns"
         :data-source="dataSource"
         :loading="loading"
         :pagination="false"
-        :scroll="{ x: 1380 }"
+        :scroll="{ x: 980 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'name'">
@@ -2142,17 +2280,26 @@ onMounted(async () => {
               {{ templateBindingWarnings[record.id] }}
             </div>
           </template>
-          <template v-if="column.key === 'status'">
+          <template v-else-if="column.key === 'binding_name'">
+            <div v-if="templateExecutionUnits(record).length" class="template-binding-pill" :aria-label="`执行单元：${templateExecutionSummary(record)}`">
+              <span
+                v-for="unit in templateExecutionUnits(record)"
+                :key="`${record.id}-${unit.key}`"
+                class="template-binding-pill-segment"
+                :class="`template-binding-pill-segment--${unit.key}`"
+              >
+                <DeploymentUnitOutlined v-if="unit.key === 'ci'" />
+                <RocketOutlined v-else-if="unit.key === 'cd'" />
+                <span>{{ unit.label }}</span>
+              </span>
+            </div>
+            <span v-else class="template-binding-text">{{ templateExecutionSummary(record) }}</span>
+          </template>
+          <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ record.status }}</a-tag>
           </template>
-          <template v-else-if="column.key === 'binding_type'">
-            {{ record.binding_type || '-' }}
-          </template>
-          <template v-else-if="column.key === 'updated_at'">
-            {{ formatTime(record.updated_at) }}
-          </template>
           <template v-else-if="column.key === 'actions'">
-            <a-space>
+            <a-space v-if="canManageTemplate">
               <a-button type="link" size="small" @click="openEditModal(record)">编辑</a-button>
               <a-popconfirm
                 title="确认删除当前发布模板吗？"
@@ -2182,21 +2329,30 @@ onMounted(async () => {
           @change="handlePageChange"
         />
       </div>
-    </a-card>
+    </div>
 
     <a-modal
       :open="modalVisible"
-      :confirm-loading="submitting"
-      :title="modalTitle"
-      :width="980"
+      :width="760"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="handleTemplateEditorAfterClose"
+      :mask-style="templateEditorMaskStyle"
+      :wrap-props="templateEditorWrapProps"
       wrap-class-name="template-editor-modal-wrap"
-      ok-text="保存"
-      cancel-text="取消"
-      @ok="submitForm"
       @cancel="closeModal"
     >
+      <template #title>
+        <div class="template-editor-modal-titlebar">
+          <span class="template-editor-modal-title-text">{{ modalTitle }}</span>
+          <a-button class="application-toolbar-action-btn template-editor-modal-save-btn" :loading="submitting" @click="submitForm">
+            保存
+          </a-button>
+        </div>
+      </template>
       <a-spin :spinning="modalLoading">
-        <a-form ref="formRef" :model="formState" layout="vertical">
+        <a-form ref="formRef" :model="formState" layout="vertical" :required-mark="false">
         <a-card class="scope-card scope-card-base" :bordered="false">
           <a-row :gutter="16">
             <a-col :span="12">
@@ -2235,8 +2391,28 @@ onMounted(async () => {
 
         <a-card class="scope-card scope-card-base" :bordered="false">
           <div class="template-param-config-header">
-            <div class="template-param-config-title">审批配置</div>
-            <div class="template-param-config-subtitle">按模板决定当前发布是否必须先走审批流。审批通过后，发布单才允许进入执行阶段。</div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div class="template-param-config-title">审批配置</div>
+              <a-popover
+                trigger="click"
+                placement="rightTop"
+                overlay-class-name="release-tip-popover"
+              >
+                <template #content>
+                  <div class="release-tip-content">
+                    当前模板启用<strong>{{ formState.approval_mode === 'all' ? '会签' : '或签' }}</strong>：{{ formState.approval_mode === 'all' ? '所有审批人都通过后，发布单才会进入已批准状态' : '任一审批人通过后，发布单即可进入已批准状态' }}
+                  </div>
+                </template>
+                <button
+                  class="release-tip-trigger release-tip-trigger-info"
+                  type="button"
+                  aria-label="查看审批方式说明"
+                >
+                  <ExclamationCircleOutlined />
+                </button>
+              </a-popover>
+            </div>
+            <div class="template-param-config-subtitle">按模板决定当前发布是否必须先走审批流审批通过后，发布单才允许进入执行阶段</div>
           </div>
           <a-row :gutter="16">
             <a-col :xs="24" :md="8">
@@ -2268,24 +2444,33 @@ onMounted(async () => {
               </a-form-item>
             </a-col>
           </a-row>
-          <a-alert
-            v-if="formState.approval_enabled"
-            class="scope-alert"
-            type="info"
-            show-icon
-            :message="formState.approval_mode === 'all' ? '当前模板启用会签：所有审批人都通过后，发布单才会进入已批准状态。' : '当前模板启用或签：任一审批人通过后，发布单即可进入已批准状态。'"
-          />
         </a-card>
 
         <a-row :gutter="16">
           <a-col :xs="24" :lg="12">
             <a-card class="scope-card" :bordered="true">
-              <template #title>{{ scopeTitles.ci }}</template>
+              <template #title>
+                {{ scopeTitles.ci }}
+                <a-popover
+                  trigger="click"
+                  placement="rightTop"
+                  overlay-class-name="release-tip-popover"
+                >
+                  <template #content>
+                    <div class="release-tip-content">{{ scopeDescriptions.ci }}</div>
+                  </template>
+                  <button
+                    class="release-tip-trigger release-tip-trigger-info"
+                    type="button"
+                    aria-label="查看 CI 说明"
+                  >
+                    <ExclamationCircleOutlined />
+                  </button>
+                </a-popover>
+              </template>
               <template #extra>
                 <a-switch :checked="scopeStates.ci.enabled" @change="(checked: boolean) => handleScopeEnabledChange('ci', checked)" />
               </template>
-
-              <a-alert class="scope-alert" type="info" show-icon :message="scopeDescriptions.ci" />
 
               <a-form-item label="CI 绑定管线" required>
                 <a-select
@@ -2346,7 +2531,7 @@ onMounted(async () => {
               <div v-if="selectedScopeParamDefs('ci').length" class="template-param-config-panel">
                 <div class="template-param-config-header">
                   <div class="template-param-config-title">发布基础字段与 CI 管线字段映射</div>
-                  <div class="template-param-config-subtitle">已选择的平台标准字段可在发布时填写、写死固定值，或直接映射发布基础字段。</div>
+                  <div class="template-param-config-subtitle">已选择的平台标准字段可在发布时填写、写死固定值，或直接映射发布基础字段</div>
                 </div>
                 <div
                   v-for="item in selectedScopeParamDefs('ci')"
@@ -2362,8 +2547,8 @@ onMounted(async () => {
                       {{ resolveTemplateParamSourceLabel('ci', getTemplateParamConfig('ci', item.id)) }}
                     </a-tag>
                   </div>
-                  <a-row :gutter="12">
-                    <a-col :span="10">
+                  <a-row :gutter="[12, 12]" class="template-param-config-grid">
+                    <a-col class="template-param-source-col" :span="24">
                       <a-form-item label="取值方式" class="template-param-inline-item">
                         <a-segmented
                           :value="getTemplateParamConfig('ci', item.id).value_source"
@@ -2376,7 +2561,11 @@ onMounted(async () => {
                         />
                       </a-form-item>
                     </a-col>
-                    <a-col v-if="getTemplateParamConfig('ci', item.id).value_source === 'fixed'" :span="14">
+                    <a-col
+                      v-if="getTemplateParamConfig('ci', item.id).value_source === 'fixed'"
+                      class="template-param-value-col"
+                      :span="24"
+                    >
                       <a-form-item label="固定值" class="template-param-inline-item">
                         <a-input
                           :value="getTemplateParamConfig('ci', item.id).fixed_value"
@@ -2387,7 +2576,8 @@ onMounted(async () => {
                     </a-col>
                     <a-col
                       v-else-if="getTemplateParamConfig('ci', item.id).value_source === 'builtin'"
-                      :span="14"
+                      class="template-param-value-col"
+                      :span="24"
                     >
                       <a-form-item label="发布基础字段" class="template-param-inline-item">
                         <a-select
@@ -2409,12 +2599,28 @@ onMounted(async () => {
 
           <a-col :xs="24" :lg="12">
             <a-card class="scope-card" :bordered="true">
-              <template #title>{{ scopeTitles.cd }}</template>
+              <template #title>
+                {{ scopeTitles.cd }}
+                <a-popover
+                  trigger="click"
+                  placement="rightTop"
+                  overlay-class-name="release-tip-popover"
+                >
+                  <template #content>
+                    <div class="release-tip-content">{{ scopeDescriptions.cd }}</div>
+                  </template>
+                  <button
+                    class="release-tip-trigger release-tip-trigger-info"
+                    type="button"
+                    aria-label="查看 CD 说明"
+                  >
+                    <ExclamationCircleOutlined />
+                  </button>
+                </a-popover>
+              </template>
               <template #extra>
                 <a-switch :checked="scopeStates.cd.enabled" @change="(checked: boolean) => handleScopeEnabledChange('cd', checked)" />
               </template>
-
-              <a-alert class="scope-alert" type="info" show-icon :message="scopeDescriptions.cd" />
 
               <a-form-item label="CD 类型">
                 <a-segmented
@@ -2503,7 +2709,7 @@ onMounted(async () => {
                 <div class="template-param-config-header">
                   <div class="template-param-config-title">发布基础字段与 CD 管线字段映射</div>
                   <div class="template-param-config-subtitle">
-                    CD 为管线时，参数可配置固定值，或沿用 CI 标准字段、发布基础字段。CD 自填字段在这里作为普通标准字段使用。
+                    CD 为管线时，参数可配置固定值，或沿用 CI 标准字段、发布基础字段CD 自填字段在这里作为普通标准字段使用
                   </div>
                 </div>
                 <div
@@ -2520,8 +2726,8 @@ onMounted(async () => {
                       {{ resolveTemplateParamSourceLabel('cd', getTemplateParamConfig('cd', item.id)) }}
                     </a-tag>
                   </div>
-                  <a-row :gutter="12">
-                    <a-col :span="10">
+                  <a-row :gutter="[12, 12]" class="template-param-config-grid">
+                    <a-col class="template-param-source-col" :span="24">
                       <a-form-item label="取值方式" class="template-param-inline-item">
                         <a-segmented
                           :value="getTemplateParamConfig('cd', item.id).value_source"
@@ -2535,7 +2741,11 @@ onMounted(async () => {
                         />
                       </a-form-item>
                     </a-col>
-                    <a-col v-if="getTemplateParamConfig('cd', item.id).value_source === 'fixed'" :span="14">
+                    <a-col
+                      v-if="getTemplateParamConfig('cd', item.id).value_source === 'fixed'"
+                      class="template-param-value-col"
+                      :span="24"
+                    >
                       <a-form-item label="固定值" class="template-param-inline-item">
                         <a-input
                           :value="getTemplateParamConfig('cd', item.id).fixed_value"
@@ -2546,7 +2756,8 @@ onMounted(async () => {
                     </a-col>
                     <a-col
                       v-else-if="['ci_param', 'builtin'].includes(getTemplateParamConfig('cd', item.id).value_source)"
-                      :span="14"
+                      class="template-param-value-col"
+                      :span="24"
                     >
                       <a-form-item :label="getTemplateParamConfig('cd', item.id).value_source === 'ci_param' ? 'CI 来源字段' : '发布基础字段'" class="template-param-inline-item">
                         <a-select
@@ -2567,35 +2778,49 @@ onMounted(async () => {
               <div v-if="isCDUsingArgoCD()" class="gitops-rule-panel">
                 <a-form-item label="GitOps 类型" class="gitops-type-item">
                   <a-segmented
-                    :value="gitOpsType"
+                    v-model:value="gitOpsType"
                     :options="[
                       { label: 'Kustomize', value: 'kustomize' },
                       { label: 'Helm', value: 'helm' },
                     ]"
-                    @change="(value: string | number) => handleGitOpsTypeChange(String(value) as ReleaseTemplateGitOpsType)"
                   />
                 </a-form-item>
 
                 <a-result
                   v-if="isUnsupportedKustomizeGitOps()"
                   class="gitops-unsupported-result"
-                  status="warning"
-                  title="Kustomize 暂不支持"
-                  sub-title="当前模板页暂不支持 Kustomize 规则配置，请先切换到 Helm。"
+                  status="info"
+                  title="Kustomize 模式正在开发中"
+                  sub-title="当前请先使用 Helm 模式配置 GitOps 规则，Kustomize 支持即将上线"
                 />
 
-                <template v-else>
+                <template v-if="!isUnsupportedKustomizeGitOps()">
+                <a-alert
+                  v-if="gitopsScanPathExists === false"
+                  class="gitops-kustomize-note"
+                  type="warning"
+                  show-icon
+                  message="GitOps 读取目录不存在"
+                >
+                  <template #description>
+                    <div>
+                      <p style="margin:0 0 4px"><strong>路径：</strong><code>{{ gitopsScanPathTemplate }}</code></p>
+                      <p style="margin:0">请检查系统设置中的 GitOps 读取目录配置，或确认 GitOps 仓库 master 分支中该目录已创建</p>
+                    </div>
+                  </template>
+                </a-alert>
+
                 <div class="gitops-rule-header">
                   <div>
                     <div class="gitops-rule-title">GitOps 替换规则</div>
                     <div class="gitops-rule-subtitle">
                       {{
                         isHelmGitOps()
-                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
-                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段。'
+                          ? '先选可引用的标准字段，再直接下拉选择平台专用 values 文件中的路径；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段'
+                          : '先选可引用的标准字段，再直接下拉选择目标文件、资源和字段；支持 CI 已勾选字段、发布基础字段，以及只在 CD 阶段填写固定值的 CD 自填字段'
                       }}
                     </div>
-                    <div class="gitops-rule-note">候选路径统一从 GitOps 仓库 master 分支读取，作为模板配置基线；实际发布仍按应用命中的目标分支执行。</div>
+                    <div class="gitops-rule-note">候选路径统一从 GitOps 仓库 master 分支读取，作为模板配置基线；实际发布仍按应用命中的目标分支执行</div>
                   </div>
                   <a-tag class="dashboard-chip dashboard-chip-running">{{ gitopsRules.length }} 条规则</a-tag>
                 </div>
@@ -2613,8 +2838,8 @@ onMounted(async () => {
                 <a-empty
                   v-if="!loadingGitOpsFieldCandidates && ((isHelmGitOps() && platformValuesCandidates().length === 0) || (!isHelmGitOps() && gitOpsFieldCandidates.length === 0))"
                   :description="isHelmGitOps()
-                    ? '当前应用还没有扫描到平台专用的 Helm values 路径，请先确认 GitOps 目录下已准备好 apps/helm/platform.values-{env}.yaml。'
-                    : '当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好。'"
+                    ? '当前应用还没有扫描到平台专用的 Helm values 路径，请先确认 GitOps 目录下已准备好 apps/helm/platform.values-{env}.yaml'
+                    : '当前应用还没有扫描到可替换的 YAML 字段，请先确认 GitOps 目录与 YAML 文件是否已准备好'"
                 />
 
                 <a-collapse v-model:activeKey="gitopsRuleActiveKeys" class="gitops-rule-collapse" accordion>
@@ -2758,7 +2983,27 @@ onMounted(async () => {
         </a-row>
 
         <a-card class="scope-card hook-config-card" :bordered="true">
-          <template #title>发布后 Hook</template>
+          <template #title>
+            发布后 Hook
+            <a-popover
+              trigger="click"
+              placement="rightTop"
+              overlay-class-name="release-tip-popover"
+            >
+              <template #content>
+                <div class="release-tip-content">
+                  发布模板中的 Hook 可配置在构建完成或发布完成后串行执行，通知 Hook 会自动使用发布过程中的标准平台 Key 和内置字段渲染消息
+                </div>
+              </template>
+              <button
+                class="release-tip-trigger release-tip-trigger-info"
+                type="button"
+                aria-label="查看发布后 Hook 说明"
+              >
+                <ExclamationCircleOutlined />
+              </button>
+            </a-popover>
+          </template>
           <template #extra>
             <a-space>
               <a-tag class="dashboard-chip dashboard-chip-running">多阶段执行</a-tag>
@@ -2768,13 +3013,6 @@ onMounted(async () => {
               </a-button>
             </a-space>
           </template>
-
-          <a-alert
-            class="scope-alert"
-            type="info"
-            show-icon
-            message="发布模板中的 Hook 可配置在构建完成或发布完成后串行执行。通知 Hook 会自动使用发布过程中的标准平台 Key 和内置字段渲染消息。"
-          />
 
           <div class="hook-template-summary-grid">
             <div v-for="item in hookSummaryItems" :key="item.label" class="hook-template-summary-item">
@@ -2787,7 +3025,7 @@ onMounted(async () => {
             <div>
               <div class="hook-template-capability-title">Hook 配置适配预览</div>
               <div class="hook-template-capability-subtitle">
-                点击新增 Hook，先选择类型，再补充表单字段。Agent 类 Hook 只需选择<strong>临时任务名称</strong>；任务在「Agent 任务管理」里绑定 Agent 后，发布时会自动向各 Agent 派发。
+                点击新增 Hook，先选择类型，再补充表单字段Agent 类 Hook 只需选择<strong>临时任务名称</strong>；任务在「Agent 任务管理」里绑定 Agent 后，发布时会自动向各 Agent 派发
               </div>
             </div>
             <a-tag class="dashboard-chip dashboard-chip-neutral">详情页直接看进度</a-tag>
@@ -2808,6 +3046,16 @@ onMounted(async () => {
                   </div>
                 </div>
                 <a-space>
+                  <span class="hook-template-order-actions">
+                    <a-button size="small" :disabled="index === 0" @click="moveHook(index, -1)">
+                      <template #icon><ArrowUpOutlined /></template>
+                      上移
+                    </a-button>
+                    <a-button size="small" :disabled="index === templateHooks.length - 1" @click="moveHook(index, 1)">
+                      <template #icon><ArrowDownOutlined /></template>
+                      下移
+                    </a-button>
+                  </span>
                   <a-tag class="dashboard-chip dashboard-chip-neutral">{{ hookTypeLabel(item.hook_type) }}</a-tag>
                   <a-button type="link" danger size="small" @click="removeHook(item.local_id)">删除</a-button>
                 </a-space>
@@ -2897,10 +3145,10 @@ onMounted(async () => {
                 </a-form-item>
 
                 <div v-if="item.hook_type === 'agent_task' && !agentTaskTemplateOptions.length" class="hook-template-capability-note">
-                  请先在「Agent 任务管理」中创建<strong>临时任务</strong>，并在该任务上绑定一台或多台 Agent。模板里只需选任务名称；发布触发 Hook 时会按绑定关系向各 Agent 派发，无需为每个 Agent 单独加 Hook。
+                  请先在「Agent 任务管理」中创建<strong>临时任务</strong>，并在该任务上绑定一台或多台 Agent模板里只需选任务名称；发布触发 Hook 时会按绑定关系向各 Agent 派发，无需为每个 Agent 单独加 Hook
                 </div>
                 <div v-if="item.hook_type === 'notification_hook' && !notificationHookOptions.length" class="hook-template-capability-note">
-                  当前还没有可引用的通知 Hook，请先到系统管理 / 通知模块中创建通知源、Markdown 模板和通知 Hook。
+                  当前还没有可引用的通知 Hook，请先到系统管理 / 通知模块中创建通知源、Markdown 模板和通知 Hook
                 </div>
 
                 <a-descriptions v-if="item.hook_type === 'agent_task' && findAgentTaskTemplate(item.target_id)" :column="1" size="small" bordered class="hook-template-description">
@@ -3010,7 +3258,32 @@ onMounted(async () => {
           @cancel="hookTypePickerVisible = false"
         >
           <a-form layout="vertical" class="hook-type-picker-form">
-            <a-form-item label="Hook 类型">
+            <a-form-item name="hookType">
+              <template #label>
+                Hook 类型
+                <a-popover
+                  trigger="click"
+                  placement="rightTop"
+                  overlay-class-name="release-tip-popover"
+                >
+                  <template #content>
+                    <div class="release-tip-content">
+                      {{ pendingHookType === 'agent_task'
+                        ? '新增后会补充 Agent 任务名称、触发条件、失败策略等字段'
+                        : pendingHookType === 'notification_hook'
+                          ? '新增后会选择通知 Hook，通知 Hook 由通知源和 Markdown 模板组成'
+                          : '新增后会补充 Webhook URL、请求方法、Body 模板等字段' }}
+                    </div>
+                  </template>
+                  <button
+                    class="release-tip-trigger release-tip-trigger-info"
+                    type="button"
+                    aria-label="查看 Hook 类型说明"
+                  >
+                    <ExclamationCircleOutlined />
+                  </button>
+                </a-popover>
+              </template>
               <a-segmented
                 v-model:value="pendingHookType"
                 :options="[
@@ -3020,15 +3293,6 @@ onMounted(async () => {
                 ]"
               />
             </a-form-item>
-            <a-alert
-              type="info"
-              show-icon
-              :message="pendingHookType === 'agent_task'
-                ? '新增后会补充 Agent 任务名称、触发条件、失败策略等字段。'
-                : pendingHookType === 'notification_hook'
-                  ? '新增后会选择通知 Hook，通知 Hook 由通知源和 Markdown 模板组成。'
-                  : '新增后会补充 Webhook URL、请求方法、Body 模板等字段。'"
-            />
           </a-form>
         </a-modal>
         </a-form>
@@ -3045,42 +3309,228 @@ onMounted(async () => {
   gap: 20px;
 }
 
-.filter-card,
-.table-card,
+.release-template-page-header {
+  flex-wrap: wrap;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.release-template-header-actions {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: min(100%, 520px);
+}
+
+:deep(.release-template-toolbar-select.ant-select) {
+  min-width: 138px;
+}
+
+:deep(.release-template-toolbar-select-wide.ant-select) {
+  min-width: min(280px, 100%);
+}
+
+:deep(.release-template-toolbar-select .ant-select-selector) {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  min-height: 42px;
+  border-radius: 16px !important;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.release-template-toolbar-select .ant-select-selection-item),
+:deep(.release-template-toolbar-select .ant-select-arrow) {
+  color: #1e3a8a;
+  font-weight: 650;
+}
+
+:deep(.release-template-toolbar-select .ant-select-selection-item) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  line-height: 1 !important;
+}
+
+:deep(.release-template-toolbar-select .ant-select-selection-placeholder) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  color: rgba(30, 58, 138, 0.38) !important;
+  font-weight: 600;
+  line-height: 1 !important;
+}
+
+:deep(.release-template-toolbar-select .ant-select-selection-search) {
+  inset-block-start: 0 !important;
+  inset-block-end: 0 !important;
+}
+
+:deep(.release-template-toolbar-select .ant-select-selection-search-input) {
+  height: 100% !important;
+  color: #1e3a8a;
+  font-weight: 650;
+  line-height: 42px !important;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn),
+:deep(.release-template-toolbar-query-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #0f172a !important;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-action-btn.ant-btn:focus-visible),
+:deep(.release-template-toolbar-query-btn.ant-btn:hover),
+:deep(.release-template-toolbar-query-btn.ant-btn:focus),
+:deep(.release-template-toolbar-query-btn.ant-btn:focus-visible) {
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  background: rgba(239, 246, 255, 0.78) !important;
+  color: #0f172a !important;
+}
+
+.release-template-table-section {
+  margin-top: 24px;
+}
+
+.release-template-table :deep(.ant-table) {
+  background: transparent;
+}
+
+.release-template-table :deep(.ant-table-container) {
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.release-template-table :deep(.ant-table-thead > tr > th) {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.18);
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.release-template-table :deep(.ant-table-thead > tr > th::before) {
+  display: none;
+}
+
+.release-template-table :deep(.ant-table-tbody > tr > td) {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.72);
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--color-text-main);
+}
+
+.release-template-table :deep(.ant-table-tbody > tr:hover > td) {
+  background: rgba(248, 250, 252, 0.92) !important;
+}
+
+.release-template-table :deep(.ant-table-cell-fix-right) {
+  background: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: -12px 0 24px rgba(15, 23, 42, 0.04);
+}
+
+.release-template-table :deep(.ant-table-thead .ant-table-cell-fix-right) {
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  box-shadow: none;
+}
+
 .scope-card {
   border-radius: var(--radius-xl);
 }
 
 .template-editor-modal-wrap :deep(.ant-modal-content) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
   border-radius: 24px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.68);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
   box-shadow:
-    0 24px 60px rgba(15, 23, 42, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.78);
+    0 32px 90px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-content)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .template-editor-modal-wrap :deep(.ant-modal-header) {
-  margin-bottom: 12px;
+  position: relative;
+  z-index: 1;
+  margin-bottom: 10px;
   border-bottom: 1px solid rgba(226, 232, 240, 0.92);
   background: transparent;
 }
 
-.template-editor-modal-wrap :deep(.ant-modal-title) {
-  color: var(--color-text-main);
+.template-editor-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.template-editor-modal-title-text {
+  min-width: 0;
+  color: #0f172a;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: -0.02em;
 }
 
-.template-editor-modal-wrap :deep(.ant-modal-body) {
-  padding-top: 8px;
+.template-editor-modal-save-btn.ant-btn {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: normal;
 }
 
-.template-editor-modal-wrap :deep(.ant-modal-footer) {
-  border-top: 1px solid rgba(226, 232, 240, 0.92);
-  background: transparent;
+.template-editor-modal-wrap :deep(.ant-modal-title) {
+  color: #0f172a;
+}
+
+.template-editor-modal-wrap :deep(.ant-modal-body) {
+  position: relative;
+  z-index: 1;
+  padding-top: 10px;
 }
 
 .hook-type-picker-modal-wrap :deep(.ant-modal) {
@@ -3108,30 +3558,6 @@ onMounted(async () => {
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.78),
     0 12px 28px rgba(15, 23, 42, 0.04);
-}
-
-.filter-form {
-  display: flex;
-  gap: 8px;
-}
-
-.filter-select {
-  width: 140px;
-}
-
-.filter-select-wide {
-  width: 260px;
-}
-
-.release-page-guide-collapse {
-  margin-bottom: 16px;
-  border-radius: var(--radius-xl);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.99) 0%, rgba(248, 250, 252, 0.97) 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.78),
-    0 10px 26px rgba(15, 23, 42, 0.03);
 }
 
 .pagination-area {
@@ -3235,19 +3661,16 @@ onMounted(async () => {
   margin-bottom: 12px;
 }
 
-.argocd-info-panel,
-.argocd-install-panel {
+.argocd-info-panel {
   padding: 4px 0 0;
 }
 
-.release-page-guide-collapse :deep(.ant-collapse-header),
 .argocd-info-collapse :deep(.ant-collapse-header),
 .gitops-rule-collapse :deep(.ant-collapse-header) {
   align-items: flex-start !important;
   background: transparent !important;
 }
 
-.release-page-guide-collapse :deep(.ant-collapse-content-box),
 .argocd-info-collapse :deep(.ant-collapse-content-box),
 .gitops-rule-collapse :deep(.ant-collapse-content-box) {
   padding-top: 0 !important;
@@ -3261,46 +3684,6 @@ onMounted(async () => {
   font-size: 13px;
   line-height: 1.8;
   color: var(--color-text-soft);
-}
-
-.argocd-install-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.argocd-install-title {
-  margin-bottom: 4px;
-  font-weight: 600;
-  color: var(--color-dashboard-800);
-}
-
-.argocd-install-subtitle {
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--color-text-soft);
-}
-
-.argocd-install-code {
-  margin: 0;
-  padding: 14px 16px;
-  border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background:
-    linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(241, 245, 249, 0.96) 100%);
-  color: #0f172a;
-  overflow-x: auto;
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.argocd-install-panel {
-  padding: 12px 14px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 12px;
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.99) 0%, rgba(255, 255, 255, 0.97) 100%);
 }
 
 .scope-table-wrapper {
@@ -3387,6 +3770,33 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.template-param-config-grid {
+  row-gap: 12px;
+}
+
+.template-param-source-col,
+.template-param-value-col {
+  min-width: 0;
+}
+
+.template-param-config-item :deep(.ant-segmented) {
+  max-width: 100%;
+}
+
+.template-param-config-item :deep(.ant-segmented-group) {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.template-param-config-item :deep(.ant-segmented-item) {
+  flex: 0 0 auto;
+}
+
+.template-param-config-item :deep(.ant-input),
+.template-param-config-item :deep(.ant-select) {
+  width: 100%;
 }
 
 .template-param-config-item-title {
@@ -3493,6 +3903,28 @@ onMounted(async () => {
   color: var(--color-text-soft);
 }
 
+.hook-template-order-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.hook-template-order-actions :deep(.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(255, 255, 255, 0.7);
+  color: #475569;
+  font-weight: 600;
+}
+
+.hook-template-order-actions :deep(.ant-btn:not(:disabled):hover),
+.hook-template-order-actions :deep(.ant-btn:not(:disabled):focus) {
+  border-color: rgba(59, 130, 246, 0.34);
+  background: rgba(239, 246, 255, 0.9);
+  color: #1d4ed8;
+}
+
 .hook-template-variable-row {
   margin: 0;
   display: flex;
@@ -3565,6 +3997,11 @@ onMounted(async () => {
 
 .gitops-unsupported-result:deep(.ant-result-subtitle) {
   color: #7c5e10;
+}
+
+.gitops-kustomize-note {
+  margin-bottom: 16px;
+  border-radius: 0;
 }
 
 .gitops-rule-header {
@@ -3686,6 +4123,51 @@ onMounted(async () => {
   font-size: 12px;
   color: var(--color-warning-strong, #b45309);
   line-height: 1.5;
+}
+
+.template-binding-pill {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  border-radius: 999px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    0 6px 14px rgba(15, 23, 42, 0.04);
+}
+
+.template-binding-pill-segment {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.template-binding-pill-segment + .template-binding-pill-segment {
+  border-left: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.template-binding-pill-segment--ci {
+  color: #1d4ed8;
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+}
+
+.template-binding-pill-segment--cd {
+  color: #c2410c;
+  background: linear-gradient(180deg, #fff7ed 0%, #ffedd5 100%);
+}
+
+.template-binding-pill-segment :deep(.anticon) {
+  font-size: 12px;
+}
+
+.template-binding-text {
+  color: var(--color-text-main);
+  font-weight: 600;
 }
 
 @media (max-width: 992px) {

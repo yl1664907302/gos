@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { SaveOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import type { TableColumnsType } from 'ant-design-vue'
 import { computed, onMounted, ref } from 'vue'
 import { listApplicationOptions } from '../../api/application'
 import { getReleaseSettings } from '../../api/system'
@@ -85,11 +84,6 @@ const groupedPermissions = computed(() => {
     items: (groups.get(module) || []).slice().sort((a, b) => a.code.localeCompare(b.code)),
   }))
 })
-
-const applicationPermissionColumns: TableColumnsType<ApplicationPermissionRow> = [
-  { title: '应用', dataIndex: 'application_name', key: 'application_name', width: 360 },
-  { title: '允许发布环境', key: 'env_codes', width: 420 },
-]
 
 const applicationPermissionRows = computed<ApplicationPermissionRow[]>(() =>
   applicationOptions.value.map((item) => ({
@@ -490,83 +484,100 @@ onMounted(async () => {
   <div class="page-wrapper">
     <div class="page-header-card page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">权限授权</h2>
-        <p class="page-subtitle">按用户授权模块权限，并按发布环境细化应用发布权限</p>
+        <h2 class="page-title">权限</h2>
       </div>
-      <a-space>
+      <div class="page-header-actions">
         <a-select
           v-model:value="selectedUserID"
-          class="user-select"
+          class="permission-toolbar-user-select"
           show-search
           allow-clear
           option-filter-prop="label"
           :loading="usersLoading"
           :options="userOptions"
-          placeholder="请选择用户"
+          placeholder="选择授权用户"
           @change="handleUserChange"
         />
-        <a-button type="primary" :loading="savingPermissions" @click="handleSavePermissions">
+        <a-button class="permission-toolbar-action-btn permission-toolbar-action-btn--primary" :loading="savingPermissions" @click="handleSavePermissions">
           <template #icon>
             <SaveOutlined />
           </template>
           保存权限设置
         </a-button>
-      </a-space>
+      </div>
     </div>
 
-    <a-card class="permission-card" :bordered="true" :loading="permissionsLoading">
-      <a-empty v-if="!selectedUserID" description="请先选择用户" />
-      <div v-else class="permission-groups">
-        <div v-for="group in groupedPermissions" :key="group.module" class="group-card">
-          <div class="group-title">{{ moduleLabel(group.module) }}</div>
-          <a-row :gutter="[12, 12]">
-            <a-col v-for="item in group.items" :key="item.code" :xs="24" :md="12">
-              <a-checkbox
-                :checked="isPermissionChecked(item.code)"
-                @change="handlePermissionToggle(item.code, Boolean($event?.target?.checked))"
-              >
-                {{ item.name }}
-                <span class="permission-code">({{ item.code }})</span>
-              </a-checkbox>
-            </a-col>
-          </a-row>
+    <section class="permission-content-panel">
+      <a-spin :spinning="permissionsLoading">
+        <a-empty v-if="!selectedUserID" description="请先选择用户" />
+        <div v-else class="permission-content">
+          <section class="permission-section permission-section--global">
+            <div class="permission-section-head">
+              <div>
+                <div class="permission-section-eyebrow">GLOBAL</div>
+              </div>
+              <span class="permission-section-count">{{ checkedPermissionCodes.length }} 项已选</span>
+            </div>
+            <div class="permission-matrix">
+              <article v-for="group in groupedPermissions" :key="group.module" class="permission-module-row">
+                <div class="permission-module-cell">
+                  <span class="permission-module-name">{{ moduleLabel(group.module) }}</span>
+                </div>
+                <div class="permission-actions-grid">
+                  <a-checkbox
+                    v-for="item in group.items"
+                    :key="item.code"
+                    class="permission-check-pill"
+                    :checked="isPermissionChecked(item.code)"
+                    @change="handlePermissionToggle(item.code, Boolean($event?.target?.checked))"
+                  >
+                    <span class="permission-name">{{ item.name }}</span>
+                    <span class="permission-code">{{ item.code }}</span>
+                  </a-checkbox>
+                </div>
+              </article>
+            </div>
+          </section>
+
+          <section class="permission-section permission-section--applications">
+            <div class="permission-section-head">
+              <div>
+                <div class="permission-section-eyebrow">APPLICATION</div>
+              </div>
+              <span class="permission-section-count">{{ applicationPermissionRows.length }} 个应用</span>
+            </div>
+            <div class="permission-app-permission-list">
+              <article v-for="record in applicationPermissionRows" :key="record.application_id" class="permission-app-row">
+                <div class="permission-app-meta">
+                  <span class="permission-app-name">{{ record.application_name }}</span>
+                </div>
+                <a-select
+                  mode="multiple"
+                  class="app-env-select permission-app-env-select"
+                  allow-clear
+                  :options="releaseEnvOptions"
+                  :value="selectedApplicationEnvCodes(record.application_id)"
+                  placeholder="选择允许发布的环境"
+                  @change="handleApplicationReleaseChange(record.application_id, $event as string[])"
+                />
+              </article>
+            </div>
+          </section>
         </div>
-      </div>
-    </a-card>
-
-    <a-card class="app-release-permission-card" :bordered="true">
-      <template #title>应用权限</template>
-
-      <a-empty v-if="!selectedUserID" description="请先选择用户" />
-      <a-table
-        v-else
-        row-key="application_id"
-        :columns="applicationPermissionColumns"
-        :data-source="applicationPermissionRows"
-        :pagination="false"
-        :scroll="{ x: 620 }"
-      >
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'env_codes'">
-            <a-select
-              mode="multiple"
-              size="small"
-              class="app-env-select"
-              allow-clear
-              :options="releaseEnvOptions"
-              :value="selectedApplicationEnvCodes(record.application_id)"
-              placeholder="请选择允许发布的环境"
-              @change="handleApplicationReleaseChange(record.application_id, $event as string[])"
-            />
-          </template>
-        </template>
-      </a-table>
-      <p class="save-tip">提示：可选环境始终跟随系统设置里的发布环境配置，变更后这里会自动收敛并按最新环境保存。</p>
-    </a-card>
+      </a-spin>
+    </section>
   </div>
 </template>
 
 <style scoped>
+/* ---- page header (transparent) ---- */
+.page-header-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
 .page-header {
   display: flex;
   align-items: center;
@@ -574,51 +585,295 @@ onMounted(async () => {
   gap: 20px;
 }
 
-.user-select {
-  width: 320px;
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
 }
 
-.permission-card,
-.app-release-permission-card {
-  border-radius: var(--radius-xl);
+.permission-toolbar-user-select {
+  width: 280px;
+  flex: none;
 }
 
-.permission-groups {
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selector) {
+  display: flex;
+  align-items: center;
+  height: 42px !important;
+  min-height: 42px;
+  border-radius: 16px !important;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selection-item),
+:deep(.permission-toolbar-user-select.ant-select .ant-select-arrow) {
+  color: #1e3a8a;
+  font-weight: 650;
+}
+
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selection-item) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  line-height: 1 !important;
+}
+
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selection-placeholder) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  color: rgba(30, 58, 138, 0.38) !important;
+  font-weight: 600;
+  line-height: 1 !important;
+}
+
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selection-search) {
+  inset-block-start: 0 !important;
+  inset-block-end: 0 !important;
+}
+
+:deep(.permission-toolbar-user-select.ant-select .ant-select-selection-search-input) {
+  height: 100% !important;
+  color: #1e3a8a;
+  font-weight: 650;
+  line-height: 42px !important;
+}
+
+:deep(.permission-toolbar-user-select.ant-select-focused .ant-select-selector),
+:deep(.permission-toolbar-user-select.ant-select:hover .ant-select-selector) {
+  border-color: rgba(96, 165, 250, 0.46) !important;
+  background: rgba(255, 255, 255, 0.74) !important;
+}
+
+/* ---- header glass button ---- */
+.permission-toolbar-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+  padding-inline: 14px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.permission-toolbar-action-btn:hover,
+.permission-toolbar-action-btn:focus {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+.permission-toolbar-action-btn--primary {
+  background: linear-gradient(180deg, rgba(241, 247, 255, 0.9), rgba(223, 235, 255, 0.8)) !important;
+  border-color: rgba(147, 197, 253, 0.74) !important;
+  color: #1d4ed8 !important;
+}
+
+.permission-toolbar-action-btn--primary:hover,
+.permission-toolbar-action-btn--primary:focus {
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(231, 241, 255, 0.88)) !important;
+  border-color: rgba(96, 165, 250, 0.66) !important;
+  color: #1e3a8a !important;
+}
+
+.permission-content-panel {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  overflow: visible;
+}
+
+.permission-content {
   display: flex;
   flex-direction: column;
+  gap: 20px;
+}
+
+.permission-section {
+  min-width: 0;
+}
+
+.permission-section + .permission-section {
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  padding-top: 20px;
+}
+
+.permission-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
   gap: 14px;
+  margin-bottom: 14px;
 }
 
-.group-card {
+.permission-section-eyebrow {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.permission-section-count {
+  flex: none;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(255, 255, 255, 0.68);
+  color: #475569;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.permission-matrix,
+.permission-app-permission-list {
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: rgba(255, 255, 255, 0.48);
+  overflow: hidden;
+}
+
+.permission-module-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 18px;
+  padding: 16px;
+}
+
+.permission-module-row + .permission-module-row,
+.permission-app-row + .permission-app-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.permission-module-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+  min-width: 0;
+}
+
+.permission-module-name {
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.permission-actions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+:deep(.permission-check-pill.ant-checkbox-wrapper) {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 48px;
+  margin-inline-start: 0;
+  border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 10px;
-  padding: 14px 16px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+  padding: 10px 12px;
+  transition:
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
 }
 
-.group-title {
-  margin-bottom: 10px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-text-main);
+:deep(.permission-check-pill.ant-checkbox-wrapper:hover) {
+  border-color: rgba(37, 99, 235, 0.28);
+  background: rgba(248, 251, 255, 0.88);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.84),
+    0 10px 22px rgba(15, 23, 42, 0.04);
 }
 
-.permission-checkbox-group {
-  width: 100%;
+:deep(.permission-check-pill .ant-checkbox) {
+  margin-block-start: 2px;
+}
+
+:deep(.permission-check-pill .ant-checkbox + span) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding-inline-start: 0;
+}
+
+.permission-name {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.35;
 }
 
 .permission-code {
-  color: var(--color-text-soft);
+  color: #64748b;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.permission-app-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1fr) minmax(260px, 460px);
+  align-items: center;
+  gap: 16px;
+  padding: 16px;
+}
+
+.permission-app-meta {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.permission-app-name {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-env-select {
   width: 100%;
 }
 
-.save-tip {
-  margin: 12px 0 0;
-  color: var(--color-text-soft);
-  font-size: 12px;
+:deep(.permission-app-env-select.ant-select .ant-select-selector) {
+  min-height: 40px;
+  border-radius: 14px !important;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.66) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+:deep(.permission-app-env-select.ant-select .ant-select-selection-placeholder) {
+  color: rgba(30, 58, 138, 0.36) !important;
+  font-weight: 600;
 }
 
 @media (max-width: 1024px) {
@@ -627,8 +882,28 @@ onMounted(async () => {
     align-items: flex-start;
   }
 
-  .user-select {
-    width: 100%;
+  .page-header-actions {
+    justify-content: flex-start;
   }
+
+  .permission-toolbar-user-select {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .permission-section-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .permission-module-row,
+  .permission-app-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .permission-actions-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
 }
 </style>

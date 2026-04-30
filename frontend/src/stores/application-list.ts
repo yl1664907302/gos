@@ -3,6 +3,7 @@ import type { ApplicationStatus } from '../types/application'
 
 export const useApplicationListStore = defineStore('application-list', {
   state: () => ({
+    keyword: '',
     key: '',
     name: '',
     project_id: '',
@@ -16,6 +17,7 @@ export const useApplicationListStore = defineStore('application-list', {
       this.pageSize = pageSize
     },
     resetFilters() {
+      this.keyword = ''
       this.key = ''
       this.name = ''
       this.project_id = ''

@@ -303,6 +303,69 @@ type DeploySnapshot struct {
 	CreatedAt        time.Time
 }
 
+type AppReleaseStateStatus string
+
+const (
+	AppReleaseStateStatusPendingConfirm AppReleaseStateStatus = "pending_confirm"
+	AppReleaseStateStatusActive         AppReleaseStateStatus = "active"
+	AppReleaseStateStatusSuperseded     AppReleaseStateStatus = "superseded"
+)
+
+func (s AppReleaseStateStatus) Valid() bool {
+	switch s {
+	case AppReleaseStateStatusPendingConfirm, AppReleaseStateStatusActive, AppReleaseStateStatusSuperseded:
+		return true
+	default:
+		return false
+	}
+}
+
+type AppReleaseState struct {
+	ID                 string
+	ReleaseOrderID     string
+	ReleaseOrderNo     string
+	ApplicationID      string
+	ApplicationName    string
+	EnvCode            string
+	OperationType      OperationType
+	TemplateID         string
+	TemplateName       string
+	CDProvider         string
+	GitOpsType         GitOpsType
+	HasCIExecution     bool
+	HasCDExecution     bool
+	GitRef             string
+	ImageTag           string
+	StateStatus        AppReleaseStateStatus
+	IsCurrentLive      bool
+	PreviousStateID    string
+	ConfirmedAt        *time.Time
+	ConfirmedBy        string
+	ParamsSnapshotJSON string
+	ExecutionSnapshotJSON string
+	DeploySnapshotJSON string
+	ResultSnapshotJSON string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type AppReleaseStateSummary struct {
+	ApplicationID          string
+	ApplicationName        string
+	EnvCode                string
+	CurrentStateID         string
+	CurrentReleaseOrderID  string
+	CurrentReleaseOrderNo  string
+	CurrentImageTag        string
+	CurrentConfirmedAt     *time.Time
+	CurrentConfirmedBy     string
+	PreviousStateID        string
+	PreviousReleaseOrderID string
+	PreviousReleaseOrderNo string
+	PreviousImageTag       string
+	PreviousConfirmedAt    *time.Time
+}
+
 type ReleaseOrderParam struct {
 	ID                string
 	ReleaseOrderID    string

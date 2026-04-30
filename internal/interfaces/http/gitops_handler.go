@@ -13,17 +13,19 @@ import (
 )
 
 type GitOpsHandler struct {
-	templateFields   *usecase.QueryGitOpsTemplateFields
-	fieldCandidates  *usecase.QueryGitOpsFieldCandidates
-	valuesCandidates *usecase.QueryGitOpsValuesCandidates
-	instances        *usecase.GitOpsInstanceManager
-	authz            RequestAuthorizer
+	templateFields    *usecase.QueryGitOpsTemplateFields
+	fieldCandidates   *usecase.QueryGitOpsFieldCandidates
+	valuesCandidates  *usecase.QueryGitOpsValuesCandidates
+	scanPathStatus    *usecase.QueryGitOpsScanPathStatus
+	instances         *usecase.GitOpsInstanceManager
+	authz             RequestAuthorizer
 }
 
 func NewGitOpsHandler(
 	templateFields *usecase.QueryGitOpsTemplateFields,
 	fieldCandidates *usecase.QueryGitOpsFieldCandidates,
 	valuesCandidates *usecase.QueryGitOpsValuesCandidates,
+	scanPathStatus *usecase.QueryGitOpsScanPathStatus,
 	instances *usecase.GitOpsInstanceManager,
 	authz RequestAuthorizer,
 ) *GitOpsHandler {
@@ -31,6 +33,7 @@ func NewGitOpsHandler(
 		templateFields:   templateFields,
 		fieldCandidates:  fieldCandidates,
 		valuesCandidates: valuesCandidates,
+		scanPathStatus:   scanPathStatus,
 		instances:        instances,
 		authz:            authz,
 	}
@@ -44,6 +47,7 @@ func (h *GitOpsHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/gitops/template-fields", h.ListTemplateFields)
 	router.GET("/gitops/field-candidates", h.ListFieldCandidates)
 	router.GET("/gitops/values-candidates", h.ListValuesCandidates)
+	router.GET("/gitops/scan-path-status", h.CheckScanPath)
 }
 
 type GitOpsInstanceResponse struct {
@@ -386,4 +390,31 @@ func shortGitOpsCommit(value string) string {
 		return value
 	}
 	return value[:8]
+}
+
+func (h *GitOpsHandler) CheckScanPath(c *gin.Context) {
+	if !ensureAnyPermission(c, h.authz, "component.gitops.view", "release.template.manage") {
+		return
+	}
+	if h.scanPathStatus == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "gitops manager is not configured"})
+		return
+	}
+	applicationID := c.Query("application_id")
+	gitopsType := c.Query("gitops_type")
+	if applicationID == "" || gitopsType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "application_id and gitops_type are required"})
+		return
+	}
+	output, err := h.scanPathStatus.Execute(c.Request.Context(), applicationID, gitopsType)
+	if err != nil {
+		switch {
+		case errors.Is(err, usecase.ErrInvalidInput):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": output})
 }

@@ -8,9 +8,15 @@ export interface ReleaseConcurrencySettings {
   lock_timeout_sec: number
 }
 
+export interface ReleaseGitOpsConfig {
+  helm_scan_path: string
+  kustomize_scan_path: string
+}
+
 export interface ReleaseSettings {
   env_options: string[]
   concurrency: ReleaseConcurrencySettings
+  gitops_config: ReleaseGitOpsConfig
 }
 
 export interface ReleaseSettingsDataResponse {
@@ -20,4 +26,5 @@ export interface ReleaseSettingsDataResponse {
 export interface UpdateReleaseSettingsPayload {
   env_options: string[]
   concurrency: ReleaseConcurrencySettings
+  gitops_config: ReleaseGitOpsConfig
 }

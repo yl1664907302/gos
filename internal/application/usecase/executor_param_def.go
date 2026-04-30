@@ -89,7 +89,8 @@ func (uc *ExecutorParamDefManager) ListByApplication(
 	if applicationID == "" {
 		return nil, 0, ErrInvalidID
 	}
-	if _, err := uc.appRepo.GetByID(ctx, applicationID); err != nil {
+	application, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
 		return nil, 0, err
 	}
 
@@ -102,7 +103,6 @@ func (uc *ExecutorParamDefManager) ListByApplication(
 
 	bindingID = strings.TrimSpace(bindingID)
 	var binding pipelinedomain.PipelineBinding
-	var err error
 	if bindingID != "" {
 		binding, err = uc.pipelineRepo.GetBindingByID(ctx, bindingID)
 		if err != nil {
@@ -149,7 +149,69 @@ func (uc *ExecutorParamDefManager) ListByApplication(
 
 	filter.PipelineID = binding.PipelineID
 	filter.ExecutorType = domain.ExecutorTypeJenkins
-	return uc.ListByPipeline(ctx, filter)
+	items, total, err := uc.ListByPipeline(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	for index := range items {
+		items[index].ApplicationID = application.ID
+		items[index].ApplicationName = application.Name
+		items[index].ApplicationKey = application.Key
+		items[index].BindingType = string(binding.BindingType)
+		items[index].PipelineName = strings.TrimSpace(binding.Name)
+		if items[index].PipelineName == "" {
+			items[index].PipelineName = binding.PipelineID
+		}
+	}
+	return items, total, nil
+}
+
+func (uc *ExecutorParamDefManager) ListByApplications(
+	ctx context.Context,
+	filter domain.ApplicationListFilter,
+) ([]domain.ExecutorParamDef, int64, error) {
+	const (
+		defaultPage     = 1
+		defaultPageSize = 20
+		maxPageSize     = 100
+	)
+
+	filter.Keyword = strings.TrimSpace(filter.Keyword)
+	if filter.BindingType == "" {
+		filter.BindingType = pipelinedomain.BindingTypeCI
+	}
+	if !filter.BindingType.Valid() {
+		return nil, 0, ErrInvalidBindingType
+	}
+	if filter.Status != "" && !filter.Status.Valid() {
+		return nil, 0, ErrInvalidStatus
+	}
+	if filter.Page <= 0 {
+		filter.Page = defaultPage
+	}
+	if filter.PageSize <= 0 {
+		filter.PageSize = defaultPageSize
+	}
+	if filter.PageSize > maxPageSize {
+		filter.PageSize = maxPageSize
+	}
+
+	applicationIDs := make([]string, 0, len(filter.ApplicationIDs))
+	seen := make(map[string]struct{}, len(filter.ApplicationIDs))
+	for _, item := range filter.ApplicationIDs {
+		applicationID := strings.TrimSpace(item)
+		if applicationID == "" {
+			continue
+		}
+		if _, exists := seen[applicationID]; exists {
+			continue
+		}
+		seen[applicationID] = struct{}{}
+		applicationIDs = append(applicationIDs, applicationID)
+	}
+	filter.ApplicationIDs = applicationIDs
+
+	return uc.repo.ListByApplications(ctx, filter)
 }
 
 func (uc *ExecutorParamDefManager) GetByID(ctx context.Context, id string) (domain.ExecutorParamDef, error) {

@@ -11,6 +11,8 @@ type ReleaseSettingsStore interface {
 	SaveEnvOptions(ctx context.Context, values []string) error
 	LoadConcurrencySettings(ctx context.Context) (ReleaseConcurrencySettingsOutput, error)
 	SaveConcurrencySettings(ctx context.Context, input ReleaseConcurrencySettingsInput) error
+	LoadGitOpsConfig(ctx context.Context) (ReleaseGitOpsConfigOutput, error)
+	SaveGitOpsConfig(ctx context.Context, input ReleaseGitOpsConfigInput) error
 }
 
 type ReleaseConcurrencyLockScope string
@@ -55,9 +57,17 @@ type ReleaseConcurrencySettingsOutput struct {
 
 type ReleaseConcurrencySettingsInput = ReleaseConcurrencySettingsOutput
 
+type ReleaseGitOpsConfigOutput struct {
+	HelmScanPath      string `json:"helm_scan_path"`
+	KustomizeScanPath string `json:"kustomize_scan_path"`
+}
+
+type ReleaseGitOpsConfigInput = ReleaseGitOpsConfigOutput
+
 type ReleaseSettingsOutput struct {
-	EnvOptions  []string                         `json:"env_options"`
-	Concurrency ReleaseConcurrencySettingsOutput `json:"concurrency"`
+	EnvOptions   []string                         `json:"env_options"`
+	Concurrency  ReleaseConcurrencySettingsOutput `json:"concurrency"`
+	GitOpsConfig ReleaseGitOpsConfigOutput        `json:"gitops_config"`
 }
 
 type QueryReleaseSettings struct {
@@ -80,15 +90,21 @@ func (uc *QueryReleaseSettings) Execute(ctx context.Context) (ReleaseSettingsOut
 	if err != nil {
 		return ReleaseSettingsOutput{}, err
 	}
+	gitopsConfig, err := uc.store.LoadGitOpsConfig(ctx)
+	if err != nil {
+		return ReleaseSettingsOutput{}, err
+	}
 	return ReleaseSettingsOutput{
-		EnvOptions:  normalizeReleaseEnvOptions(options),
-		Concurrency: normalizeConcurrencySettings(concurrency),
+		EnvOptions:   normalizeReleaseEnvOptions(options),
+		Concurrency:  normalizeConcurrencySettings(concurrency),
+		GitOpsConfig: normalizeGitOpsConfig(gitopsConfig),
 	}, nil
 }
 
 type UpdateReleaseSettingsInput struct {
-	EnvOptions  []string
-	Concurrency ReleaseConcurrencySettingsInput
+	EnvOptions   []string
+	Concurrency  ReleaseConcurrencySettingsInput
+	GitOpsConfig ReleaseGitOpsConfigInput
 }
 
 type UpdateReleaseSettings struct {
@@ -112,6 +128,9 @@ func (uc *UpdateReleaseSettings) Execute(ctx context.Context, input UpdateReleas
 		return ReleaseSettingsOutput{}, err
 	}
 	if err := uc.store.SaveConcurrencySettings(ctx, normalizeConcurrencySettings(input.Concurrency)); err != nil {
+		return ReleaseSettingsOutput{}, err
+	}
+	if err := uc.store.SaveGitOpsConfig(ctx, normalizeGitOpsConfig(input.GitOpsConfig)); err != nil {
 		return ReleaseSettingsOutput{}, err
 	}
 	return uc.reader.Execute(ctx)
@@ -161,5 +180,25 @@ func normalizeConcurrencySettings(input ReleaseConcurrencySettingsInput) Release
 		LockScope:        scope,
 		ConflictStrategy: strategy,
 		LockTimeoutSec:   timeout,
+	}
+}
+
+const (
+	defaultHelmScanPath      = "apps/helm"
+	defaultKustomizeScanPath = "apps/{app_key}/overlays/{env}"
+)
+
+func normalizeGitOpsConfig(input ReleaseGitOpsConfigInput) ReleaseGitOpsConfigOutput {
+	helmPath := strings.TrimSpace(input.HelmScanPath)
+	if helmPath == "" {
+		helmPath = defaultHelmScanPath
+	}
+	kustomizePath := strings.TrimSpace(input.KustomizeScanPath)
+	if kustomizePath == "" {
+		kustomizePath = defaultKustomizeScanPath
+	}
+	return ReleaseGitOpsConfigOutput{
+		HelmScanPath:      strings.TrimRight(helmPath, "/"),
+		KustomizeScanPath: strings.TrimRight(kustomizePath, "/"),
 	}
 }

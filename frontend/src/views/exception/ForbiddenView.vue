@@ -11,7 +11,7 @@ function backHome() {
 
 async function toLogin() {
   await authStore.logout()
-  void router.replace('/login')
+  await router.replace('/login')
 }
 </script>
 
@@ -20,7 +20,7 @@ async function toLogin() {
     <a-result
       status="403"
       title="403"
-      sub-title="抱歉，当前账号没有访问该页面的权限。"
+      sub-title="抱歉，当前账号没有访问该页面的权限"
     >
       <template #extra>
         <a-space>

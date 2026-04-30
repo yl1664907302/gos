@@ -83,6 +83,11 @@ func (s Status) Valid() bool {
 // 这样后续扩展 CD=ArgoCD 时，平台仍然可以复用同一套参数映射、模板与发布单逻辑。
 type ExecutorParamDef struct {
 	ID                string
+	ApplicationID     string
+	ApplicationName   string
+	ApplicationKey    string
+	BindingType       string
+	PipelineName      string
 	PipelineID        string
 	ExecutorType      ExecutorType
 	ExecutorParamName string

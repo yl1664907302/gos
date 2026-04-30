@@ -176,6 +176,83 @@ func (s *ReleaseStore) SaveConcurrencySettings(_ context.Context, input usecase.
 	return nil
 }
 
+func (s *ReleaseStore) LoadGitOpsConfig(_ context.Context) (usecase.ReleaseGitOpsConfigOutput, error) {
+	path := strings.TrimSpace(s.configPath)
+	if path == "" {
+		return defaultReleaseGitOpsConfig(), nil
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return defaultReleaseGitOpsConfig(), nil
+		}
+		return usecase.ReleaseGitOpsConfigOutput{}, fmt.Errorf("read config file failed: %w", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return usecase.ReleaseGitOpsConfigOutput{}, fmt.Errorf("decode config file failed: %w", err)
+	}
+
+	releaseNode := readMapNode(payload, "release")
+	gitopsNode := readMapNode(releaseNode, "gitops_config")
+
+	result := defaultReleaseGitOpsConfig()
+	if value := strings.TrimSpace(fmt.Sprint(gitopsNode["helm_scan_path"])); value != "" {
+		result.HelmScanPath = value
+	}
+	if value := strings.TrimSpace(fmt.Sprint(gitopsNode["kustomize_scan_path"])); value != "" {
+		result.KustomizeScanPath = value
+	}
+	return result, nil
+}
+
+func (s *ReleaseStore) SaveGitOpsConfig(_ context.Context, input usecase.ReleaseGitOpsConfigInput) error {
+	path := strings.TrimSpace(s.configPath)
+	if path == "" {
+		return fmt.Errorf("config path is required")
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config file failed: %w", err)
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(content, &payload); err != nil {
+		return fmt.Errorf("decode config file failed: %w", err)
+	}
+
+	releaseNode := readMapNode(payload, "release")
+	releaseNode["gitops_config"] = map[string]interface{}{
+		"helm_scan_path":      strings.TrimSpace(input.HelmScanPath),
+		"kustomize_scan_path": strings.TrimSpace(input.KustomizeScanPath),
+	}
+	payload["release"] = releaseNode
+
+	updated, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode config file failed: %w", err)
+	}
+	updated = append(updated, '\n')
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("prepare config directory failed: %w", err)
+	}
+	if err := os.WriteFile(path, updated, 0o644); err != nil {
+		return fmt.Errorf("write config file failed: %w", err)
+	}
+	return nil
+}
+
+func defaultReleaseGitOpsConfig() usecase.ReleaseGitOpsConfigOutput {
+	return usecase.ReleaseGitOpsConfigOutput{
+		HelmScanPath:      "apps/helm",
+		KustomizeScanPath: "apps/{app_key}/overlays/{env}",
+	}
+}
+
 func readMapNode(payload map[string]interface{}, key string) map[string]interface{} {
 	if payload == nil {
 		return map[string]interface{}{}

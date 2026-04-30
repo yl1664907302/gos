@@ -91,3 +91,14 @@ func (s releaseDBStoreStub) LoadConcurrencySettings(context.Context) (usecase.Re
 func (s releaseDBStoreStub) SaveConcurrencySettings(context.Context, usecase.ReleaseConcurrencySettingsInput) error {
 	return nil
 }
+
+func (s releaseDBStoreStub) LoadGitOpsConfig(context.Context) (usecase.ReleaseGitOpsConfigOutput, error) {
+	return usecase.ReleaseGitOpsConfigOutput{
+		HelmScanPath:      "apps/helm",
+		KustomizeScanPath: "apps/{app_key}/overlays/{env}",
+	}, nil
+}
+
+func (s releaseDBStoreStub) SaveGitOpsConfig(context.Context, usecase.ReleaseGitOpsConfigInput) error {
+	return nil
+}

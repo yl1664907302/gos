@@ -121,3 +121,178 @@ func TestCreateStandardRollbackByOrderPreservesTemplateHooks(t *testing.T) {
 		t.Fatalf("expected rollback order %s to preserve hook step, got steps: %#v", rollbackOrder.ID, steps)
 	}
 }
+
+func TestCreateStandardRollbackByOrderAllowsDeployFailedSource(t *testing.T) {
+	t.Parallel()
+
+	manager, repo := newReleaseOrderManagerForCancelTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+
+	template := domain.ReleaseTemplate{
+		ID:              "rt-rollback-allow-failed",
+		Name:            "rollback-template",
+		ApplicationID:   "app-1",
+		ApplicationName: "App 1",
+		BindingID:       "app-1",
+		BindingName:     "App 1",
+		BindingType:     "application",
+		GitOpsType:      domain.GitOpsTypeHelm,
+		Status:          domain.TemplateStatusActive,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	bindings := []domain.ReleaseTemplateBinding{
+		{
+			ID:            "rtb-cd-failed",
+			TemplateID:    template.ID,
+			PipelineScope: domain.PipelineScopeCD,
+			BindingID:     "binding-cd",
+			BindingName:   "ArgoCD",
+			Provider:      "argocd",
+			PipelineID:    "argocd-app",
+			Enabled:       true,
+			SortNo:        1,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+	}
+	if err := repo.CreateTemplate(ctx, template, bindings, nil, nil, nil); err != nil {
+		t.Fatalf("CreateTemplate failed: %v", err)
+	}
+
+	sourceOrder := testReleaseOrder("ro-source-failed", "RO-SOURCE-FAILED", domain.OrderStatusDeployFailed, now)
+	sourceOrder.TemplateID = template.ID
+	sourceOrder.TemplateName = template.Name
+	sourceOrder.BindingID = "binding-cd"
+	sourceExecution := domain.ReleaseOrderExecution{
+		ID:             "exec-source-cd-failed",
+		ReleaseOrderID: sourceOrder.ID,
+		PipelineScope:  domain.PipelineScopeCD,
+		BindingID:      "binding-cd",
+		BindingName:    "ArgoCD",
+		Provider:       "argocd",
+		PipelineID:     "argocd-app",
+		Status:         domain.ExecutionStatusFailed,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := repo.Create(ctx, sourceOrder, []domain.ReleaseOrderExecution{sourceExecution}, nil, nil); err != nil {
+		t.Fatalf("Create source order failed: %v", err)
+	}
+
+	created, err := manager.CreateStandardRollbackByOrder(ctx, sourceOrder.ID, "tester", "tester")
+	if err != nil {
+		t.Fatalf("CreateStandardRollbackByOrder failed: %v", err)
+	}
+	if created.SourceOrderID != sourceOrder.ID {
+		t.Fatalf("SourceOrderID = %s, want %s", created.SourceOrderID, sourceOrder.ID)
+	}
+	if created.OperationType != domain.OperationTypeRollback {
+		t.Fatalf("OperationType = %s, want %s", created.OperationType, domain.OperationTypeRollback)
+	}
+}
+
+func TestCreatePipelineReplayByOrderAllowsDeployFailedSource(t *testing.T) {
+	t.Parallel()
+
+	manager, repo := newReleaseOrderManagerForCancelTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	manager.now = func() time.Time { return now }
+
+	template := domain.ReleaseTemplate{
+		ID:              "rt-replay-allow-failed",
+		Name:            "replay-template",
+		ApplicationID:   "app-1",
+		ApplicationName: "App 1",
+		BindingID:       "app-1",
+		BindingName:     "App 1",
+		BindingType:     "application",
+		GitOpsType:      "",
+		Status:          domain.TemplateStatusActive,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	bindings := []domain.ReleaseTemplateBinding{
+		{
+			ID:            "rtb-ci-replay-failed",
+			TemplateID:    template.ID,
+			PipelineScope: domain.PipelineScopeCI,
+			BindingID:     "binding-ci",
+			BindingName:   "Jenkins CI",
+			Provider:      "jenkins",
+			PipelineID:    "pipeline-ci",
+			Enabled:       true,
+			SortNo:        1,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		},
+	}
+	paramsRule := []domain.ReleaseTemplateParam{
+		{
+			ID:                 "rtp-ci-branch-replay-failed",
+			TemplateID:         template.ID,
+			TemplateBindingID:  bindings[0].ID,
+			PipelineScope:      domain.PipelineScopeCI,
+			BindingID:          bindings[0].BindingID,
+			ExecutorParamDefID: "ep-branch-replay-failed",
+			ParamKey:           "branch",
+			ParamName:          "分支",
+			ExecutorParamName:  "BRANCH",
+			ValueSource:        domain.TemplateParamValueSourceReleaseInput,
+			Required:           true,
+			SortNo:             1,
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		},
+	}
+	if err := repo.CreateTemplate(ctx, template, bindings, paramsRule, nil, nil); err != nil {
+		t.Fatalf("CreateTemplate failed: %v", err)
+	}
+
+	sourceOrder := testReleaseOrder("ro-replay-source-failed", "RO-REPLAY-SOURCE-FAILED", domain.OrderStatusDeployFailed, now)
+	sourceOrder.TemplateID = template.ID
+	sourceOrder.TemplateName = template.Name
+	sourceOrder.BindingID = bindings[0].BindingID
+	sourceExecution := domain.ReleaseOrderExecution{
+		ID:             "exec-replay-source-failed-ci",
+		ReleaseOrderID: sourceOrder.ID,
+		PipelineScope:  domain.PipelineScopeCI,
+		BindingID:      bindings[0].BindingID,
+		BindingName:    bindings[0].BindingName,
+		Provider:       bindings[0].Provider,
+		PipelineID:     bindings[0].PipelineID,
+		Status:         domain.ExecutionStatusFailed,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	sourceParams := []domain.ReleaseOrderParam{
+		{
+			ID:                "rop-replay-source-failed-branch",
+			ReleaseOrderID:    sourceOrder.ID,
+			PipelineScope:     domain.PipelineScopeCI,
+			BindingID:         bindings[0].BindingID,
+			ParamKey:          "branch",
+			ExecutorParamName: "BRANCH",
+			ParamValue:        "release/failed",
+			ValueSource:       domain.ValueSourceReleaseInput,
+			CreatedAt:         now,
+		},
+	}
+	if err := repo.Create(ctx, sourceOrder, []domain.ReleaseOrderExecution{sourceExecution}, sourceParams, nil); err != nil {
+		t.Fatalf("Create source order failed: %v", err)
+	}
+
+	created, err := manager.CreatePipelineReplayByOrder(ctx, sourceOrder.ID, "tester", "tester")
+	if err != nil {
+		t.Fatalf("CreatePipelineReplayByOrder failed: %v", err)
+	}
+	if created.SourceOrderID != sourceOrder.ID {
+		t.Fatalf("SourceOrderID = %s, want %s", created.SourceOrderID, sourceOrder.ID)
+	}
+	if created.OperationType != domain.OperationTypeReplay {
+		t.Fatalf("OperationType = %s, want %s", created.OperationType, domain.OperationTypeReplay)
+	}
+}

@@ -717,12 +717,13 @@ func (h *AgentHandler) UpdateTemporaryTask(c *gin.Context) {
 		return
 	}
 	output, err := h.taskManager.UpdateTemporaryTask(c.Request.Context(), c.Param("taskID"), usecase.UpdateAgentTaskInput{
-		Name:       req.Name,
-		TaskMode:   req.TaskMode,
-		WorkDir:    req.WorkDir,
-		ScriptID:   req.ScriptID,
-		Variables:  req.Variables,
-		TimeoutSec: req.TimeoutSec,
+		TargetAgentIDs: req.TargetAgentIDs,
+		Name:           req.Name,
+		TaskMode:       req.TaskMode,
+		WorkDir:        req.WorkDir,
+		ScriptID:       req.ScriptID,
+		Variables:      req.Variables,
+		TimeoutSec:     req.TimeoutSec,
 	})
 	if err != nil {
 		writeAgentHTTPError(c, err)

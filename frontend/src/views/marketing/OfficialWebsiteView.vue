@@ -19,7 +19,6 @@ function goToSection(hash: string) {
         <div class="official-brand-mark">G</div>
         <div class="official-brand-copy">
           <div class="official-brand-title">GOS Release</div>
-          <div class="official-brand-subtitle">Release Orchestration Platform</div>
         </div>
       </div>
       <nav class="official-nav-links">
@@ -46,8 +45,8 @@ function goToSection(hash: string) {
           <div class="hero-eyebrow">GOS Release</div>
           <h1 class="hero-title">把发布变成一套可治理的系统</h1>
           <p class="hero-summary">
-            GOS Release 面向真实企业交付场景而设计。我们把发布单、环境锁、参数字库、Hook 扩展、Agent 主动执行与回滚轨迹统一到一套产品里，
-            让研发、运维与交付团队在同一条链路里协作，而不是在 Jenkins、服务器、GitOps 和临时脚本之间反复跳转。
+            GOS Release 面向真实企业交付场景而设计我们把发布单、环境锁、参数字库、Hook 扩展、Agent 主动执行与回滚轨迹统一到一套产品里，
+            让研发、运维与交付团队在同一条链路里协作，而不是在 Jenkins、服务器、GitOps 和临时脚本之间反复跳转
           </p>
           <div class="hero-actions">
             <a-button size="large" type="primary" @click="goToSection('#product')">查看产品</a-button>
@@ -120,22 +119,22 @@ function goToSection(hash: string) {
         <article>
           <span>统一入口</span>
           <strong>发布、回滚、重放一条线</strong>
-          <p>所有交付动作都围绕发布单建模，平台自己知道这次交付在做什么、做到哪一步、为何失败。</p>
+          <p>所有交付动作都围绕发布单建模，平台自己知道这次交付在做什么、做到哪一步、为何失败</p>
         </article>
         <article>
           <span>环境治理</span>
           <strong>同应用同环境自动控并发</strong>
-          <p>发布前预检、环境锁与并发队列联动，帮助团队把冲突发版和人工协调降到最低。</p>
+          <p>发布前预检、环境锁与并发队列联动，帮助团队把冲突发版和人工协调降到最低</p>
         </article>
         <article>
           <span>扩展执行</span>
           <strong>Hook 与 Agent 延伸主流程</strong>
-          <p>主发布成功后继续触发 Hook 与 Agent 任务，把特殊环境、特殊动作都纳入同一平台治理。</p>
+          <p>主发布成功后继续触发 Hook 与 Agent 任务，把特殊环境、特殊动作都纳入同一平台治理</p>
         </article>
         <article>
           <span>全链路追踪</span>
           <strong>模板、步骤、日志、变量全部可查</strong>
-          <p>从模板到 Hook，从执行单元到回显日志，每个动作都能在一个详情页里被解释清楚。</p>
+          <p>从模板到 Hook，从执行单元到回显日志，每个动作都能在一个详情页里被解释清楚</p>
         </article>
       </section>
 
@@ -147,7 +146,7 @@ function goToSection(hash: string) {
           </div>
           <p>
             官网不应该只讲能力名词，所以我们把产品里的真实界面直接展示出来：从应用工作台，到发布单列表，再到 Agent 任务中心，
-            平台如何组织日常交付动作，一眼就能看清。
+            平台如何组织日常交付动作，一眼就能看清
           </p>
         </div>
 
@@ -156,7 +155,7 @@ function goToSection(hash: string) {
             <div class="product-feature-kicker">应用工作台</div>
             <h3>围绕应用看状态、看历史、看动作，而不是在配置页里找入口</h3>
             <p>
-              应用视图聚合最近发布、环境状态和可执行动作，让团队成员先看“哪里可发、哪里异常、哪里正在跑”，再决定下一步操作。
+              应用视图聚合最近发布、环境状态和可执行动作，让团队成员先看“哪里可发、哪里异常、哪里正在跑”，再决定下一步操作
             </p>
             <ul>
               <li>按应用组织发布而不是按脚本组织</li>
@@ -179,34 +178,34 @@ function goToSection(hash: string) {
           </div>
           <p>
             GOS Release 面向真实的企业交付场景：Jenkins、GitOps、ArgoCD、Agent、Webhook、Hook、标准参数字库、审批与并发控制，
-            都围绕“发布单”这一张业务主线串起来。
+            都围绕“发布单”这一张业务主线串起来
           </p>
         </div>
 
         <div class="capability-grid">
           <article>
             <h3>模板驱动发布</h3>
-            <p>把 CI、CD、参数来源、固定值、内置字段、标准字段映射到模板中，建单时只暴露真正需要用户确认的部分。</p>
+            <p>把 CI、CD、参数来源、固定值、内置字段、标准字段映射到模板中，建单时只暴露真正需要用户确认的部分</p>
           </article>
           <article>
             <h3>并发与排队控制</h3>
-            <p>同应用同环境、同 GitOps 分支、同批并发批次都能被平台治理，不再靠人记住“谁先发”。</p>
+            <p>同应用同环境、同 GitOps 分支、同批并发批次都能被平台治理，不再靠人记住“谁先发”</p>
           </article>
           <article>
             <h3>发布后 Hook</h3>
-            <p>主发布完成后继续执行 Hook，可接 Agent 任务或 Webhook 通知，把发布后的检查、重启、通知都统一化。</p>
+            <p>主发布完成后继续执行 Hook，可接 Agent 任务或 Webhook 通知，把发布后的检查、重启、通知都统一化</p>
           </article>
           <article>
             <h3>Agent 主动执行</h3>
-            <p>面对不能被平台直接访问的网络区域，Agent 主动轮询、领取并执行任务，平台只下发任务，不反向打洞。</p>
+            <p>面对不能被平台直接访问的网络区域，Agent 主动轮询、领取并执行任务，平台只下发任务，不反向打洞</p>
           </article>
           <article>
             <h3>回滚与重放</h3>
-            <p>支持标准回滚与重放回滚，结合部署快照、标准字段和历史参数，把恢复动作做成一等公民。</p>
+            <p>支持标准回滚与标准重放，结合部署快照、标准字段和历史参数，把恢复动作做成一等公民</p>
           </article>
           <article>
             <h3>全链路详情</h3>
-            <p>发布单详情页展示 CI、CD、Hook、Agent 回显与执行进度，真正让排障和审计落到一个页面里。</p>
+            <p>发布单详情页展示 CI、CD、Hook、Agent 回显与执行进度，真正让排障和审计落到一个页面里</p>
           </article>
         </div>
       </section>
@@ -218,7 +217,7 @@ function goToSection(hash: string) {
             <h2>从模板到执行结果，交付流程被拆成可理解、可追踪、可恢复的阶段</h2>
           </div>
           <p>
-            我们不把“发布”当成一个黑盒按钮，而是把预审、预检、执行单元、Hook、Agent 任务和回滚入口拆成平台内的可观察对象。
+            我们不把“发布”当成一个黑盒按钮，而是把预审、预检、执行单元、Hook、Agent 任务和回滚入口拆成平台内的可观察对象
           </p>
         </div>
 
@@ -226,27 +225,27 @@ function goToSection(hash: string) {
           <article>
             <span>1</span>
             <h3>创建发布单</h3>
-            <p>从模板继承参数规则、固定值、标准字段与 Hook 策略，形成一张待确认的发布申请。</p>
+            <p>从模板继承参数规则、固定值、标准字段与 Hook 策略，形成一张待确认的发布申请</p>
           </article>
           <article>
             <span>2</span>
             <h3>预审与预检</h3>
-            <p>用户确认本次参数，系统检查模板、环境锁、并发策略、GitOps/执行器是否可达。</p>
+            <p>用户确认本次参数，系统检查模板、环境锁、并发策略、GitOps/执行器是否可达</p>
           </article>
           <article>
             <span>3</span>
             <h3>CI / CD 执行</h3>
-            <p>触发 Jenkins、推送 GitOps、调用 ArgoCD，执行单元逐步落库，详情页实时展示进度。</p>
+            <p>触发 Jenkins、推送 GitOps、调用 ArgoCD，执行单元逐步落库，详情页实时展示进度</p>
           </article>
           <article>
             <span>4</span>
             <h3>Hook 后处理</h3>
-            <p>按模板里的触发策略决定是否执行 Agent 任务或 Webhook，把发布后的检查和收尾继续纳入流程。</p>
+            <p>按模板里的触发策略决定是否执行 Agent 任务或 Webhook，把发布后的检查和收尾继续纳入流程</p>
           </article>
           <article>
             <span>5</span>
             <h3>回滚与审计</h3>
-            <p>若失败或需恢复，基于历史快照回滚；同时保留完整步骤、日志、变量与操作轨迹。</p>
+            <p>若失败或需恢复，基于历史快照回滚；同时保留完整步骤、日志、变量与操作轨迹</p>
           </article>
         </div>
       </section>
@@ -258,22 +257,22 @@ function goToSection(hash: string) {
             <h2>把复杂交付收进一套稳定、克制的治理结构</h2>
           </div>
           <p>
-            企业发布平台真正的价值不在于“能点按钮”，而在于把环境风险、并发冲突、特殊网络、回滚恢复和扩展动作，都纳入一套统一秩序。
+            企业发布平台真正的价值不在于“能点按钮”，而在于把环境风险、并发冲突、特殊网络、回滚恢复和扩展动作，都纳入一套统一秩序
           </p>
         </div>
 
         <div class="trust-grid">
           <article>
             <h3>标准字库</h3>
-            <p>统一平台参数命名，减少模板间口径漂移，让 CI、CD、Hook、Agent 之间共享一套字段语言。</p>
+            <p>统一平台参数命名，减少模板间口径漂移，让 CI、CD、Hook、Agent 之间共享一套字段语言</p>
           </article>
           <article>
             <h3>执行器解耦</h3>
-            <p>Jenkins、GitOps、ArgoCD、Agent 任务各司其职，又都以发布单为中心，方便未来继续扩展审批和通知。</p>
+            <p>Jenkins、GitOps、ArgoCD、Agent 任务各司其职，又都以发布单为中心，方便未来继续扩展审批和通知</p>
           </article>
           <article>
             <h3>特殊环境适配</h3>
-            <p>通过 Agent 主动拉任务的方式，把生产网络隔离、脚本执行、文件下发等特殊约束纳入平台模型。</p>
+            <p>通过 Agent 主动拉任务的方式，把生产网络隔离、脚本执行、文件下发等特殊约束纳入平台模型</p>
           </article>
         </div>
       </section>
@@ -354,13 +353,6 @@ function goToSection(hash: string) {
   letter-spacing: -0.01em;
 }
 
-.official-brand-subtitle {
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
 
 .official-nav-links {
   display: flex;

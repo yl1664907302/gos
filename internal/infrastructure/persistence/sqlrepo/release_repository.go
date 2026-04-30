@@ -765,6 +765,43 @@ WHERE (ro.creator_user_id IS NULL OR TRIM(ro.creator_user_id) = '')
 		}
 		_, err = r.db.ExecContext(
 			ctx,
+			`CREATE TABLE IF NOT EXISTS app_release_state (
+	id VARCHAR(64) PRIMARY KEY,
+	release_order_id VARCHAR(64) NOT NULL,
+	release_order_no VARCHAR(64) NOT NULL DEFAULT '',
+	application_id VARCHAR(64) NOT NULL,
+	application_name VARCHAR(128) NOT NULL DEFAULT '',
+	env_code VARCHAR(64) NOT NULL DEFAULT '',
+	operation_type VARCHAR(32) NOT NULL DEFAULT 'deploy',
+	template_id VARCHAR(64) NOT NULL DEFAULT '',
+	template_name VARCHAR(128) NOT NULL DEFAULT '',
+	cd_provider VARCHAR(32) NOT NULL DEFAULT '',
+	gitops_type VARCHAR(32) NOT NULL DEFAULT '',
+	has_ci_execution TINYINT(1) NOT NULL DEFAULT 0,
+	has_cd_execution TINYINT(1) NOT NULL DEFAULT 0,
+	git_ref VARCHAR(200) NOT NULL DEFAULT '',
+	image_tag VARCHAR(200) NOT NULL DEFAULT '',
+	state_status VARCHAR(32) NOT NULL DEFAULT 'pending_confirm',
+	is_current_live TINYINT(1) NOT NULL DEFAULT 0,
+	previous_state_id VARCHAR(64) NOT NULL DEFAULT '',
+	confirmed_at BIGINT NULL,
+	confirmed_by VARCHAR(128) NOT NULL DEFAULT '',
+	params_snapshot_json LONGTEXT NOT NULL,
+	execution_snapshot_json LONGTEXT NOT NULL,
+	deploy_snapshot_json LONGTEXT NOT NULL,
+	result_snapshot_json LONGTEXT NOT NULL,
+	created_at BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	UNIQUE KEY uk_app_release_state_order (release_order_id),
+	KEY idx_app_release_state_app_env_current (application_id, env_code, is_current_live),
+	KEY idx_app_release_state_previous (previous_state_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+		)
+		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
 			`CREATE TABLE IF NOT EXISTS release_execution_lock (
 	id VARCHAR(64) PRIMARY KEY,
 	lock_scope VARCHAR(32) NOT NULL,
@@ -1006,6 +1043,46 @@ WHERE (creator_user_id IS NULL OR TRIM(creator_user_id) = '')
 );`,
 		)
 		if err != nil {
+			return err
+		}
+		_, err = r.db.ExecContext(
+			ctx,
+			`CREATE TABLE IF NOT EXISTS app_release_state (
+	id TEXT PRIMARY KEY,
+	release_order_id TEXT NOT NULL UNIQUE,
+	release_order_no TEXT NOT NULL DEFAULT '',
+	application_id TEXT NOT NULL,
+	application_name TEXT NOT NULL DEFAULT '',
+	env_code TEXT NOT NULL DEFAULT '',
+	operation_type TEXT NOT NULL DEFAULT 'deploy',
+	template_id TEXT NOT NULL DEFAULT '',
+	template_name TEXT NOT NULL DEFAULT '',
+	cd_provider TEXT NOT NULL DEFAULT '',
+	gitops_type TEXT NOT NULL DEFAULT '',
+	has_ci_execution INTEGER NOT NULL DEFAULT 0,
+	has_cd_execution INTEGER NOT NULL DEFAULT 0,
+	git_ref TEXT NOT NULL DEFAULT '',
+	image_tag TEXT NOT NULL DEFAULT '',
+	state_status TEXT NOT NULL DEFAULT 'pending_confirm',
+	is_current_live INTEGER NOT NULL DEFAULT 0,
+	previous_state_id TEXT NOT NULL DEFAULT '',
+	confirmed_at INTEGER NULL,
+	confirmed_by TEXT NOT NULL DEFAULT '',
+	params_snapshot_json TEXT NOT NULL,
+	execution_snapshot_json TEXT NOT NULL,
+	deploy_snapshot_json TEXT NOT NULL,
+	result_snapshot_json TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);`,
+		)
+		if err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_app_release_state_app_env_current ON app_release_state (application_id, env_code, is_current_live);`); err != nil {
+			return err
+		}
+		if _, err = r.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_app_release_state_previous ON app_release_state (previous_state_id);`); err != nil {
 			return err
 		}
 		_, err = r.db.ExecContext(
@@ -1468,12 +1545,21 @@ WHERE id = ?;`
 }
 
 func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) ([]domain.ReleaseOrder, int64, error) {
-	where := make([]string, 0, 5)
-	args := make([]any, 0, 7)
+	where := make([]string, 0, 10)
+	args := make([]any, 0, 16)
 
 	if filter.ApplicationID != "" {
 		where = append(where, "application_id = ?")
 		args = append(args, filter.ApplicationID)
+	}
+	if value := strings.TrimSpace(filter.Keyword); value != "" {
+		pattern := "%" + value + "%"
+		where = append(where, "(order_no LIKE ? OR source_order_no LIKE ? OR application_name LIKE ?)")
+		args = append(args, pattern, pattern, pattern)
+	}
+	if value := strings.TrimSpace(filter.TriggeredBy); value != "" {
+		where = append(where, "triggered_by LIKE ?")
+		args = append(args, "%"+value+"%")
 	}
 	if filter.BindingID != "" {
 		where = append(where, "binding_id = ?")
@@ -1491,13 +1577,37 @@ func (r *ReleaseRepository) List(ctx context.Context, filter domain.ListFilter) 
 		where = append(where, "env_code = ?")
 		args = append(args, filter.EnvCode)
 	}
+	if filter.OperationType != "" {
+		where = append(where, "operation_type = ?")
+		args = append(args, string(filter.OperationType))
+	}
 	if filter.Status != "" {
-		where = append(where, "status = ?")
-		args = append(args, string(filter.Status))
+		switch filter.Status {
+		case domain.OrderStatusDeploySuccess, domain.OrderStatusSuccess:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusSuccess), string(domain.OrderStatusDeploySuccess))
+		case domain.OrderStatusDeployFailed, domain.OrderStatusFailed:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusFailed), string(domain.OrderStatusDeployFailed))
+		case domain.OrderStatusDeploying, domain.OrderStatusRunning:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusRunning), string(domain.OrderStatusDeploying))
+		default:
+			where = append(where, "status = ?")
+			args = append(args, string(filter.Status))
+		}
 	}
 	if filter.TriggerType != "" {
 		where = append(where, "trigger_type = ?")
 		args = append(args, string(filter.TriggerType))
+	}
+	if filter.CreatedAtFrom != nil {
+		where = append(where, "created_at >= ?")
+		args = append(args, filter.CreatedAtFrom.UTC().UnixNano())
+	}
+	if filter.CreatedAtTo != nil {
+		where = append(where, "created_at <= ?")
+		args = append(args, filter.CreatedAtTo.UTC().UnixNano())
 	}
 	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClause(
 		filter.ApplicationIDs,
@@ -1545,6 +1655,125 @@ FROM release_order`
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func (r *ReleaseRepository) ListStats(ctx context.Context, filter domain.ListFilter) (domain.ReleaseOrderStats, error) {
+	where := make([]string, 0, 10)
+	args := make([]any, 0, 16)
+
+	if filter.ApplicationID != "" {
+		where = append(where, "application_id = ?")
+		args = append(args, filter.ApplicationID)
+	}
+	if value := strings.TrimSpace(filter.Keyword); value != "" {
+		pattern := "%" + value + "%"
+		where = append(where, "(order_no LIKE ? OR source_order_no LIKE ? OR application_name LIKE ?)")
+		args = append(args, pattern, pattern, pattern)
+	}
+	if value := strings.TrimSpace(filter.TriggeredBy); value != "" {
+		where = append(where, "triggered_by LIKE ?")
+		args = append(args, "%"+value+"%")
+	}
+	if filter.BindingID != "" {
+		where = append(where, "binding_id = ?")
+		args = append(args, filter.BindingID)
+	}
+	if filter.CreatorUserID != "" {
+		where = append(where, "creator_user_id = ?")
+		args = append(args, filter.CreatorUserID)
+	}
+	if value := strings.TrimSpace(filter.ApprovalApproverUserID); value != "" {
+		where = append(where, "approval_approver_ids_json LIKE ?")
+		args = append(args, "%\""+value+"\"%")
+	}
+	if filter.EnvCode != "" {
+		where = append(where, "env_code = ?")
+		args = append(args, filter.EnvCode)
+	}
+	if filter.OperationType != "" {
+		where = append(where, "operation_type = ?")
+		args = append(args, string(filter.OperationType))
+	}
+	if filter.Status != "" {
+		switch filter.Status {
+		case domain.OrderStatusDeploySuccess, domain.OrderStatusSuccess:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusSuccess), string(domain.OrderStatusDeploySuccess))
+		case domain.OrderStatusDeployFailed, domain.OrderStatusFailed:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusFailed), string(domain.OrderStatusDeployFailed))
+		case domain.OrderStatusDeploying, domain.OrderStatusRunning:
+			where = append(where, "(status = ? OR status = ?)")
+			args = append(args, string(domain.OrderStatusRunning), string(domain.OrderStatusDeploying))
+		default:
+			where = append(where, "status = ?")
+			args = append(args, string(filter.Status))
+		}
+	}
+	if filter.TriggerType != "" {
+		where = append(where, "trigger_type = ?")
+		args = append(args, string(filter.TriggerType))
+	}
+	if filter.CreatedAtFrom != nil {
+		where = append(where, "created_at >= ?")
+		args = append(args, filter.CreatedAtFrom.UTC().UnixNano())
+	}
+	if filter.CreatedAtTo != nil {
+		where = append(where, "created_at <= ?")
+		args = append(args, filter.CreatedAtTo.UTC().UnixNano())
+	}
+	if visibilityClause, visibilityArgs := buildReleaseOrderVisibilityClause(
+		filter.ApplicationIDs,
+		filter.VisibleApplicationEnvScopes,
+		filter.VisibleToUserID,
+	); visibilityClause != "" {
+		where = append(where, visibilityClause)
+		args = append(args, visibilityArgs...)
+	}
+
+	query := `
+SELECT
+	COUNT(1) AS total,
+	SUM(CASE WHEN status IN ('running', 'deploying', 'building', 'approving') THEN 1 ELSE 0 END) AS running,
+	SUM(CASE WHEN status IN ('success', 'deploy_success') THEN 1 ELSE 0 END) AS success,
+	SUM(CASE WHEN status IN ('failed', 'deploy_failed', 'rejected') THEN 1 ELSE 0 END) AS failed,
+	SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+FROM release_order`
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+
+	var stats domain.ReleaseOrderStats
+	var running sql.NullInt64
+	var success sql.NullInt64
+	var failed sql.NullInt64
+	var cancelled sql.NullInt64
+	if err := r.db.QueryRowContext(ctx, query, args...).Scan(
+		&stats.Total,
+		&running,
+		&success,
+		&failed,
+		&cancelled,
+	); err != nil {
+		return domain.ReleaseOrderStats{}, err
+	}
+	if running.Valid {
+		stats.Running = running.Int64
+	}
+	if success.Valid {
+		stats.Success = success.Int64
+	}
+	if failed.Valid {
+		stats.Failed = failed.Int64
+	}
+	if cancelled.Valid {
+		stats.Cancelled = cancelled.Int64
+	}
+	stats.Pending = stats.Total - stats.Running - stats.Success - stats.Failed - stats.Cancelled
+	if stats.Pending < 0 {
+		stats.Pending = 0
+	}
+	return stats, nil
 }
 
 func (r *ReleaseRepository) ListTrackableOrders(
@@ -1844,6 +2073,404 @@ WHERE release_order_id = ?;`
 	}
 	item.GitOpsType = domain.GitOpsType(gitOpsType)
 	item.CreatedAt = time.Unix(0, createdAtNs).UTC()
+	return item, nil
+}
+
+func (r *ReleaseRepository) UpsertAppReleaseState(ctx context.Context, state domain.AppReleaseState) error {
+	const insertQ = `
+INSERT INTO app_release_state (
+	id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	_, err := r.db.ExecContext(
+		ctx,
+		insertQ,
+		state.ID,
+		state.ReleaseOrderID,
+		state.ReleaseOrderNo,
+		state.ApplicationID,
+		state.ApplicationName,
+		state.EnvCode,
+		string(state.OperationType),
+		state.TemplateID,
+		state.TemplateName,
+		state.CDProvider,
+		string(state.GitOpsType),
+		boolToDBValue(r.dbDriver, state.HasCIExecution),
+		boolToDBValue(r.dbDriver, state.HasCDExecution),
+		state.GitRef,
+		state.ImageTag,
+		string(state.StateStatus),
+		boolToDBValue(r.dbDriver, state.IsCurrentLive),
+		state.PreviousStateID,
+		nullableUnixNano(state.ConfirmedAt),
+		state.ConfirmedBy,
+		state.ParamsSnapshotJSON,
+		state.ExecutionSnapshotJSON,
+		state.DeploySnapshotJSON,
+		state.ResultSnapshotJSON,
+		state.CreatedAt.UTC().UnixNano(),
+		state.UpdatedAt.UTC().UnixNano(),
+	)
+	if err == nil {
+		return nil
+	}
+	if !isDuplicateKeyError(r.dbDriver, err) {
+		return err
+	}
+
+	const updateQ = `
+UPDATE app_release_state
+SET release_order_no = ?, application_id = ?, application_name = ?, env_code = ?, operation_type = ?, template_id = ?, template_name = ?,
+	cd_provider = ?, gitops_type = ?, has_ci_execution = ?, has_cd_execution = ?, git_ref = ?, image_tag = ?, params_snapshot_json = ?,
+	execution_snapshot_json = ?, deploy_snapshot_json = ?, result_snapshot_json = ?, updated_at = ?
+WHERE release_order_id = ?;`
+	_, err = r.db.ExecContext(
+		ctx,
+		updateQ,
+		state.ReleaseOrderNo,
+		state.ApplicationID,
+		state.ApplicationName,
+		state.EnvCode,
+		string(state.OperationType),
+		state.TemplateID,
+		state.TemplateName,
+		state.CDProvider,
+		string(state.GitOpsType),
+		boolToDBValue(r.dbDriver, state.HasCIExecution),
+		boolToDBValue(r.dbDriver, state.HasCDExecution),
+		state.GitRef,
+		state.ImageTag,
+		state.ParamsSnapshotJSON,
+		state.ExecutionSnapshotJSON,
+		state.DeploySnapshotJSON,
+		state.ResultSnapshotJSON,
+		state.UpdatedAt.UTC().UnixNano(),
+		state.ReleaseOrderID,
+	)
+	return err
+}
+
+func (r *ReleaseRepository) GetAppReleaseStateByOrderID(ctx context.Context, releaseOrderID string) (domain.AppReleaseState, error) {
+	const q = `
+SELECT id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+FROM app_release_state
+WHERE release_order_id = ?;`
+
+	return r.getSingleAppReleaseState(ctx, q, strings.TrimSpace(releaseOrderID))
+}
+
+func (r *ReleaseRepository) GetAppReleaseStateByID(ctx context.Context, id string) (domain.AppReleaseState, error) {
+	const q = `
+SELECT id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+FROM app_release_state
+WHERE id = ?;`
+
+	return r.getSingleAppReleaseState(ctx, q, strings.TrimSpace(id))
+}
+
+func (r *ReleaseRepository) GetCurrentAppReleaseState(ctx context.Context, applicationID string, envCode string) (domain.AppReleaseState, error) {
+	const q = `
+SELECT id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+FROM app_release_state
+WHERE application_id = ? AND env_code = ? AND is_current_live = ?
+ORDER BY updated_at DESC
+LIMIT 1;`
+
+	return r.getSingleAppReleaseState(ctx, q, strings.TrimSpace(applicationID), strings.TrimSpace(envCode), boolToDBValue(r.dbDriver, true))
+}
+
+func (r *ReleaseRepository) IsLatestOrderByApplicationEnv(
+	ctx context.Context,
+	applicationID string,
+	envCode string,
+	releaseOrderID string,
+) (bool, error) {
+	const q = `
+SELECT id
+FROM release_order
+WHERE application_id = ? AND env_code = ?
+ORDER BY created_at DESC, updated_at DESC, id DESC
+LIMIT 1;`
+
+	var latestID string
+	if err := r.db.QueryRowContext(
+		ctx,
+		q,
+		strings.TrimSpace(applicationID),
+		strings.TrimSpace(envCode),
+	).Scan(&latestID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, domain.ErrOrderNotFound
+		}
+		return false, err
+	}
+	return strings.TrimSpace(latestID) == strings.TrimSpace(releaseOrderID), nil
+}
+
+func (r *ReleaseRepository) ConfirmAppReleaseState(
+	ctx context.Context,
+	releaseOrderID string,
+	confirmedBy string,
+	confirmedAt time.Time,
+) (domain.AppReleaseState, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.AppReleaseState{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	target, err := r.getSingleAppReleaseStateTx(ctx, tx, `
+SELECT id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+FROM app_release_state
+WHERE release_order_id = ?;`, strings.TrimSpace(releaseOrderID))
+	if err != nil {
+		return domain.AppReleaseState{}, err
+	}
+
+	var latestOrderID string
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT id
+FROM release_order
+WHERE application_id = ? AND env_code = ?
+ORDER BY created_at DESC, updated_at DESC, id DESC
+LIMIT 1;`,
+		target.ApplicationID,
+		target.EnvCode,
+	).Scan(&latestOrderID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.AppReleaseState{}, domain.ErrOrderNotFound
+		}
+		return domain.AppReleaseState{}, err
+	}
+	if strings.TrimSpace(latestOrderID) != strings.TrimSpace(target.ReleaseOrderID) {
+		return domain.AppReleaseState{}, fmt.Errorf(
+			"%w: 当前应用环境已经存在更新的发布单，仅允许在最新发布单上确认生效",
+			domain.ErrAppReleaseStateNotConfirmable,
+		)
+	}
+
+	if target.IsCurrentLive && target.StateStatus == domain.AppReleaseStateStatusActive {
+		if err := tx.Commit(); err != nil {
+			return domain.AppReleaseState{}, err
+		}
+		return target, nil
+	}
+
+	previousStateID := ""
+	current, err := r.getSingleAppReleaseStateTx(ctx, tx, `
+SELECT id, release_order_id, release_order_no, application_id, application_name, env_code, operation_type, template_id, template_name,
+	cd_provider, gitops_type, has_ci_execution, has_cd_execution, git_ref, image_tag, state_status, is_current_live, previous_state_id,
+	confirmed_at, confirmed_by, params_snapshot_json, execution_snapshot_json, deploy_snapshot_json, result_snapshot_json, created_at, updated_at
+FROM app_release_state
+WHERE application_id = ? AND env_code = ? AND is_current_live = ? AND id <> ?
+ORDER BY updated_at DESC
+LIMIT 1;`, target.ApplicationID, target.EnvCode, boolToDBValue(r.dbDriver, true), target.ID)
+	if err != nil && !errors.Is(err, domain.ErrAppReleaseStateNotFound) {
+		return domain.AppReleaseState{}, err
+	}
+	if err == nil {
+		previousStateID = current.ID
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE app_release_state
+SET state_status = ?, is_current_live = ?, updated_at = ?
+WHERE id = ?;`,
+			string(domain.AppReleaseStateStatusSuperseded),
+			boolToDBValue(r.dbDriver, false),
+			confirmedAt.UTC().UnixNano(),
+			current.ID,
+		); err != nil {
+			return domain.AppReleaseState{}, err
+		}
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE app_release_state
+SET state_status = ?, is_current_live = ?, previous_state_id = ?, confirmed_at = ?, confirmed_by = ?, updated_at = ?
+WHERE id = ?;`,
+		string(domain.AppReleaseStateStatusActive),
+		boolToDBValue(r.dbDriver, true),
+		previousStateID,
+		confirmedAt.UTC().UnixNano(),
+		strings.TrimSpace(confirmedBy),
+		confirmedAt.UTC().UnixNano(),
+		target.ID,
+	); err != nil {
+		return domain.AppReleaseState{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return domain.AppReleaseState{}, err
+	}
+	return r.GetAppReleaseStateByOrderID(ctx, releaseOrderID)
+}
+
+func (r *ReleaseRepository) ListCurrentAppReleaseStateSummaries(ctx context.Context, applicationIDs []string) ([]domain.AppReleaseStateSummary, error) {
+	baseQuery := `
+SELECT
+	curr.application_id,
+	curr.application_name,
+	curr.env_code,
+	curr.id,
+	COALESCE(NULLIF(curr.release_order_id, ''), COALESCE(cur_ro.id, '')),
+	COALESCE(NULLIF(curr.release_order_no, ''), COALESCE(cur_ro.order_no, '')),
+	curr.image_tag,
+	curr.confirmed_at,
+	curr.confirmed_by,
+	COALESCE(prev.id, ''),
+	COALESCE(NULLIF(prev.release_order_id, ''), COALESCE(prev_ro.id, '')),
+	COALESCE(NULLIF(prev.release_order_no, ''), COALESCE(prev_ro.order_no, '')),
+	COALESCE(prev.image_tag, ''),
+	prev.confirmed_at
+FROM app_release_state curr
+LEFT JOIN release_order cur_ro ON cur_ro.id = curr.release_order_id
+LEFT JOIN app_release_state prev ON prev.id = curr.previous_state_id
+LEFT JOIN release_order prev_ro ON prev_ro.id = prev.release_order_id
+WHERE curr.is_current_live = ?`
+	args := []any{boolToDBValue(r.dbDriver, true)}
+
+	placeholders := make([]string, 0, len(applicationIDs))
+	for _, item := range applicationIDs {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		placeholders = append(placeholders, "?")
+		args = append(args, value)
+	}
+	if len(placeholders) > 0 {
+		baseQuery += " AND curr.application_id IN (" + strings.Join(placeholders, ", ") + ")"
+	}
+	baseQuery += " ORDER BY curr.application_name ASC, curr.env_code ASC;"
+
+	rows, err := r.db.QueryContext(ctx, baseQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.AppReleaseStateSummary, 0)
+	for rows.Next() {
+		var (
+			item                domain.AppReleaseStateSummary
+			currentConfirmedNs  sql.NullInt64
+			previousConfirmedNs sql.NullInt64
+		)
+		if err := rows.Scan(
+			&item.ApplicationID,
+			&item.ApplicationName,
+			&item.EnvCode,
+			&item.CurrentStateID,
+			&item.CurrentReleaseOrderID,
+			&item.CurrentReleaseOrderNo,
+			&item.CurrentImageTag,
+			&currentConfirmedNs,
+			&item.CurrentConfirmedBy,
+			&item.PreviousStateID,
+			&item.PreviousReleaseOrderID,
+			&item.PreviousReleaseOrderNo,
+			&item.PreviousImageTag,
+			&previousConfirmedNs,
+		); err != nil {
+			return nil, err
+		}
+		if currentConfirmedNs.Valid {
+			t := time.Unix(0, currentConfirmedNs.Int64).UTC()
+			item.CurrentConfirmedAt = &t
+		}
+		if previousConfirmedNs.Valid {
+			t := time.Unix(0, previousConfirmedNs.Int64).UTC()
+			item.PreviousConfirmedAt = &t
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *ReleaseRepository) getSingleAppReleaseState(ctx context.Context, q string, args ...any) (domain.AppReleaseState, error) {
+	row := r.db.QueryRowContext(ctx, q, args...)
+	return scanAppReleaseStateRow(row)
+}
+
+func (r *ReleaseRepository) getSingleAppReleaseStateTx(ctx context.Context, tx *sql.Tx, q string, args ...any) (domain.AppReleaseState, error) {
+	row := tx.QueryRowContext(ctx, q, args...)
+	return scanAppReleaseStateRow(row)
+}
+
+func scanAppReleaseStateRow(scanner interface{ Scan(dest ...any) error }) (domain.AppReleaseState, error) {
+	var (
+		item           domain.AppReleaseState
+		operationType  string
+		gitOpsType     string
+		stateStatus    string
+		hasCIExecution any
+		hasCDExecution any
+		isCurrentLive  any
+		confirmedAtNs  sql.NullInt64
+		createdAtNs    int64
+		updatedAtNs    int64
+	)
+	if err := scanner.Scan(
+		&item.ID,
+		&item.ReleaseOrderID,
+		&item.ReleaseOrderNo,
+		&item.ApplicationID,
+		&item.ApplicationName,
+		&item.EnvCode,
+		&operationType,
+		&item.TemplateID,
+		&item.TemplateName,
+		&item.CDProvider,
+		&gitOpsType,
+		&hasCIExecution,
+		&hasCDExecution,
+		&item.GitRef,
+		&item.ImageTag,
+		&stateStatus,
+		&isCurrentLive,
+		&item.PreviousStateID,
+		&confirmedAtNs,
+		&item.ConfirmedBy,
+		&item.ParamsSnapshotJSON,
+		&item.ExecutionSnapshotJSON,
+		&item.DeploySnapshotJSON,
+		&item.ResultSnapshotJSON,
+		&createdAtNs,
+		&updatedAtNs,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.AppReleaseState{}, domain.ErrAppReleaseStateNotFound
+		}
+		return domain.AppReleaseState{}, err
+	}
+	item.OperationType = domain.OperationType(operationType)
+	item.GitOpsType = domain.GitOpsType(gitOpsType)
+	item.StateStatus = domain.AppReleaseStateStatus(stateStatus)
+	item.HasCIExecution = scanBoolValue(hasCIExecution)
+	item.HasCDExecution = scanBoolValue(hasCDExecution)
+	item.IsCurrentLive = scanBoolValue(isCurrentLive)
+	if confirmedAtNs.Valid {
+		t := time.Unix(0, confirmedAtNs.Int64).UTC()
+		item.ConfirmedAt = &t
+	}
+	item.CreatedAt = time.Unix(0, createdAtNs).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAtNs).UTC()
 	return item, nil
 }
 

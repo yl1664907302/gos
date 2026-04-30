@@ -3,6 +3,7 @@ import type {
   ApplicationExecutorParamListParams,
   CreateJenkinsRawPipelinePayload,
   CreatePipelineBindingPayload,
+  ExecutorParamListParams,
   PipelineBindingDataResponse,
   PipelineBindingListParams,
   PipelineBindingListResponse,
@@ -128,6 +129,13 @@ export async function listApplicationExecutorParamDefs(
     `/applications/${applicationID}/executor-param-defs`,
     { params },
   )
+  return response.data
+}
+
+export async function listExecutorParamDefs(
+  params: ExecutorParamListParams,
+): Promise<ExecutorParamDefListResponse> {
+  const response = await http.get<ExecutorParamDefListResponse>('/executor-param-defs', { params })
   return response.data
 }
 

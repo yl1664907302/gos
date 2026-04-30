@@ -5,9 +5,7 @@ import {
   ClockCircleFilled,
   CloseCircleFilled,
   ExclamationCircleOutlined,
-  EyeOutlined,
   LoadingOutlined,
-  ReloadOutlined,
   StopFilled,
   SyncOutlined,
 } from "@ant-design/icons-vue";
@@ -142,11 +140,25 @@ const stageLogContent = ref("");
 const stageLogHasMore = ref(false);
 const stageLogFetchedAt = ref("");
 const selectedPipelineStage = ref<ReleaseOrderPipelineStage | null>(null);
+const stageLogStillStreaming = computed(
+  () =>
+    stageLogHasMore.value &&
+    Boolean(selectedPipelineStage.value) &&
+    isRunningStatus(selectedPipelineStage.value!.status),
+);
+const stageLogSyncMessage = computed(() => {
+  if (!stageLogFetchedAt.value) {
+    return "";
+  }
+  return `最近同步时间：${stageLogFetchedAt.value}${
+    stageLogStillStreaming.value ? "，当前阶段仍在持续输出日志" : ""
+  }`;
+});
 const concurrentBatchProgress = ref<ReleaseOrderConcurrentBatchProgress | null>(
   null,
 );
 const concurrentBatchLoading = ref(false);
-const expandedHookVariableMap = reactive<Record<string, boolean>>({});
+const expandedHookTaskMap = reactive<Record<string, boolean>>({});
 const expandedHookLogMap = reactive<Record<string, boolean>>({});
 const approvalActionModalVisible = ref(false);
 const approvalActionMode = ref<"submit" | "approve" | "reject">("submit");
@@ -213,8 +225,7 @@ const isCurrentUserCreator = computed(() =>
 );
 const canExecutePermission = computed(() =>
   order.value
-    ? String(order.value.creator_user_id || "").trim() === currentUserID.value &&
-      authStore.hasApplicationPermission(
+    ? authStore.hasApplicationPermission(
         "release.execute",
         order.value.application_id,
         order.value.env_code,
@@ -344,26 +355,33 @@ const canDeploy = computed(
     !executeLocked.value,
 );
 const canRollback = computed(
+  () => canTriggerArgoReplay.value && canReplayPermission.value,
+);
+const canReplay = computed(
+  () => canTriggerStandardReplay.value && canReplayPermission.value,
+);
+const canReplayPermission = computed(
   () =>
     Boolean(order.value) &&
     authStore.hasApplicationPermission(
       "release.create",
       order.value?.application_id || "",
       order.value?.env_code || "",
+    ),
+);
+const canTriggerArgoReplay = computed(
+  () =>
+    Boolean(order.value) &&
+    ["deploying", "deploy_failed", "deploy_success"].includes(
+      currentBusinessStatus.value,
     ) &&
-    currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
       .toLowerCase() === "argocd",
 );
-const canReplay = computed(
+const canTriggerStandardReplay = computed(
   () =>
     Boolean(order.value) &&
-    authStore.hasApplicationPermission(
-      "release.create",
-      order.value?.application_id || "",
-      order.value?.env_code || "",
-    ) &&
     currentBusinessStatus.value === "deploy_success" &&
     String(order.value?.cd_provider || "")
       .trim()
@@ -474,30 +492,6 @@ const heroFacts = computed(() => {
     { label: "环境", value: order.value.env_code || "-" },
     { label: "Git 版本", value: order.value.git_ref || "-" },
   ];
-});
-
-const contextFacts = computed(() => {
-  if (!order.value) {
-    return [];
-  }
-  const items = [
-    { label: "模板", value: order.value.template_name || "-" },
-    { label: "模板 ID", value: order.value.template_id || "-" },
-    { label: "触发方式", value: triggerTypeText(order.value.trigger_type) },
-    { label: "创建者", value: order.value.triggered_by || "-" },
-    { label: "创建时间", value: formatTime(order.value.created_at) },
-    { label: "开始时间", value: formatTime(order.value.started_at) },
-    { label: "结束时间", value: formatTime(order.value.finished_at) },
-    { label: "更新时间", value: formatTime(order.value.updated_at) },
-  ];
-  if (order.value.is_concurrent) {
-    items.splice(3, 0, { label: "并发执行", value: "是" });
-    items.splice(4, 0, {
-      label: "并发批次",
-      value: order.value.concurrent_batch_no || "-",
-    });
-  }
-  return items;
 });
 
 const showConcurrentBatchCard = computed(() =>
@@ -657,11 +651,11 @@ const spotlightDescription = computed(() => {
   if (isQueuedInConcurrentBatch.value) {
     const queuePosition = currentConcurrentBatchItem.value?.queue_position || 0;
     if (queuePosition > 0) {
-      return `当前发布单已通过预检，正在并发批次队列中等待执行，队列位次 ${queuePosition}。`;
+      return `当前发布单已通过预检，正在并发批次队列中等待执行，队列位次 ${queuePosition}`;
     }
     return (
       precheck.value?.conflict_message ||
-      "当前发布单已通过预检，正在等待同应用同环境的前序发布执行完成。"
+      "当前发布单已通过预检，正在等待同应用同环境的前序发布执行完成"
     );
   }
   const step = spotlightStep.value;
@@ -685,6 +679,22 @@ const executionSections = computed(() =>
     execution: executionMapByScope.value[scope] as ReleaseOrderExecution,
   })),
 );
+
+function executionSortNoForScope(scope: ReleasePipelineScope) {
+  const scopedSteps = steps.value
+    .filter(
+      (item) =>
+        String(item.step_scope || "")
+          .trim()
+          .toLowerCase() === scope,
+    )
+    .sort(sortSteps);
+  if (scopedSteps.length > 0) {
+    return scopedSteps[0].sort_no;
+  }
+  const scopeIndex = visibleScopes.value.indexOf(scope);
+  return scopeIndex >= 0 ? (scopeIndex + 1) * 1000 : 9999;
+}
 
 const paramGroups = computed(() => {
   const map: Record<ReleasePipelineScope, ReleaseOrderParam[]> = {
@@ -720,11 +730,14 @@ const valueProgressGroups = computed(() => {
   return visibleScopes.value
     .map((scope) => ({
       scope,
-      title: `${scopeLabel(scope)} 取值进度`,
       items: map[scope].sort((a, b) => a.sort_no - b.sort_no),
     }))
     .filter((group) => group.items.length > 0);
 });
+
+const valueProgressTotal = computed(() =>
+  valueProgressGroups.value.reduce((total, group) => total + group.items.length, 0),
+);
 
 const stepGroups = computed(() => {
   const groups: Array<{
@@ -779,9 +792,9 @@ function hookExecutionSummaryText(item: ReleaseOrderStep) {
     return messageText;
   }
   if (item.status === "pending") {
-    return "等待主发布流程结束后触发当前 Hook。";
+    return "等待主发布流程结束后触发当前 Hook";
   }
-  return "当前 Hook 暂无补充执行内容。";
+  return "当前 Hook 暂无补充执行内容";
 }
 
 function hookExecutionLogText(item: ReleaseOrderStep) {
@@ -798,9 +811,9 @@ function hookExecutionLogText(item: ReleaseOrderStep) {
     return messageText;
   }
   if (item.status === "pending") {
-    return "等待主发布流程结束后触发当前 Hook。";
+    return "等待主发布流程结束后触发当前 Hook";
   }
-  return "当前 Hook 暂无补充执行内容。";
+  return "当前 Hook 暂无补充执行内容";
 }
 
 const hookProgressItems = computed(() => {
@@ -841,6 +854,22 @@ const hookProgressItems = computed(() => {
 });
 
 type HookProgressType = "agent_task" | "notification_hook" | "webhook_notification" | "generic";
+type HookExecuteStage = "build_complete" | "post_release";
+
+function hookExecuteStageFromStepCode(stepCode: string): HookExecuteStage {
+  const parts = String(stepCode || "")
+    .trim()
+    .toLowerCase()
+    .split(":");
+  if (parts.length >= 4 && parts[1] === "build_complete") {
+    return "build_complete";
+  }
+  return "post_release";
+}
+
+function hookExecuteStageText(stage: HookExecuteStage) {
+  return stage === "build_complete" ? "构建完成" : "发布完成";
+}
 
 function inferHookProgressType(item: ReleaseOrderStep): HookProgressType {
   const haystack = [
@@ -879,13 +908,11 @@ function hookProgressTypeText(type: HookProgressType) {
   }
 }
 
-function hookExecutionUnitTitle(type: HookProgressType) {
-  switch (type) {
-    case "agent_task":
-      return "Hook 执行单元";
-    default:
-      return `${hookProgressTypeText(type)} Hook 执行单元`;
-  }
+function hookExecutionUnitDisplayTitle(
+  stage: HookExecuteStage,
+  type: HookProgressType,
+) {
+  return `${hookExecuteStageText(stage)} · ${hookProgressTypeText(type)}`;
 }
 
 function hookExecutionContentText(item: ReleaseOrderStep) {
@@ -919,35 +946,45 @@ function hookGroupSummaryText(group: {
   }`;
 }
 
-const hookProgressGroups = computed(() => {
-  const grouped = new Map<
-    HookProgressType,
-    {
-      type: HookProgressType;
-      title: string;
-      items: Array<
-        ReleaseOrderStep & {
-          order_index: number;
-          summary: string;
-        }
-      >;
-      summary: {
-        total: number;
-        pending: number;
-        running: number;
-        success: number;
-        failed: number;
-      };
-      overallStatus: "pending" | "running" | "success" | "failed";
+type HookProgressGroup = {
+  key: string;
+  type: HookProgressType;
+  stage: HookExecuteStage;
+  sortNo: number;
+  title: string;
+  items: Array<
+    ReleaseOrderStep & {
+      order_index: number;
+      summary: string;
     }
+  >;
+  summary: {
+    total: number;
+    pending: number;
+    running: number;
+    success: number;
+    failed: number;
+  };
+  overallStatus: "pending" | "running" | "success" | "failed";
+};
+
+const hookProgressGroups = computed<HookProgressGroup[]>(() => {
+  const grouped = new Map<
+    string,
+    HookProgressGroup
   >();
 
   hookProgressItems.value.forEach((item) => {
     const type = inferHookProgressType(item);
-    if (!grouped.has(type)) {
-      grouped.set(type, {
+    const stage = hookExecuteStageFromStepCode(item.step_code);
+    const key = `${stage}:${type}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        key,
         type,
-        title: hookExecutionUnitTitle(type),
+        stage,
+        sortNo: item.sort_no,
+        title: hookExecutionUnitDisplayTitle(stage, type),
         items: [],
         summary: {
           total: 0,
@@ -959,8 +996,9 @@ const hookProgressGroups = computed(() => {
         overallStatus: "pending",
       });
     }
-    const group = grouped.get(type)!;
+    const group = grouped.get(key)!;
     group.items.push(item);
+    group.sortNo = Math.min(group.sortNo, item.sort_no);
     group.summary.total += 1;
     switch (item.status) {
       case "running":
@@ -989,22 +1027,83 @@ const hookProgressGroups = computed(() => {
       group.overallStatus = "pending";
     }
     return group;
-  });
+  }).sort((a, b) => a.sortNo - b.sortNo || a.key.localeCompare(b.key));
 });
 
-const hookContextPreviewItems = computed(() => {
-  if (!order.value) {
-    return [];
-  }
-  return [
-    { label: "发布单号", value: order.value.order_no || "-" },
-    { label: "应用", value: order.value.application_name || "-" },
-    { label: "环境", value: order.value.env_code || "-" },
-    { label: "Git 版本", value: order.value.git_ref || "-" },
-    { label: "镜像版本", value: order.value.image_tag || "-" },
-    { label: "操作类型", value: operationTypeText(order.value.operation_type) },
-  ];
+type ExecutionUnitItem =
+  | {
+      kind: "pipeline";
+      key: string;
+      sortNo: number;
+      scope: ReleasePipelineScope;
+      title: string;
+      execution: ReleaseOrderExecution;
+    }
+  | {
+      kind: "hook";
+      key: string;
+      sortNo: number;
+      group: HookProgressGroup;
+    };
+
+const executionUnitItems = computed<ExecutionUnitItem[]>(() => {
+  const pipelineItems = executionSections.value.map((item) => ({
+    kind: "pipeline" as const,
+    key: `pipeline:${item.scope}`,
+    sortNo: executionSortNoForScope(item.scope),
+    scope: item.scope,
+    title: item.title,
+    execution: item.execution,
+  }));
+  const hookItems = hookProgressGroups.value.map((group) => ({
+    kind: "hook" as const,
+    key: `hook:${group.key}`,
+    sortNo: group.sortNo,
+    group,
+  }));
+  return [...pipelineItems, ...hookItems].sort(
+    (a, b) => a.sortNo - b.sortNo || a.key.localeCompare(b.key),
+  );
 });
+
+function hookReferenceIDs(item: ReleaseOrderStep) {
+  const refs = new Set<string>();
+  (item.related_task_ids || []).forEach((value) => {
+    const trimmed = String(value || "").trim();
+    if (trimmed) {
+      refs.add(trimmed);
+    }
+  });
+  const haystack = [
+    item.message,
+    item.detail_log,
+    item.related_task_summary,
+  ].join(" ");
+  const pattern = /\b(?:task_id|source_task_id|batch_id)=([A-Za-z0-9-]+)/g;
+  for (const match of haystack.matchAll(pattern)) {
+    if (match[1]) {
+      refs.add(match[1]);
+    }
+  }
+  return Array.from(refs);
+}
+
+function hookTaskReferenceText(item: ReleaseOrderStep) {
+  const refs = hookReferenceIDs(item);
+  if (refs.length > 0) {
+    return refs.join(" / ");
+  }
+  if (item.related_task_count > 0) {
+    return `${item.related_task_count} 个任务`;
+  }
+  return "-";
+}
+
+function hookTaskStageTypeText(item: ReleaseOrderStep) {
+  return `${hookExecuteStageText(
+    hookExecuteStageFromStepCode(item.step_code),
+  )} / ${hookProgressTypeText(inferHookProgressType(item))}`;
+}
 
 const stageGroupsByScope = computed<
   Record<ReleasePipelineScope, ReleaseOrderPipelineStage[]>
@@ -1080,102 +1179,6 @@ const { columns: paramColumns } = useResizableColumns(paramInitialColumns, {
   maxWidth: 620,
   hitArea: 10,
 });
-
-const pipelineStageInitialColumns: TableColumnsType<ReleaseOrderPipelineStage> =
-  [
-    { title: "顺序", dataIndex: "sort_no", key: "sort_no", width: 90 },
-    {
-      title: "阶段名称",
-      dataIndex: "stage_name",
-      key: "stage_name",
-      width: 240,
-    },
-    { title: "状态", dataIndex: "status", key: "status", width: 120 },
-    {
-      title: "耗时",
-      dataIndex: "duration_millis",
-      key: "duration_millis",
-      width: 140,
-    },
-    {
-      title: "开始时间",
-      dataIndex: "started_at",
-      key: "started_at",
-      width: 190,
-    },
-    {
-      title: "结束时间",
-      dataIndex: "finished_at",
-      key: "finished_at",
-      width: 190,
-    },
-    { title: "操作", key: "actions", width: 120, fixed: "right" },
-  ];
-const { columns: pipelineStageColumns } = useResizableColumns(
-  pipelineStageInitialColumns,
-  {
-    minWidth: 100,
-    maxWidth: 420,
-    hitArea: 10,
-  },
-);
-
-const valueProgressInitialColumns: TableColumnsType<ReleaseOrderValueProgress> =
-  [
-    {
-      title: "平台标准 Key",
-      dataIndex: "param_key",
-      key: "param_key",
-      width: 180,
-    },
-    {
-      title: "字段名称",
-      dataIndex: "param_name",
-      key: "param_name",
-      width: 180,
-    },
-    {
-      title: "执行器参数名",
-      dataIndex: "executor_param_name",
-      key: "executor_param_name",
-      width: 220,
-    },
-    {
-      title: "当前值",
-      dataIndex: "value",
-      key: "value",
-      width: 260,
-      ellipsis: true,
-    },
-    { title: "状态", dataIndex: "status", key: "status", width: 120 },
-    {
-      title: "来源",
-      dataIndex: "value_source",
-      key: "value_source",
-      width: 180,
-    },
-    {
-      title: "说明",
-      dataIndex: "message",
-      key: "message",
-      width: 320,
-      ellipsis: true,
-    },
-    {
-      title: "更新时间",
-      dataIndex: "updated_at",
-      key: "updated_at",
-      width: 190,
-    },
-  ];
-const { columns: valueProgressColumns } = useResizableColumns(
-  valueProgressInitialColumns,
-  {
-    minWidth: 100,
-    maxWidth: 520,
-    hitArea: 10,
-  },
-);
 
 function normalizeScope(scope: string): ReleasePipelineScope | null {
   const value = String(scope || "")
@@ -1388,9 +1391,9 @@ function concurrentQueueToneClass(
 function dispatchActionText(action: ReleaseOrderDispatchAction) {
   switch (action) {
     case "build":
-      return "构建";
+      return "仅构建";
     case "deploy":
-      return "部署";
+      return "发布";
     default:
       return "发布";
   }
@@ -1411,23 +1414,23 @@ const precheckSummaryMessage = computed(() => {
   if (!precheck.value.executable && precheck.value.ahead_count > 0) {
     return (
       precheck.value.conflict_message ||
-      `当前应用前面还有 ${precheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}。`
+      `当前应用前面还有 ${precheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}`
     );
   }
   if (precheck.value.waiting_for_lock) {
     return (
       precheck.value.conflict_message ||
-      `当前目标已被其他发布占用，系统会在锁释放后继续${actionText}。`
+      `当前目标已被其他发布占用，系统会在锁释放后继续${actionText}`
     );
   }
   if (precheckBlocked.value) {
     return (
       precheck.value.conflict_message ||
-      `当前发布单未通过${actionText}前预检，请先处理阻塞项。`
+      `当前发布单未通过${actionText}前预检，请先处理阻塞项`
     );
   }
   if (precheck.value.lock_enabled) {
-    return `并发发布保护已启用，当前按 ${precheck.value.lock_scope || "application_env"} 范围进行调度控制。`;
+    return `并发发布保护已启用，当前按 ${precheck.value.lock_scope || "application_env"} 范围进行调度控制`;
   }
   return "";
 });
@@ -1474,7 +1477,7 @@ function operationTypeText(
     case "rollback":
       return "标准回滚";
     case "replay":
-      return "重放回滚";
+      return "标准重放";
     default:
       return "普通发布";
   }
@@ -1485,23 +1488,23 @@ function isCiOnlyRecovery(record?: ReleaseOrder | null) {
 }
 
 function replayActionText(record?: ReleaseOrder | null) {
-  return "回滚到此版本";
+  return "一键重发";
 }
 
 function replayConfirmTitle(record?: ReleaseOrder | null) {
   return isCiOnlyRecovery(record)
-    ? "确认基于这张成功单创建 CI 重放回滚吗？"
-    : "确认基于这张成功单创建重放回滚吗？";
+    ? "确认创建 CI 标准重放单吗？"
+    : "确认创建标准重放单吗？";
 }
 
 function replaySuccessText(record: ReleaseOrder, orderNo: string) {
   return isCiOnlyRecovery(record)
-    ? `已创建 CI 重放回滚单：${orderNo}`
-    : `已创建重放回滚单：${orderNo}`;
+    ? `已创建 CI 标准重放单：${orderNo}`
+    : `已创建标准重放单：${orderNo}`;
 }
 
 function replayFailureText(record?: ReleaseOrder | null) {
-  return isCiOnlyRecovery(record) ? "CI 重放回滚创建失败" : "重放回滚创建失败";
+  return isCiOnlyRecovery(record) ? "CI 标准重放创建失败" : "标准重放创建失败";
 }
 
 function isRunningStatus(
@@ -1602,27 +1605,27 @@ function approvalActionText(action: ReleaseOrderApprovalRecord["action"]) {
 
 const approvalStatusSummary = computed(() => {
   if (!order.value?.approval_required) {
-    return "当前模板未启用审批流。";
+    return "当前模板未启用审批流";
   }
   switch (currentBusinessStatus.value) {
     case "pending_approval":
-      return "当前发布单待审批，发起人可提交审批，审批人也可以直接处理。";
+      return "当前发布单待审批，发起人可提交审批，审批人也可以直接处理";
     case "approving":
-      return "当前发布单正在审批中，审批通过后才允许触发发布。";
+      return "当前发布单正在审批中，审批通过后才允许触发发布";
     case "approved":
       return order.value.approved_by
         ? `审批已通过，最后确认人：${order.value.approved_by}`
-        : "审批已通过，可继续触发发布。";
+        : "审批已通过，可继续触发发布";
     case "building":
-      return "审批已通过，当前处于构建阶段。";
+      return "审批已通过，当前处于构建阶段";
     case "built_waiting_deploy":
-      return "审批与构建均已完成，等待手动触发部署。";
+      return "审批与构建均已完成，等待手动触发部署";
     case "rejected":
       return order.value.rejected_reason
         ? `审批已拒绝：${order.value.rejected_reason}`
-        : "审批已拒绝，当前发布单不能继续执行。";
+        : "审批已拒绝，当前发布单不能继续执行";
     default:
-      return "审批流程已完成，可在此查看审批记录与审批人。";
+      return "审批流程已完成，可在此查看审批记录与审批人";
   }
 });
 
@@ -1655,13 +1658,13 @@ const approvalActionModalOkText = computed(() => {
 const approvalActionPlaceholder = computed(() => {
   switch (approvalActionMode.value) {
     case "submit":
-      return "可选填写审批备注，帮助审批人理解本次发布背景。";
+      return "可选填写审批备注，帮助审批人理解本次发布背景";
     case "approve":
-      return "可选填写审批意见，例如放行原因、观察项。";
+      return "可选填写审批意见，例如放行原因、观察项";
     case "reject":
-      return "请填写拒绝原因，便于发起人修正发布内容。";
+      return "请填写拒绝原因，便于发起人修正发布内容";
     default:
-      return "请输入审批备注。";
+      return "请输入审批备注";
   }
 });
 
@@ -1680,8 +1683,8 @@ function hookToneClass(status: ReleaseOrderStep["status"] | "skipped") {
   }
 }
 
-function toggleHookVariables(id: string) {
-  expandedHookVariableMap[id] = !expandedHookVariableMap[id];
+function toggleHookTasks(key: string) {
+  expandedHookTaskMap[key] = !expandedHookTaskMap[key];
 }
 
 function toggleHookLogs(id: string) {
@@ -2448,9 +2451,9 @@ async function executeCurrentOrder(
     message.warning(
       precheckSummaryMessage.value ||
         (action === "build"
-          ? "当前发布单不满足构建条件，无法再次触发构建"
+          ? "当前发布单不满足仅构建条件，无法再次触发仅构建"
           : action === "deploy"
-            ? "当前发布单不满足部署条件，无法再次触发部署"
+            ? "当前发布单不满足发布条件，无法再次触发发布"
             : "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布"),
     );
     return;
@@ -2465,9 +2468,9 @@ async function executeCurrentOrder(
       message.warning(
         precheckSummaryMessage.value ||
           (action === "build"
-            ? "当前发布单未通过构建前预检，请先处理阻塞项"
+            ? "当前发布单未通过仅构建前预检，请先处理阻塞项"
             : action === "deploy"
-              ? "当前发布单未通过部署前预检，请先处理阻塞项"
+              ? "当前发布单未通过发布前预检，请先处理阻塞项"
               : "当前发布单未通过执行前预检，请先处理阻塞项"),
       );
       return;
@@ -2482,9 +2485,9 @@ async function executeCurrentOrder(
     message.success(
       options?.successMessage ||
         (action === "build"
-          ? "构建已提交，正在调度执行"
+          ? "仅构建已提交，正在调度执行"
           : action === "deploy"
-            ? "部署已提交，正在调度执行"
+            ? "发布已提交，正在调度执行"
             : "发布已提交，正在调度执行"),
     );
     try {
@@ -2494,9 +2497,9 @@ async function executeCurrentOrder(
         extractHTTPErrorMessage(
           refreshError,
           action === "build"
-            ? "构建已触发，但详情刷新失败，请稍后手动刷新"
+            ? "仅构建已触发，但详情刷新失败，请稍后手动刷新"
             : action === "deploy"
-              ? "部署已触发，但详情刷新失败，请稍后手动刷新"
+              ? "发布已触发，但详情刷新失败，请稍后手动刷新"
               : "发布已触发，但详情刷新失败，请稍后手动刷新",
         ),
       );
@@ -2507,9 +2510,9 @@ async function executeCurrentOrder(
         error,
         options?.errorMessage ||
           (action === "build"
-            ? "构建执行失败"
+            ? "仅构建执行失败"
             : action === "deploy"
-              ? "部署执行失败"
+              ? "发布执行失败"
               : "发布执行失败"),
       ),
     );
@@ -2585,10 +2588,10 @@ async function handleRollback() {
   recovering.value = true;
   try {
     const response = await rollbackReleaseOrderByID(order.value.id);
-    message.success(`已创建标准回滚单：${response.data.order_no}`);
+    message.success(`已创建一键重发单：${response.data.order_no}`);
     void router.push(`/releases/${response.data.id}`);
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, "标准回滚创建失败"));
+    message.error(extractHTTPErrorMessage(error, "一键重发创建失败"));
   } finally {
     recovering.value = false;
   }
@@ -2662,31 +2665,23 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="page-wrapper">
-    <div class="page-header-card page-header">
+    <div class="page-header release-detail-header">
       <div class="header-left">
-        <a-button @click="goBack">
-          <template #icon>
-            <ArrowLeftOutlined />
-          </template>
-          返回发布单
-        </a-button>
         <div class="page-header-copy">
-          <h2 class="page-title">发布单详情</h2>
-          <p class="page-subtitle">
-            按 CI / CD 双视图查看发布轨迹、执行状态、日志与阶段进度
-          </p>
+          <h2 class="page-title">详情</h2>
         </div>
       </div>
-      <a-space>
-        <a-button @click="loadDetail">
-          <template #icon>
-            <ReloadOutlined />
-          </template>
-          刷新
+      <div class="page-header-actions release-detail-actions">
+        <a-button
+          v-if="canEdit"
+          class="application-toolbar-action-btn"
+          @click="handleEdit"
+        >
+          编辑
         </a-button>
-        <a-button v-if="canEdit" @click="handleEdit">编辑</a-button>
         <a-button
           v-if="canSubmitApproval"
+          class="application-toolbar-action-btn"
           :loading="approvalActing && approvalActionMode === 'submit'"
           @click="openApprovalActionModal('submit')"
         >
@@ -2694,8 +2689,7 @@ onBeforeUnmount(() => {
         </a-button>
         <a-button
           v-if="canApproveOrder"
-          type="primary"
-          ghost
+          class="application-toolbar-action-btn"
           :loading="approvalActing && approvalActionMode === 'approve'"
           @click="openApprovalActionModal('approve')"
         >
@@ -2703,7 +2697,7 @@ onBeforeUnmount(() => {
         </a-button>
         <a-button
           v-if="canRejectOrder"
-          danger
+          class="application-toolbar-action-btn"
           :loading="approvalActing && approvalActionMode === 'reject'"
           @click="openApprovalActionModal('reject')"
         >
@@ -2711,21 +2705,21 @@ onBeforeUnmount(() => {
         </a-button>
         <a-button
           v-if="canBuild"
+          class="application-toolbar-action-btn"
           :loading="executing && currentDispatchAction === 'build'"
           :disabled="executeLocked"
           @click="handleBuild"
         >
-          构建
+          仅构建
         </a-button>
         <a-button
           v-if="canDeploy"
-          type="primary"
-          ghost
+          class="application-toolbar-action-btn"
           :loading="executing && currentDispatchAction === 'deploy'"
           :disabled="executeLocked"
           @click="handleDeploy"
         >
-          部署
+          发布
         </a-button>
         <a-popconfirm
           v-if="canExecute"
@@ -2738,46 +2732,57 @@ onBeforeUnmount(() => {
             <ExclamationCircleOutlined />
           </template>
           <a-button
-            type="primary"
+            class="application-toolbar-action-btn"
             :loading="executing && currentDispatchAction === 'execute'"
             :disabled="executeLocked"
-            >发布</a-button
           >
+            发布
+          </a-button>
         </a-popconfirm>
         <a-button
           v-else-if="!canBuild && !canDeploy"
-          type="primary"
+          class="application-toolbar-action-btn"
           disabled
         >
           发布
         </a-button>
         <a-popconfirm
-          v-if="canRollback"
-          title="确认基于这张成功单创建标准回滚吗？"
-          ok-text="确认回滚"
+          v-if="canTriggerArgoReplay"
+          :disabled="!canRollback"
+          title="确认基于当前发布单创建一键重发单吗？"
+          ok-text="确认重发"
           cancel-text="取消"
           @confirm="handleRollback"
         >
           <template #icon>
             <ExclamationCircleOutlined class="danger-icon" />
           </template>
-          <a-button class="rollback-trigger-button" :loading="recovering"
-            >回滚到此版本</a-button
+          <a-button
+            class="application-toolbar-action-btn"
+            :disabled="!canRollback"
+            :loading="recovering"
           >
+            一键重发
+          </a-button>
         </a-popconfirm>
         <a-popconfirm
-          v-else-if="canReplay"
+          v-else-if="canTriggerStandardReplay"
+          :disabled="!canReplay"
           :title="replayConfirmTitle(order)"
-          :ok-text="isCiOnlyRecovery(order) ? '确认恢复' : '确认重放'"
+          :ok-text="isCiOnlyRecovery(order) ? '确认重发' : '确认重放'"
           cancel-text="取消"
           @confirm="handleReplay"
         >
           <template #icon>
             <ExclamationCircleOutlined />
           </template>
-          <a-button class="rollback-trigger-button" :loading="recovering">{{
-            replayActionText(order)
-          }}</a-button>
+          <a-button
+            class="application-toolbar-action-btn"
+            :disabled="!canReplay"
+            :loading="recovering"
+          >
+            {{ replayActionText(order) }}
+          </a-button>
         </a-popconfirm>
         <a-popconfirm
           v-if="canCancel"
@@ -2789,9 +2794,20 @@ onBeforeUnmount(() => {
           <template #icon>
             <ExclamationCircleOutlined class="danger-icon" />
           </template>
-          <a-button danger :loading="cancelling">取消发布</a-button>
+          <a-button
+            class="application-toolbar-action-btn"
+            :loading="cancelling"
+          >
+            取消发布
+          </a-button>
         </a-popconfirm>
-      </a-space>
+        <a-button class="application-toolbar-action-btn" @click="goBack">
+          <template #icon>
+            <ArrowLeftOutlined />
+          </template>
+          返回发布单
+        </a-button>
+      </div>
     </div>
 
     <a-card
@@ -2879,45 +2895,122 @@ onBeforeUnmount(() => {
 
     <div class="detail-dashboard">
       <div class="dashboard-main">
-        <a-card
-          class="detail-card"
-          title="执行时间线"
-          :loading="loading"
-          :bordered="true"
-        >
-          <a-empty v-if="stepGroups.length === 0" description="暂无步骤数据" />
-          <div v-else class="step-groups">
-            <div
-              v-for="group in stepGroups"
-              :key="group.key"
-              class="scope-section"
-            >
-              <div class="scope-section-header scope-section-header-inline">
-                <a-tag class="status-chip status-chip-section">{{
-                  group.title
-                }}</a-tag>
-                <span class="scope-section-subtitle"
-                  >{{ group.items.length }} 个步骤</span
+        <a-collapse class="detail-collapse timeline-collapse" ghost>
+          <a-collapse-panel key="execution-timeline" header="执行时间线">
+            <a-spin :spinning="loading">
+              <a-empty v-if="stepGroups.length === 0" description="暂无步骤数据" />
+              <div v-else class="step-groups">
+                <div
+                  v-for="group in stepGroups"
+                  :key="group.key"
+                  class="scope-section"
                 >
+                  <div class="scope-section-header scope-section-header-inline">
+                    <a-tag class="status-chip status-chip-section">{{
+                      group.title
+                    }}</a-tag>
+                    <span class="scope-section-subtitle"
+                      >{{ group.items.length }} 个步骤</span
+                    >
+                  </div>
+                  <a-steps direction="vertical" size="small" class="step-progress">
+                    <a-step
+                      v-for="step in group.items"
+                      :key="step.id"
+                      :title="step.step_name"
+                      :status="stepComponentStatus(step.status)"
+                    >
+                      <template #description>
+                        <div class="step-description">{{ describeStep(step) }}</div>
+                      </template>
+                    </a-step>
+                  </a-steps>
+                </div>
               </div>
-              <a-steps direction="vertical" size="small" class="step-progress">
-                <a-step
-                  v-for="step in group.items"
-                  :key="step.id"
-                  :title="step.step_name"
-                  :status="stepComponentStatus(step.status)"
+            </a-spin>
+          </a-collapse-panel>
+        </a-collapse>
+
+        <a-collapse class="detail-collapse base-info-collapse" ghost>
+          <a-collapse-panel key="base-info" header="基础信息与参数快照">
+            <section class="detail-inline-section">
+              <div class="detail-inline-section-header">
+                <div class="detail-inline-section-title">基础信息</div>
+              </div>
+              <a-descriptions
+                class="detail-info-descriptions"
+                :column="{ xs: 1, md: 2 }"
+                bordered
+              >
+                <a-descriptions-item
+                  v-for="item in detailItems"
+                  :key="item.key || item.label"
+                  :label="item.label"
                 >
-                  <template #description>
-                    <div class="step-description">{{ describeStep(step) }}</div>
+                  <template v-if="item.key === 'order_no'">
+                    <a-space :size="6">
+                      <span>{{ item.value }}</span>
+                      <a-tag
+                        v-if="order?.operation_type === 'rollback'"
+                        class="status-chip status-chip-danger"
+                      >
+                        {{ operationTypeText(order?.operation_type) }}
+                      </a-tag>
+                      <a-tag
+                        v-else-if="order?.operation_type === 'replay'"
+                        class="status-chip status-chip-warning"
+                      >
+                        {{ operationTypeText(order?.operation_type) }}
+                      </a-tag>
+                    </a-space>
                   </template>
-                </a-step>
-              </a-steps>
-            </div>
-          </div>
-        </a-card>
+                  <template v-else>
+                    {{ item.value }}
+                  </template>
+                </a-descriptions-item>
+              </a-descriptions>
+            </section>
+
+            <template v-if="canViewParamSnapshot">
+              <section
+                v-for="group in paramGroups"
+                :key="group.scope"
+                class="detail-inline-section"
+              >
+                <div class="detail-inline-section-header">
+                  <div class="detail-inline-section-title">
+                    {{ group.title }}
+                  </div>
+                </div>
+                <a-empty
+                  v-if="group.items.length === 0"
+                  description="暂无参数快照"
+                />
+                <a-table
+                  class="detail-data-table detail-snapshot-table"
+                  v-else
+                  row-key="id"
+                  :columns="paramColumns"
+                  :data-source="group.items"
+                  :pagination="false"
+                  :scroll="{ x: 1200 }"
+                >
+                  <template #bodyCell="{ column, record }">
+                    <template v-if="column.key === 'created_at'">
+                      {{ formatTime(record.created_at) }}
+                    </template>
+                    <template v-else-if="column.key === 'param_value'">
+                      {{ record.param_value || "-" }}
+                    </template>
+                  </template>
+                </a-table>
+              </section>
+            </template>
+          </a-collapse-panel>
+        </a-collapse>
 
         <a-card
-          class="detail-card"
+          class="detail-card detail-section-card"
           title="阶段与日志"
           :loading="pipelineStageLoading"
           :bordered="true"
@@ -2927,27 +3020,6 @@ onBeforeUnmount(() => {
               <template #tab>
                 <span>管线进度</span>
               </template>
-              <div class="stage-toolbar">
-                <a-space>
-                  <a-tag
-                    v-if="pipelineStageExecutorType"
-                    class="status-chip status-chip-running"
-                    >{{ pipelineStageExecutorType }}</a-tag
-                  >
-                  <a-button size="small" @click="loadPipelineStageView"
-                    >刷新阶段</a-button
-                  >
-                </a-space>
-              </div>
-
-              <a-alert
-                v-if="pipelineStageMessage"
-                class="pipeline-stage-alert"
-                type="info"
-                show-icon
-                :message="pipelineStageMessage"
-              />
-
               <div v-if="stageSections.length > 0" class="stage-sections">
                 <div
                   v-for="section in stageSections"
@@ -2955,80 +3027,147 @@ onBeforeUnmount(() => {
                   class="scope-section"
                 >
                   <div class="scope-section-header scope-section-header-inline">
-                    <a-tag class="status-chip status-chip-section">{{
-                      section.title
-                    }}</a-tag>
-                    <span class="scope-section-subtitle">{{
-                      section.execution?.binding_name || "-"
-                    }}</span>
+                    <div class="scope-section-heading">
+                      <a-tag class="status-chip status-chip-section">{{
+                        section.title
+                      }}</a-tag>
+                      <a-space class="pipeline-stage-title-actions" size="small">
+                        <a-popover
+                          v-if="pipelineStageMessage"
+                          trigger="click"
+                          placement="bottomLeft"
+                          overlay-class-name="release-tip-popover"
+                        >
+                          <template #content>
+                            <div class="release-tip-content">
+                              {{ pipelineStageMessage }}
+                            </div>
+                          </template>
+                          <button
+                            class="release-tip-trigger release-tip-trigger-info"
+                            type="button"
+                            aria-label="查看管线提示"
+                          >
+                            <ExclamationCircleOutlined />
+                          </button>
+                        </a-popover>
+                        <a-tag class="pipeline-executor-chip">
+                          {{
+                            section.execution?.provider ||
+                            pipelineStageExecutorType ||
+                            "-"
+                          }}
+                        </a-tag>
+                        <a-button size="small" @click="loadPipelineStageView"
+                          >刷新阶段</a-button
+                        >
+                      </a-space>
+                    </div>
+                    <div class="scope-section-meta">
+                      <span class="scope-section-subtitle">{{
+                        section.execution?.binding_name || "-"
+                      }}</span>
+                      <a-popover
+                        v-if="section.isArgoCD"
+                        trigger="click"
+                        placement="bottomRight"
+                        overlay-class-name="release-tip-popover"
+                      >
+                        <template #content>
+                          <div class="release-tip-content">
+                            当前阶段来自 ArgoCD 执行链路，展示的是 GitOps
+                            写回、Sync 与健康检查进度
+                          </div>
+                        </template>
+                        <button
+                          class="release-tip-trigger release-tip-trigger-info"
+                          type="button"
+                          aria-label="查看阶段提示"
+                        >
+                          <ExclamationCircleOutlined />
+                        </button>
+                      </a-popover>
+                      <a-popover
+                        v-else-if="!section.isJenkins"
+                        trigger="click"
+                        placement="bottomRight"
+                        overlay-class-name="release-tip-popover"
+                      >
+                        <template #content>
+                          <div class="release-tip-content">
+                            {{ scopeLabel(section.scope) }} 当前使用
+                            {{ section.execution?.provider || "未知执行器" }}，部署进度视图待接入
+                          </div>
+                        </template>
+                        <button
+                          class="release-tip-trigger release-tip-trigger-info"
+                          type="button"
+                          aria-label="查看阶段提示"
+                        >
+                          <ExclamationCircleOutlined />
+                        </button>
+                      </a-popover>
+                    </div>
                   </div>
 
-                  <a-alert
-                    v-if="section.isArgoCD"
-                    class="pipeline-stage-alert"
-                    type="info"
-                    show-icon
-                    message="当前阶段来自 ArgoCD 执行链路，展示的是 GitOps 写回、Sync 与健康检查进度。"
-                  />
-                  <a-alert
-                    v-else-if="!section.isJenkins"
-                    class="pipeline-stage-alert"
-                    type="info"
-                    show-icon
-                    :message="`${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，部署进度视图待接入。`"
-                  />
                   <a-empty
                     v-if="section.stages.length === 0"
                     :description="pipelineStageEmptyDescription(section)"
                   />
-                  <a-table
-                    v-else
-                    row-key="id"
-                    :columns="pipelineStageColumns"
-                    :data-source="section.stages"
-                    :pagination="false"
-                    :scroll="{ x: 1200 }"
-                  >
-                    <template #bodyCell="{ column, record }">
-                      <template v-if="column.key === 'status'">
+                  <div v-else class="pipeline-stage-chain">
+                    <div
+                      v-for="stage in section.stages"
+                      :key="stage.id"
+                      class="pipeline-stage-node"
+                      :class="[
+                        `pipeline-stage-node-${stage.status}`,
+                        { 'pipeline-stage-node-clickable': section.isJenkins },
+                      ]"
+                      :role="section.isJenkins ? 'button' : undefined"
+                      :tabindex="section.isJenkins ? 0 : undefined"
+                      :title="section.isJenkins ? '点击查看阶段日志' : undefined"
+                      @click="section.isJenkins && openStageLogDrawer(stage)"
+                      @keydown.enter.prevent="
+                        section.isJenkins && openStageLogDrawer(stage)
+                      "
+                      @keydown.space.prevent="
+                        section.isJenkins && openStageLogDrawer(stage)
+                      "
+                    >
+                      <div class="pipeline-stage-order-col">
+                        <span class="pipeline-stage-index">{{
+                          stage.sort_no
+                        }}</span>
                         <a-tag
                           :class="[
                             'status-tag',
-                            statusToneClass(record.status),
+                            statusToneClass(stage.status),
                           ]"
                         >
                           <LoadingOutlined
-                            v-if="isRunningStatus(record.status)"
+                            v-if="isRunningStatus(stage.status)"
                             spin
                           />
-                          <span>{{ statusText(record.status) }}</span>
+                          <span>{{ statusText(stage.status) }}</span>
                         </a-tag>
-                      </template>
-                      <template v-else-if="column.key === 'duration_millis'">
-                        {{ formatDuration(record.duration_millis) }}
-                      </template>
-                      <template v-else-if="column.key === 'started_at'">
-                        {{ formatTime(record.started_at) }}
-                      </template>
-                      <template v-else-if="column.key === 'finished_at'">
-                        {{ formatTime(record.finished_at) }}
-                      </template>
-                      <template v-else-if="column.key === 'actions'">
-                        <a-button
-                          v-if="section.isJenkins"
-                          type="link"
-                          size="small"
-                          @click="openStageLogDrawer(record)"
-                        >
-                          <template #icon>
-                            <EyeOutlined />
-                          </template>
-                          查看日志
-                        </a-button>
-                        <span v-else>-</span>
-                      </template>
-                    </template>
-                  </a-table>
+                      </div>
+                      <div class="pipeline-stage-node-main">
+                        <div class="pipeline-stage-node-head">
+                          <div class="pipeline-stage-name">
+                            {{ stage.stage_name || "-" }}
+                          </div>
+                        </div>
+                        <div class="pipeline-stage-meta-line">
+                          <span>
+                            <b>耗时</b>{{ formatDuration(stage.duration_millis) }}
+                          </span>
+                          <span v-if="stage.raw_status" :title="stage.raw_status">
+                            <b>原始</b>{{ stage.raw_status }}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
               <a-empty v-else description="暂无管线进度数据" />
@@ -3039,15 +3178,63 @@ onBeforeUnmount(() => {
                 <span>实时日志</span>
               </template>
               <div class="log-sections">
-                <a-card
+                <section
                   v-for="section in logSections"
                   :key="section.scope"
-                  class="nested-card"
-                  :title="section.title"
-                  :bordered="false"
+                  class="detail-inline-section"
                 >
-                  <template #extra>
-                    <a-space v-if="section.isJenkins">
+                  <div class="detail-inline-section-header">
+                    <div class="detail-inline-section-title-row">
+                      <div class="detail-inline-section-title">
+                        {{ section.title }}
+                      </div>
+                      <a-popover
+                        v-if="!section.isJenkins"
+                        trigger="click"
+                        placement="bottomLeft"
+                        overlay-class-name="release-tip-popover"
+                      >
+                        <template #content>
+                          <div class="release-tip-content">
+                            {{
+                              section.execution?.provider === "argocd"
+                                ? `${scopeLabel(section.scope)} 当前使用 ArgoCD，当前版本先展示执行进度；事件流/日志视图将在后续版本补齐`
+                                : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || "未知执行器"}，独立日志视图待接入`
+                            }}
+                          </div>
+                        </template>
+                        <button
+                          class="release-tip-trigger release-tip-trigger-info"
+                          type="button"
+                          aria-label="查看日志提示"
+                        >
+                          <ExclamationCircleOutlined />
+                        </button>
+                      </a-popover>
+                    </div>
+                    <a-space
+                      v-if="section.isJenkins"
+                      class="detail-inline-section-extra"
+                    >
+                      <a-popover
+                        v-if="logSectionWarningMessage(section.scope)"
+                        trigger="click"
+                        placement="bottomRight"
+                        overlay-class-name="release-tip-popover"
+                      >
+                        <template #content>
+                          <div class="release-tip-content">
+                            {{ logSectionWarningMessage(section.scope) }}
+                          </div>
+                        </template>
+                        <button
+                          class="release-tip-trigger release-tip-trigger-warning"
+                          type="button"
+                          aria-label="查看日志警告"
+                        >
+                          <ExclamationCircleOutlined />
+                        </button>
+                      </a-popover>
                       <a-tag
                         v-if="logStreamHintText(section.scope)"
                         :color="logStreamTagColor(section.scope)"
@@ -3077,27 +3264,9 @@ onBeforeUnmount(() => {
                         >清空</a-button
                       >
                     </a-space>
-                  </template>
+                  </div>
 
-                  <a-alert
-                    v-if="!section.isJenkins"
-                    class="log-alert"
-                    type="info"
-                    show-icon
-                    :message="
-                      section.execution?.provider === 'argocd'
-                        ? `${scopeLabel(section.scope)} 当前使用 ArgoCD，当前版本先展示执行进度；事件流/日志视图将在后续版本补齐。`
-                        : `${scopeLabel(section.scope)} 当前使用 ${section.execution?.provider || '未知执行器'}，独立日志视图待接入。`
-                    "
-                  />
-                  <template v-else>
-                    <a-alert
-                      v-if="logSectionWarningMessage(section.scope)"
-                      class="log-alert"
-                      type="warning"
-                      show-icon
-                      :message="logSectionWarningMessage(section.scope)"
-                    />
+                  <template v-if="section.isJenkins">
                     <pre
                       :ref="
                         (el) =>
@@ -3111,90 +3280,139 @@ onBeforeUnmount(() => {
                       }}</pre
                     >
                   </template>
-                </a-card>
+                </section>
               </div>
             </a-tab-pane>
           </a-tabs>
         </a-card>
 
-        <a-collapse class="detail-collapse" ghost>
-          <a-collapse-panel key="base-info" header="基础信息与参数快照">
-            <a-card
-              class="nested-card"
-              title="基础信息"
-              :loading="loading"
-              :bordered="false"
-            >
-              <a-descriptions :column="{ xs: 1, md: 2 }" bordered>
-                <a-descriptions-item
-                  v-for="item in detailItems"
-                  :key="item.key || item.label"
-                  :label="item.label"
-                >
-                  <template v-if="item.key === 'order_no'">
-                    <a-space :size="6">
-                      <span>{{ item.value }}</span>
-                      <a-tag
-                        v-if="order?.operation_type === 'rollback'"
-                        class="status-chip status-chip-danger"
-                      >
-                        {{ operationTypeText(order?.operation_type) }}
-                      </a-tag>
-                      <a-tag
-                        v-else-if="order?.operation_type === 'replay'"
-                        class="status-chip status-chip-warning"
-                      >
-                        {{ operationTypeText(order?.operation_type) }}
-                      </a-tag>
-                    </a-space>
-                  </template>
-                  <template v-else>
-                    {{ item.value }}
-                  </template>
-                </a-descriptions-item>
-              </a-descriptions>
-            </a-card>
-
-            <template v-if="canViewParamSnapshot">
-              <a-card
-                v-for="group in paramGroups"
-                :key="group.scope"
-                class="nested-card"
-                :title="group.title"
-                :loading="loading"
-                :bordered="false"
-              >
-                <a-empty
-                  v-if="group.items.length === 0"
-                  description="暂无参数快照"
-                />
-                <a-table
-                  v-else
-                  row-key="id"
-                  :columns="paramColumns"
-                  :data-source="group.items"
-                  :pagination="false"
-                  :scroll="{ x: 1200 }"
-                >
-                  <template #bodyCell="{ column, record }">
-                    <template v-if="column.key === 'created_at'">
-                      {{ formatTime(record.created_at) }}
-                    </template>
-                    <template v-else-if="column.key === 'param_value'">
-                      {{ record.param_value || "-" }}
-                    </template>
-                  </template>
-                </a-table>
-              </a-card>
+        <a-collapse
+          v-if="canViewParamSnapshot && valueProgressGroups.length > 0"
+          class="detail-collapse value-progress-collapse"
+          ghost
+        >
+          <a-collapse-panel key="value-progress">
+            <template #header>
+              <div class="value-progress-collapse-heading">
+                <span class="value-progress-collapse-title">取值进度</span>
+                <span class="value-progress-collapse-summary">
+                  {{ valueProgressGroups.length }} 组 · {{ valueProgressTotal }} 项
+                </span>
+              </div>
             </template>
+            <template #extra>
+              <a-popover
+                trigger="click"
+                placement="bottomRight"
+                overlay-class-name="release-tip-popover"
+              >
+                <template #content>
+                  <div class="release-tip-content">
+                    这里展示模板中已映射标准 Key 的实时取值情况
+                  </div>
+                </template>
+                <button
+                  class="release-tip-trigger release-tip-trigger-info"
+                  type="button"
+                  aria-label="查看取值说明"
+                  @click.stop
+                >
+                  <ExclamationCircleOutlined />
+                </button>
+              </a-popover>
+            </template>
+            <a-spin :spinning="loading">
+              <div class="value-progress-group-list">
+                <section
+                  v-for="group in valueProgressGroups"
+                  :key="`value-${group.scope}`"
+                  class="value-progress-group"
+                >
+                  <div class="value-progress-group-header">
+                    <div class="value-progress-group-title">
+                      <a-tag class="status-chip status-chip-section">
+                        {{ scopeLabel(group.scope) }}
+                      </a-tag>
+                    </div>
+                    <span class="value-progress-group-meta">
+                      {{ group.items.length }} 项
+                    </span>
+                  </div>
+                  <div class="value-progress-item-list">
+                    <div
+                      v-for="item in group.items"
+                      :key="`${item.pipeline_scope}-${item.param_key}-${item.executor_param_name}`"
+                      class="value-progress-item"
+                      :class="`value-progress-item-${item.status}`"
+                    >
+                      <div class="value-progress-keyline">
+                        <span class="value-progress-order">{{
+                          item.sort_no
+                        }}</span>
+                        <div class="value-progress-copy">
+                          <div class="value-progress-key">
+                            {{ item.param_key || "-" }}
+                          </div>
+                          <div class="value-progress-name">
+                            <span>{{ item.param_name || "-" }}</span>
+                            <a-tag
+                              v-if="item.required"
+                              class="required-tag status-chip status-chip-danger"
+                              >必需</a-tag
+                            >
+                          </div>
+                        </div>
+                      </div>
+                      <div class="value-progress-current">
+                        <span class="value-progress-label">当前值</span>
+                        <span
+                          class="value-progress-value"
+                          :title="item.value || '-'"
+                          >{{ item.value || "-" }}</span
+                        >
+                      </div>
+                      <div class="value-progress-row-meta">
+                        <span>
+                          <b>执行器参数</b>
+                          <em :title="item.executor_param_name || '-'">{{
+                            item.executor_param_name || "-"
+                          }}</em>
+                        </span>
+                        <span>
+                          <b>来源</b>
+                          <em>{{ item.value_source || "-" }}</em>
+                        </span>
+                        <span>
+                          <b>更新时间</b>
+                          <em>{{ formatTime(item.updated_at) }}</em>
+                        </span>
+                      </div>
+                      <a-tag
+                        :class="[
+                          'status-tag',
+                          valueProgressToneClass(item.status),
+                        ]"
+                      >
+                        <LoadingOutlined v-if="item.status === 'running'" spin />
+                        <span>{{ valueProgressStatusText(item.status) }}</span>
+                      </a-tag>
+                      <div v-if="item.message" class="value-progress-message">
+                        {{ item.message }}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </a-spin>
           </a-collapse-panel>
         </a-collapse>
+
       </div>
 
       <div class="dashboard-side">
         <a-card
           v-if="showConcurrentBatchCard"
-          class="detail-card"
+          class="detail-card detail-side-card"
           title="并发批次进度"
           :loading="concurrentBatchLoading"
           :bordered="true"
@@ -3269,7 +3487,7 @@ onBeforeUnmount(() => {
 
         <a-card
           v-if="showApprovalCard"
-          class="detail-card"
+          class="detail-card detail-side-card"
           title="审批进度"
           :loading="loading || approvalRecordsLoading"
           :bordered="true"
@@ -3284,18 +3502,39 @@ onBeforeUnmount(() => {
                   {{ approvalStatusSummary }}
                 </div>
               </div>
-              <a-tag
-                :class="['status-tag', statusToneClass(currentBusinessStatus)]"
-              >
-                <LoadingOutlined
-                  v-if="
-                    currentBusinessStatus === 'approving' ||
-                    currentBusinessStatus === 'pending_approval'
-                  "
-                  :spin="currentBusinessStatus === 'approving'"
-                />
-                <span>{{ statusText(currentBusinessStatus) }}</span>
-              </a-tag>
+              <a-space class="approval-summary-actions">
+                <a-popover
+                  v-if="order?.rejected_reason"
+                  trigger="click"
+                  placement="bottomRight"
+                  overlay-class-name="release-tip-popover"
+                >
+                  <template #content>
+                    <div class="release-tip-content">
+                      拒绝原因：{{ order.rejected_reason }}
+                    </div>
+                  </template>
+                  <button
+                    class="release-tip-trigger release-tip-trigger-warning"
+                    type="button"
+                    aria-label="查看拒绝原因"
+                  >
+                    <ExclamationCircleOutlined />
+                  </button>
+                </a-popover>
+                <a-tag
+                  :class="['status-tag', statusToneClass(currentBusinessStatus)]"
+                >
+                  <LoadingOutlined
+                    v-if="
+                      currentBusinessStatus === 'approving' ||
+                      currentBusinessStatus === 'pending_approval'
+                    "
+                    :spin="currentBusinessStatus === 'approving'"
+                  />
+                  <span>{{ statusText(currentBusinessStatus) }}</span>
+                </a-tag>
+              </a-space>
             </div>
             <div class="approval-meta-grid">
               <div class="approval-meta-item">
@@ -3323,13 +3562,6 @@ onBeforeUnmount(() => {
                 }}</span>
               </div>
             </div>
-            <a-alert
-              v-if="order?.rejected_reason"
-              class="pipeline-stage-alert"
-              type="warning"
-              show-icon
-              :message="`拒绝原因：${order.rejected_reason}`"
-            />
           </div>
 
           <div class="approval-records">
@@ -3370,18 +3602,33 @@ onBeforeUnmount(() => {
 
         <a-card
           v-if="showPrecheckCard"
-          class="detail-card"
+          class="detail-card detail-side-card"
           :title="precheckCardTitle"
           :loading="precheckLoading"
           :bordered="true"
         >
-          <a-alert
-            v-if="precheckSummaryMessage"
-            class="pipeline-stage-alert"
-            :type="precheckSummaryTone"
-            show-icon
-            :message="precheckSummaryMessage"
-          />
+          <template #extra>
+            <a-popover
+              v-if="precheckSummaryMessage"
+              trigger="click"
+              placement="bottomRight"
+              overlay-class-name="release-tip-popover"
+            >
+              <template #content>
+                <div class="release-tip-content">
+                  {{ precheckSummaryMessage }}
+                </div>
+              </template>
+              <button
+                class="release-tip-trigger"
+                :class="`release-tip-trigger-${precheckSummaryTone}`"
+                type="button"
+                aria-label="查看预检提示"
+              >
+                <ExclamationCircleOutlined />
+              </button>
+            </a-popover>
+          </template>
           <div v-if="precheck?.items?.length" class="precheck-list">
             <div
               v-for="item in precheck.items"
@@ -3402,242 +3649,197 @@ onBeforeUnmount(() => {
         </a-card>
 
         <a-card
-          class="detail-card"
+          class="detail-card detail-side-card"
           title="执行单元"
           :loading="loading"
           :bordered="true"
         >
           <div class="execution-stack">
-            <div
-              v-for="item in executionSections"
-              :key="item.scope"
-              class="execution-summary-card"
-            >
-              <div class="execution-summary-head">
-                <div>
-                  <div class="execution-summary-title">{{ item.title }}</div>
-                  <div class="execution-summary-subtitle">
-                    {{ item.execution.binding_name || "-" }}
-                  </div>
-                </div>
-                <a-tag
-                  :class="[
-                    'status-tag',
-                    statusToneClass(item.execution.status),
-                  ]"
-                >
-                  <LoadingOutlined
-                    v-if="isRunningStatus(item.execution.status)"
-                    spin
-                  />
-                  <span>{{ statusText(item.execution.status) }}</span>
-                </a-tag>
-              </div>
-              <div class="execution-summary-meta">
-                <span>执行器：{{ item.execution.provider || "-" }}</span>
-                <span>开始：{{ formatTime(item.execution.started_at) }}</span>
-                <span>结束：{{ formatTime(item.execution.finished_at) }}</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="execution-extra-section">
             <a-empty
-              v-if="hookProgressItems.length === 0"
-              description="当前发布单未产生 Hook 执行记录"
+              v-if="executionUnitItems.length === 0"
+              description="暂无执行单元"
             />
-            <div v-else class="execution-substack">
+            <template v-else>
               <div
-                v-for="group in hookProgressGroups"
-                :key="group.type"
-                class="execution-summary-card execution-summary-card-hook"
+                v-for="(unit, index) in executionUnitItems"
+                :key="unit.key"
+                class="execution-summary-card"
+                :class="{ 'execution-summary-card-hook': unit.kind === 'hook' }"
               >
-                <div class="execution-summary-head">
-                  <div>
-                    <div class="execution-summary-title">{{ group.title }}</div>
-                    <div class="execution-summary-subtitle">
-                      {{ hookGroupSummaryText(group) }}
-                    </div>
-                  </div>
-                  <a-tag
-                    :class="['status-tag', hookToneClass(group.overallStatus)]"
-                  >
-                    <LoadingOutlined
-                      v-if="group.overallStatus === 'running'"
-                      spin
-                    />
-                    <span>{{ hookStatusText(group.overallStatus) }}</span>
-                  </a-tag>
-                </div>
-
-                <div class="hook-progress-rows">
-                  <div
-                    v-for="item in group.items"
-                    :key="item.id"
-                    class="hook-progress-row"
-                  >
-                    <div class="hook-progress-row-main">
-                      <div class="hook-progress-item-name-row">
-                        <span class="hook-progress-item-index"
-                          >#{{ item.order_index }}</span
-                        >
-                        <span class="hook-progress-item-name">{{
-                          item.step_name
-                        }}</span>
-                        <a-tag
-                          :class="['status-tag', hookToneClass(item.status)]"
-                        >
-                          <LoadingOutlined v-if="item.status === 'running'" spin />
-                          <span>{{ hookStatusText(item.status) }}</span>
-                        </a-tag>
-                      </div>
-                      <div class="hook-progress-row-detail">
-                        {{ hookExecutionContentText(item) }}
-                      </div>
-                      <div class="hook-progress-row-meta">
-                        <span>{{ item.step_code }}</span>
-                        <span v-if="item.related_task_count > 0"
-                          >Agent 任务：{{ item.related_task_count }} 个</span
-                        >
-                        <span>开始：{{ formatTime(item.started_at) }}</span>
-                        <span>结束：{{ formatTime(item.finished_at) }}</span>
-                      </div>
-                    </div>
-                    <div class="hook-progress-item-actions">
-                      <a-button
-                        type="link"
-                        size="small"
-                        @click="toggleHookVariables(item.id)"
-                      >
-                        {{
-                          expandedHookVariableMap[item.id] ? "收起变量" : "查看变量"
-                        }}
-                      </a-button>
-                      <a-button
-                        type="link"
-                        size="small"
-                        @click="toggleHookLogs(item.id)"
-                      >
-                        {{ expandedHookLogMap[item.id] ? "收起日志" : "查看日志" }}
-                      </a-button>
-                    </div>
-                    <div
-                      v-if="expandedHookVariableMap[item.id]"
-                      class="hook-progress-panel"
-                    >
-                      <div class="hook-progress-panel-title">
-                        变量预览（兼容视图）
-                      </div>
-                      <div class="hook-progress-context-grid">
-                        <div
-                          v-for="contextItem in hookContextPreviewItems"
-                          :key="`${item.id}-${contextItem.label}`"
-                          class="hook-progress-context-item"
-                        >
-                          <span class="hook-progress-context-label">{{
-                            contextItem.label
-                          }}</span>
-                          <span class="hook-progress-context-value">{{
-                            contextItem.value
-                          }}</span>
+                <template v-if="unit.kind === 'pipeline'">
+                  <div class="execution-summary-head">
+                    <div class="execution-summary-main">
+                      <span class="execution-summary-order">{{
+                        index + 1
+                      }}</span>
+                      <div class="execution-summary-copy">
+                        <div class="execution-summary-title">
+                          {{ unit.title }}
+                        </div>
+                        <div class="execution-summary-subtitle">
+                          {{ unit.execution.binding_name || "-" }}
                         </div>
                       </div>
                     </div>
-                    <div
-                      v-if="expandedHookLogMap[item.id]"
-                      class="hook-progress-panel"
-                    >
-                      <div class="hook-progress-panel-title">执行日志</div>
-                      <pre class="hook-progress-log">{{
-                        hookExecutionLogText(item)
-                      }}</pre>
+                    <div class="execution-summary-actions">
+                      <a-tag
+                        :class="[
+                          'status-tag',
+                          'execution-summary-status',
+                          statusToneClass(unit.execution.status),
+                        ]"
+                      >
+                        <LoadingOutlined
+                          v-if="isRunningStatus(unit.execution.status)"
+                          spin
+                        />
+                        <span>{{ statusText(unit.execution.status) }}</span>
+                      </a-tag>
                     </div>
                   </div>
-                </div>
+                  <div class="execution-summary-meta">
+                    <span>
+                      <span class="execution-summary-meta-label">执行器</span>
+                      <span>{{ unit.execution.provider || "-" }}</span>
+                    </span>
+                    <span>
+                      <span class="execution-summary-meta-label">开始</span>
+                      <span>{{ formatTime(unit.execution.started_at) }}</span>
+                    </span>
+                    <span>
+                      <span class="execution-summary-meta-label">结束</span>
+                      <span>{{ formatTime(unit.execution.finished_at) }}</span>
+                    </span>
+                  </div>
+                </template>
+                <template v-else>
+                  <div class="execution-summary-head">
+                    <div class="execution-summary-main">
+                      <span class="execution-summary-order">{{
+                        index + 1
+                      }}</span>
+                      <div class="execution-summary-copy">
+                        <div class="execution-summary-title">
+                          {{ unit.group.title }}
+                        </div>
+                        <div class="execution-summary-subtitle">
+                          {{ hookGroupSummaryText(unit.group) }}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="execution-summary-actions">
+                      <a-button
+                        class="hook-task-toggle"
+                        :class="{
+                          'hook-task-toggle-open':
+                            expandedHookTaskMap[unit.group.key],
+                        }"
+                        size="small"
+                        shape="round"
+                        @click="toggleHookTasks(unit.group.key)"
+                      >
+                        {{
+                          expandedHookTaskMap[unit.group.key]
+                            ? "收起任务"
+                            : `展开任务 ${unit.group.items.length}`
+                        }}
+                      </a-button>
+                      <a-tag
+                        :class="[
+                          'status-tag',
+                          'execution-summary-status',
+                          hookToneClass(unit.group.overallStatus),
+                        ]"
+                      >
+                        <LoadingOutlined
+                          v-if="unit.group.overallStatus === 'running'"
+                          spin
+                        />
+                        <span>{{ hookStatusText(unit.group.overallStatus) }}</span>
+                      </a-tag>
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="expandedHookTaskMap[unit.group.key]"
+                    class="hook-progress-rows"
+                  >
+                    <div
+                      v-for="item in unit.group.items"
+                      :key="item.id"
+                      class="hook-progress-row"
+                    >
+                      <div class="hook-progress-row-main">
+                        <div class="hook-progress-item-name-row">
+                          <span class="hook-progress-item-index"
+                            >#{{ item.order_index }}</span
+                          >
+                          <span class="hook-progress-item-name">{{
+                            item.step_name
+                          }}</span>
+                          <a-tag
+                            :class="['status-tag', hookToneClass(item.status)]"
+                          >
+                            <LoadingOutlined v-if="item.status === 'running'" spin />
+                            <span>{{ hookStatusText(item.status) }}</span>
+                          </a-tag>
+                        </div>
+                        <div class="hook-progress-row-detail">
+                          {{ hookExecutionContentText(item) }}
+                        </div>
+                        <div class="hook-progress-task-grid">
+                          <div class="hook-progress-task-item">
+                            <span class="hook-progress-task-label">阶段/类型</span>
+                            <span class="hook-progress-task-value">{{
+                              hookTaskStageTypeText(item)
+                            }}</span>
+                          </div>
+                          <div class="hook-progress-task-item">
+                            <span class="hook-progress-task-label">关联任务</span>
+                            <span class="hook-progress-task-value">{{
+                              hookTaskReferenceText(item)
+                            }}</span>
+                          </div>
+                          <div class="hook-progress-task-item">
+                            <span class="hook-progress-task-label">开始</span>
+                            <span class="hook-progress-task-value">{{
+                              formatTime(item.started_at)
+                            }}</span>
+                          </div>
+                          <div class="hook-progress-task-item">
+                            <span class="hook-progress-task-label">结束</span>
+                            <span class="hook-progress-task-value">{{
+                              formatTime(item.finished_at)
+                            }}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="hook-progress-item-actions">
+                        <a-button
+                          type="link"
+                          size="small"
+                          @click="toggleHookLogs(item.id)"
+                        >
+                          {{ expandedHookLogMap[item.id] ? "收起日志" : "查看日志" }}
+                        </a-button>
+                      </div>
+                      <div
+                        v-if="expandedHookLogMap[item.id]"
+                        class="hook-progress-panel"
+                      >
+                        <div class="hook-progress-panel-title">执行日志</div>
+                        <pre class="hook-progress-log">{{
+                          hookExecutionLogText(item)
+                        }}</pre>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
-            </div>
+            </template>
           </div>
         </a-card>
 
-        <a-card
-          class="detail-card"
-          title="发布上下文"
-          :loading="loading"
-          :bordered="true"
-        >
-          <div class="context-list">
-            <div
-              v-for="item in contextFacts"
-              :key="item.label"
-              class="context-item"
-            >
-              <span class="context-label">{{ item.label }}</span>
-              <span class="context-value">{{ item.value }}</span>
-            </div>
-          </div>
-        </a-card>
-
-        <template v-if="canViewParamSnapshot">
-          <a-card
-            v-for="group in valueProgressGroups"
-            :key="`value-${group.scope}`"
-            class="detail-card"
-            :title="group.title"
-            :loading="loading"
-            :bordered="true"
-          >
-            <a-alert
-              class="pipeline-stage-alert"
-              type="info"
-              show-icon
-              message="这里展示模板中已映射标准 Key 的实时取值情况。"
-            />
-            <a-table
-              row-key="rowKey"
-              :columns="valueProgressColumns"
-              :data-source="
-                group.items.map((item) => ({
-                  ...item,
-                  rowKey: `${item.pipeline_scope}-${item.param_key}-${item.executor_param_name}`,
-                }))
-              "
-              :pagination="false"
-              size="small"
-              :scroll="{ x: 1200 }"
-            >
-              <template #bodyCell="{ column, record }">
-                <template v-if="column.key === 'status'">
-                  <a-tag
-                    :class="[
-                      'status-tag',
-                      valueProgressToneClass(record.status),
-                    ]"
-                  >
-                    <LoadingOutlined v-if="record.status === 'running'" spin />
-                    <span>{{ valueProgressStatusText(record.status) }}</span>
-                  </a-tag>
-                </template>
-                <template v-else-if="column.key === 'value'">
-                  {{ record.value || "-" }}
-                </template>
-                <template v-else-if="column.key === 'value_source'">
-                  {{ record.value_source || "-" }}
-                </template>
-                <template v-else-if="column.key === 'updated_at'">
-                  {{ formatTime(record.updated_at) }}
-                </template>
-                <template v-else-if="column.key === 'param_name'">
-                  <span>{{ record.param_name || "-" }}</span>
-                  <a-tag
-                    v-if="record.required"
-                    class="required-tag status-chip status-chip-danger"
-                    >必需</a-tag
-                  >
-                </template>
-              </template>
-            </a-table>
-          </a-card>
-        </template>
       </div>
     </div>
 
@@ -3668,16 +3870,28 @@ onBeforeUnmount(() => {
             @click="loadStageLog"
             >刷新日志</a-button
           >
+          <a-popover
+            v-if="stageLogSyncMessage"
+            trigger="click"
+            placement="bottomRight"
+            overlay-class-name="release-tip-popover"
+          >
+            <template #content>
+              <div class="release-tip-content">
+                {{ stageLogSyncMessage }}
+              </div>
+            </template>
+            <button
+              class="release-tip-trigger release-tip-trigger-info"
+              type="button"
+              aria-label="查看日志同步提示"
+            >
+              <ExclamationCircleOutlined />
+            </button>
+          </a-popover>
         </a-space>
       </template>
 
-      <a-alert
-        v-if="stageLogFetchedAt"
-        class="pipeline-stage-alert"
-        type="info"
-        show-icon
-        :message="`最近同步时间：${stageLogFetchedAt}${stageLogHasMore ? '，当前阶段仍在持续输出日志' : ''}`"
-      />
       <pre class="log-panel stage-log-panel">{{
         stageLogContent || "暂无阶段日志输出"
       }}</pre>
@@ -3717,18 +3931,418 @@ onBeforeUnmount(() => {
   gap: 20px;
 }
 
+.release-detail-header {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
 .header-left {
   display: flex;
   align-items: center;
   gap: 12px;
 }
 
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+  padding-inline: 14px;
+  font-weight: 600;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-action-btn.ant-btn:focus-visible),
+:deep(.application-toolbar-action-btn.ant-btn:active) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn[disabled]),
+:deep(.application-toolbar-action-btn.ant-btn.ant-btn-disabled) {
+  opacity: 0.58;
+  color: rgba(15, 23, 42, 0.62) !important;
+}
+
 .detail-card {
   border-radius: var(--radius-xl);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(241, 245, 249, 0.34);
+  box-shadow: none;
+}
+
+.detail-card:not(.release-hero-card) {
+  padding: 18px;
+  border-radius: 24px;
+  border-color: rgba(191, 219, 254, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.055), transparent 34%),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.82) 0%,
+      rgba(248, 250, 252, 0.62) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 18px 42px rgba(15, 23, 42, 0.045);
+}
+
+.detail-section-card {
+  border-color: rgba(147, 197, 253, 0.34);
+  background:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.055), transparent 30%),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.86) 0%,
+      rgba(248, 250, 252, 0.64) 100%
+    );
+}
+
+.detail-side-card {
+  border-color: rgba(203, 213, 225, 0.58);
+  background:
+    radial-gradient(circle at top right, rgba(37, 99, 235, 0.05), transparent 34%),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.76) 0%,
+      rgba(248, 250, 252, 0.56) 100%
+    );
+}
+
+.detail-card :deep(.ant-card-head) {
+  min-height: auto;
+  padding: 0 0 14px;
+  border-bottom: none;
+  background: transparent;
+}
+
+.detail-card :deep(.ant-card-head-title) {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-dashboard-900);
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.detail-section-card :deep(.ant-card-head-title)::before,
+.detail-side-card :deep(.ant-card-head-title)::before {
+  content: "";
+  width: 7px;
+  height: 18px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #60a5fa 0%, #2563eb 100%);
+  box-shadow: 0 8px 16px rgba(37, 99, 235, 0.18);
+}
+
+.detail-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
+}
+
+.detail-data-table :deep(.ant-table-container) {
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 18px;
+  background: transparent;
+}
+
+.detail-data-table :deep(.ant-table) {
+  background: transparent;
+}
+
+.detail-data-table :deep(.ant-table-thead > tr > th) {
+  border-bottom: none !important;
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  color: #e2e8f0 !important;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.detail-data-table :deep(.ant-table-thead .ant-table-cell),
+.detail-data-table :deep(.ant-table-thead .ant-table-cell-fix-left),
+.detail-data-table :deep(.ant-table-thead .ant-table-cell-fix-right) {
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  color: #e2e8f0 !important;
+}
+
+.detail-data-table :deep(.ant-table-thead > tr > th::before) {
+  display: none;
+}
+
+.detail-data-table :deep(.ant-table-tbody > tr > td) {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.72);
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--color-text-main);
+}
+
+.detail-data-table :deep(.ant-table-tbody > tr:hover > td) {
+  background: rgba(248, 250, 252, 0.92) !important;
+}
+
+.detail-data-table :deep(.ant-table-tbody > tr > td.ant-table-cell-fix-left),
+.detail-data-table :deep(.ant-table-tbody > tr > td.ant-table-cell-fix-right) {
+  background: #ffffff !important;
+}
+
+.detail-data-table :deep(.ant-table-thead > tr > th.ant-table-cell-fix-left),
+.detail-data-table :deep(.ant-table-thead > tr > th.ant-table-cell-fix-right) {
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+}
+
+.detail-data-table :deep(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left),
+.detail-data-table :deep(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right) {
+  background: #ffffff !important;
+}
+
+.detail-info-descriptions :deep(.ant-descriptions-view),
+.detail-snapshot-table :deep(.ant-table-container) {
+  border-color: rgba(203, 213, 225, 0.62);
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.detail-info-descriptions :deep(.ant-descriptions-item-label),
+.detail-snapshot-table :deep(.ant-table-thead > tr > th),
+.detail-snapshot-table :deep(.ant-table-thead .ant-table-cell),
+.detail-snapshot-table :deep(.ant-table-thead .ant-table-cell-fix-left),
+.detail-snapshot-table :deep(.ant-table-thead .ant-table-cell-fix-right) {
+  background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%) !important;
+  color: #475569 !important;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.detail-info-descriptions :deep(.ant-descriptions-item-content),
+.detail-snapshot-table :deep(.ant-table-tbody > tr > td),
+.detail-snapshot-table :deep(.ant-table-tbody > tr > td.ant-table-cell-fix-left),
+.detail-snapshot-table :deep(.ant-table-tbody > tr > td.ant-table-cell-fix-right) {
+  background: rgba(255, 255, 255, 0.68) !important;
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.detail-snapshot-table :deep(.ant-table-tbody > tr:hover > td),
+.detail-snapshot-table :deep(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left),
+.detail-snapshot-table :deep(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right) {
+  background: rgba(248, 250, 252, 0.86) !important;
+}
+
+.value-progress-collapse-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.value-progress-collapse-title {
+  color: #0f172a;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+.value-progress-collapse-summary {
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.value-progress-group-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.value-progress-group {
+  min-width: 0;
+}
+
+.value-progress-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.value-progress-group-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.value-progress-group-meta {
+  flex: none;
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.value-progress-item-list {
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(203, 213, 225, 0.62);
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.value-progress-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(170px, 1.05fr) minmax(180px, 1fr) minmax(220px, 1.15fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.72);
+  background: transparent;
+}
+
+.value-progress-item:last-child {
+  border-bottom: none;
+}
+
+.value-progress-item-running {
+  background: rgba(239, 246, 255, 0.42);
+}
+
+.value-progress-item-failed {
+  background: rgba(255, 241, 242, 0.48);
+}
+
+.value-progress-keyline {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.value-progress-order {
+  flex: none;
+  min-width: 26px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(147, 197, 253, 0.76);
+  background: rgba(239, 246, 255, 0.84);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 22px;
+  text-align: center;
+}
+
+.value-progress-copy {
+  min-width: 0;
+}
+
+.value-progress-key {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value-progress-name {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.value-progress-current {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.value-progress-label,
+.value-progress-row-meta b {
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  font-style: normal;
+}
+
+.value-progress-value {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value-progress-row-meta {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.value-progress-row-meta span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.value-progress-row-meta em {
+  overflow: hidden;
+  color: #334155;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value-progress-message {
+  grid-column: 1 / -1;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .release-hero-card {
   overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.18);
   background:
     radial-gradient(
       circle at top left,
@@ -3740,6 +4354,13 @@ onBeforeUnmount(() => {
       var(--color-bg-card) 0%,
       var(--color-bg-subtle) 100%
     );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 14px 30px rgba(15, 23, 42, 0.05);
+}
+
+.release-hero-card :deep(.ant-card-body) {
+  padding: 22px 24px;
 }
 
 .release-hero {
@@ -3797,7 +4418,7 @@ onBeforeUnmount(() => {
   padding: 14px 16px;
   border-radius: 14px;
   border: 1px solid var(--color-panel-border-strong);
-  background: rgba(255, 255, 255, 0.78);
+  background: rgba(248, 250, 252, 0.48);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -4018,8 +4639,8 @@ onBeforeUnmount(() => {
 
 .detail-dashboard {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(320px, 0.9fr);
-  gap: 18px;
+  grid-template-columns: minmax(0, 1.58fr) minmax(340px, 0.92fr);
+  gap: 20px;
   align-items: start;
 }
 
@@ -4027,7 +4648,30 @@ onBeforeUnmount(() => {
 .dashboard-side {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+}
+
+.dashboard-main {
+  gap: 20px;
+}
+
+.dashboard-main > .detail-section-card {
+  order: 1;
+}
+
+.dashboard-main > .value-progress-collapse {
+  order: 2;
+}
+
+.dashboard-main > .timeline-collapse {
+  order: 3;
+}
+
+.dashboard-main > .base-info-collapse {
+  order: 4;
+}
+
+.dashboard-side {
+  gap: 16px;
 }
 
 .execution-stack {
@@ -4065,21 +4709,17 @@ onBeforeUnmount(() => {
 }
 
 .execution-summary-card {
-  padding: 16px;
-  border-radius: 16px;
-  background:
-    radial-gradient(
-      circle at top right,
-      rgba(59, 130, 246, 0.1),
-      transparent 38%
-    ),
-    linear-gradient(
-      180deg,
-      rgba(255, 255, 255, 0.96) 0%,
-      rgba(248, 250, 252, 0.96) 100%
-    );
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.06);
+  padding: 14px 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  box-shadow: none;
+}
+
+.execution-summary-card:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .execution-summary-head {
@@ -4089,10 +4729,51 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.execution-summary-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.execution-summary-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.execution-summary-order {
+  flex: none;
+  min-width: 32px;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(147, 197, 253, 0.58);
+  background: rgba(239, 246, 255, 0.72);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.execution-summary-copy {
+  min-width: 0;
+}
+
 .execution-summary-title {
   font-size: 15px;
   font-weight: 700;
   color: var(--color-text-main);
+  line-height: 24px;
+}
+
+.execution-summary-status {
+  margin-inline-end: 0;
 }
 
 .execution-summary-subtitle {
@@ -4102,12 +4783,30 @@ onBeforeUnmount(() => {
 }
 
 .execution-summary-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px 10px;
   margin-top: 14px;
+  margin-left: 44px;
   color: var(--color-text-secondary);
   font-size: 13px;
+}
+
+.execution-summary-card-hook .execution-summary-meta {
+  margin-left: 0;
+}
+
+.execution-summary-meta > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.execution-summary-meta-label {
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .execution-summary-caption {
@@ -4123,8 +4822,30 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.step-groups,
+.stage-sections,
+.log-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.scope-section {
+  padding: 0 0 16px;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  background: transparent;
+  box-shadow: none;
+}
+
 .scope-section + .scope-section {
-  margin-top: 20px;
+  margin-top: 0;
+}
+
+.scope-section:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .scope-section-header {
@@ -4136,6 +4857,14 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.scope-section-heading {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
 }
 
 .scope-section-subtitle {
@@ -4268,9 +4997,19 @@ onBeforeUnmount(() => {
 }
 
 .hook-progress-item-index {
-  color: var(--color-text-soft);
+  min-width: 30px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  background: rgba(248, 250, 252, 0.86);
+  color: #475569;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1;
 }
 
 .hook-progress-item-name {
@@ -4280,7 +5019,33 @@ onBeforeUnmount(() => {
 }
 
 .execution-summary-card-hook {
-  padding: 14px 16px;
+  padding: 14px 0;
+}
+
+.hook-task-toggle {
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border-color: rgba(147, 197, 253, 0.72);
+  background: rgba(239, 246, 255, 0.74);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 24px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.hook-task-toggle:hover,
+.hook-task-toggle:focus {
+  border-color: rgba(96, 165, 250, 0.9);
+  background: rgba(219, 234, 254, 0.9);
+  color: #1d4ed8;
+}
+
+.hook-task-toggle-open {
+  border-color: rgba(37, 99, 235, 0.72);
+  background: rgba(37, 99, 235, 0.1);
+  color: #1e40af;
 }
 
 .hook-progress-rows {
@@ -4293,13 +5058,15 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 0;
-  border-top: 1px dashed rgba(148, 163, 184, 0.2);
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(203, 213, 225, 0.58);
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
 }
 
 .hook-progress-row:first-child {
-  padding-top: 4px;
-  border-top: none;
+  padding-top: 12px;
 }
 
 .hook-progress-row-main {
@@ -4313,13 +5080,31 @@ onBeforeUnmount(() => {
   line-height: 1.7;
 }
 
-.hook-progress-row-meta {
+.hook-progress-task-grid {
   margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.hook-progress-task-item {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.hook-progress-task-label {
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.hook-progress-task-value {
   color: var(--color-text-secondary);
   font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
 }
 
 .hook-progress-item-actions {
@@ -4333,44 +5118,17 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(248, 250, 252, 0.72);
+  padding: 10px 0 0;
+  border-radius: 0;
+  border: none;
+  border-top: 1px solid rgba(203, 213, 225, 0.54);
+  background: transparent;
 }
 
 .hook-progress-panel-title {
   font-size: 13px;
   font-weight: 700;
   color: var(--color-text-main);
-}
-
-.hook-progress-context-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.hook-progress-context-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(255, 255, 255, 0.9);
-}
-
-.hook-progress-context-label {
-  color: var(--color-text-soft);
-  font-size: 12px;
-}
-
-.hook-progress-context-value {
-  color: var(--color-text-main);
-  font-size: 13px;
-  font-weight: 700;
-  word-break: break-word;
 }
 
 .hook-progress-log {
@@ -4392,7 +5150,10 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 0;
-  border-bottom: 1px dashed var(--color-panel-divider);
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  background: transparent;
 }
 
 .precheck-item:last-child {
@@ -4452,10 +5213,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(248, 250, 252, 0.7);
+  padding: 0 0 10px;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  background: transparent;
 }
 
 .approval-meta-label {
@@ -4472,8 +5234,8 @@ onBeforeUnmount(() => {
 
 .approval-records {
   margin-top: 18px;
-  padding-top: 18px;
-  border-top: 1px solid rgba(148, 163, 184, 0.18);
+  padding-top: 0;
+  border-top: none;
 }
 
 .approval-records-header {
@@ -4494,10 +5256,16 @@ onBeforeUnmount(() => {
 }
 
 .approval-record-item {
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: rgba(248, 250, 252, 0.72);
+  padding: 12px 0;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  background: transparent;
+}
+
+.approval-record-item:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .approval-record-main {
@@ -4531,114 +5299,237 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
-.context-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
+.pipeline-stage-title-actions {
+  align-items: center;
 }
 
-.context-item {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 10px;
-  padding: 10px 0;
-  border-bottom: 1px dashed var(--color-panel-divider);
-}
-
-.context-item:last-child {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-.context-label {
-  color: var(--color-text-soft);
-  font-size: 13px;
-}
-
-.context-value {
-  color: var(--color-text-main);
-  font-size: 13px;
-  font-weight: 600;
-  word-break: break-word;
-}
-
-.log-alert,
-.pipeline-stage-alert {
-  margin-bottom: 12px;
-  border-radius: 16px;
-  border-width: 1px;
-  border-style: solid;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.84),
-    0 10px 24px rgba(15, 23, 42, 0.04);
-}
-
-.log-alert :deep(.ant-alert-icon),
-.pipeline-stage-alert :deep(.ant-alert-icon) {
-  color: var(--color-primary-500);
-}
-
-.log-alert :deep(.ant-alert-message),
-.pipeline-stage-alert :deep(.ant-alert-message) {
+.pipeline-executor-chip {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0 10px;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  background: rgba(248, 250, 252, 0.76);
+  color: #475569;
+  font-size: 12px;
   font-weight: 700;
+  line-height: 1;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.pipeline-stage-title-actions :deep(.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding-inline: 10px;
+  border-radius: 999px;
+  border-color: rgba(203, 213, 225, 0.72);
+  background: rgba(255, 255, 255, 0.62);
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.74);
+}
+
+.pipeline-stage-title-actions :deep(.ant-btn .anticon),
+.page-header :deep(.ant-btn .anticon) {
+  color: currentColor;
+}
+
+.scope-section-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.release-tip-trigger {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1;
+  box-shadow: none;
 }
 
-.log-alert :deep(.ant-alert-description),
-.pipeline-stage-alert :deep(.ant-alert-description) {
-  color: var(--color-text-secondary);
-  line-height: 1.8;
+.release-tip-trigger:hover,
+.release-tip-trigger:focus-visible {
+  background: rgba(219, 234, 254, 0.72);
+  color: #2563eb;
+  outline: none;
 }
 
-.log-alert.ant-alert-info,
-.pipeline-stage-alert.ant-alert-info {
-  background: linear-gradient(180deg, #eff6ff 0%, #f8fbff 100%);
-  border-color: #93c5fd;
+.release-tip-trigger-warning {
+  color: #ea580c;
 }
 
-.log-alert.ant-alert-info :deep(.ant-alert-message),
-.log-alert.ant-alert-info :deep(.ant-alert-icon),
-.pipeline-stage-alert.ant-alert-info :deep(.ant-alert-message),
-.pipeline-stage-alert.ant-alert-info :deep(.ant-alert-icon) {
-  color: #1d4ed8;
+.release-tip-trigger-warning:hover,
+.release-tip-trigger-warning:focus-visible {
+  background: rgba(255, 237, 213, 0.86);
+  color: #c2410c;
 }
 
-.log-alert.ant-alert-warning,
-.pipeline-stage-alert.ant-alert-warning {
-  background: linear-gradient(180deg, #fff7ed 0%, #fffbeb 100%);
-  border-color: #fdba74;
+.release-tip-trigger-error {
+  color: #dc2626;
 }
 
-.log-alert.ant-alert-warning :deep(.ant-alert-message),
-.log-alert.ant-alert-warning :deep(.ant-alert-icon),
-.pipeline-stage-alert.ant-alert-warning :deep(.ant-alert-message),
-.pipeline-stage-alert.ant-alert-warning :deep(.ant-alert-icon) {
-  color: #b45309;
-}
-
-.log-alert.ant-alert-error,
-.pipeline-stage-alert.ant-alert-error {
-  background: linear-gradient(180deg, #fff1f2 0%, #fff5f5 100%);
-  border-color: #fda4af;
-}
-
-.log-alert.ant-alert-error :deep(.ant-alert-message),
-.log-alert.ant-alert-error :deep(.ant-alert-icon),
-.pipeline-stage-alert.ant-alert-error :deep(.ant-alert-message),
-.pipeline-stage-alert.ant-alert-error :deep(.ant-alert-icon) {
+.release-tip-trigger-error:hover,
+.release-tip-trigger-error:focus-visible {
+  background: rgba(254, 226, 226, 0.86);
   color: #b91c1c;
 }
 
-.stage-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 12px;
+.release-tip-content {
+  max-width: 320px;
+  color: #334155;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
-.stage-toolbar :deep(.ant-btn .anticon),
-.page-header :deep(.ant-btn .anticon) {
-  color: currentColor;
+.pipeline-stage-chain {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  overflow: visible;
+  padding: 2px 0;
+}
+
+.pipeline-stage-node {
+  position: relative;
+  flex: 1 1 132px;
+  max-width: 168px;
+  min-height: 88px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 5px;
+  padding: 8px 9px;
+  border-radius: 14px;
+  border: 1px solid rgba(203, 213, 225, 0.62);
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68);
+}
+
+.pipeline-stage-node-clickable {
+  cursor: pointer;
+}
+
+.pipeline-stage-node-clickable:hover,
+.pipeline-stage-node-clickable:focus-visible {
+  border-color: rgba(96, 165, 250, 0.68);
+  background: rgba(239, 246, 255, 0.62);
+  outline: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 10px 22px rgba(37, 99, 235, 0.08);
+}
+
+.pipeline-stage-node:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -16px;
+  width: 16px;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.7), rgba(148, 163, 184, 0.18));
+}
+
+.pipeline-stage-node:not(:last-child)::before {
+  content: "";
+  position: absolute;
+  top: calc(50% - 4px);
+  right: -16px;
+  width: 8px;
+  height: 8px;
+  border-top: 2px solid rgba(148, 163, 184, 0.7);
+  border-right: 2px solid rgba(148, 163, 184, 0.7);
+  transform: rotate(45deg);
+}
+
+.pipeline-stage-node-running {
+  border-color: rgba(147, 197, 253, 0.72);
+  background: rgba(239, 246, 255, 0.58);
+}
+
+.pipeline-stage-node-failed {
+  border-color: rgba(253, 164, 175, 0.72);
+  background: rgba(255, 241, 242, 0.58);
+}
+
+.pipeline-stage-order-col {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pipeline-stage-index {
+  width: 26px;
+  height: 20px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  background: rgba(248, 250, 252, 0.9);
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.pipeline-stage-node-main {
+  min-width: 0;
+}
+
+.pipeline-stage-node-head {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  align-items: flex-start;
+}
+
+.pipeline-stage-name {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.pipeline-stage-meta-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 5px;
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.pipeline-stage-meta-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-stage-meta-line b {
+  margin-right: 4px;
+  color: var(--color-text-soft);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 :deep(.step-progress .ant-steps-item-icon) {
@@ -4702,23 +5593,61 @@ onBeforeUnmount(() => {
   color: #b45309;
 }
 
-.nested-card {
-  border-radius: 16px;
+.detail-inline-section {
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.detail-inline-section + .detail-inline-section {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(203, 213, 225, 0.62);
+}
+
+.detail-inline-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.detail-inline-section-title {
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.detail-inline-section-extra {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .detail-collapse :deep(.ant-collapse-item) {
-  border-radius: 16px !important;
-  background: var(--color-bg-card);
-  border: 1px solid var(--color-panel-border);
+  border-radius: 24px !important;
+  background:
+    radial-gradient(circle at top left, rgba(14, 165, 233, 0.045), transparent 28%),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.78) 0%,
+      rgba(248, 250, 252, 0.58) 100%
+    );
+  border: 1px solid rgba(191, 219, 254, 0.32);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 16px 36px rgba(15, 23, 42, 0.04);
   overflow: hidden;
 }
 
 .detail-collapse :deep(.ant-collapse-header) {
-  font-weight: 700;
+  padding: 16px 18px !important;
+  color: #0f172a !important;
+  font-weight: 800;
 }
 
 .detail-collapse :deep(.ant-collapse-content-box) {
-  padding-top: 8px;
+  padding: 0 18px 18px;
 }
 
 .log-panel {
@@ -4741,18 +5670,6 @@ onBeforeUnmount(() => {
   min-height: 220px;
 }
 
-.rollback-trigger-button {
-  color: #0f172a;
-  border-color: rgba(15, 23, 42, 0.18);
-}
-
-.rollback-trigger-button:hover,
-.rollback-trigger-button:focus {
-  color: #020617;
-  border-color: rgba(15, 23, 42, 0.36);
-  background: rgba(15, 23, 42, 0.04);
-}
-
 .batch-progress-meta {
   display: grid;
   gap: 14px;
@@ -4762,10 +5679,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: var(--color-bg-subtle);
-  border: 1px solid var(--color-panel-border);
+  padding: 0 0 12px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
 }
 
 .batch-progress-label,
@@ -4791,10 +5709,10 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--color-bg-subtle);
-  border: 1px solid var(--color-panel-border);
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  border: none;
 }
 
 .batch-progress-list {
@@ -4808,10 +5726,16 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid var(--color-panel-border);
-  background: var(--color-bg-card);
+  padding: 12px 0;
+  border-radius: 0;
+  border: none;
+  border-bottom: 1px solid rgba(203, 213, 225, 0.62);
+  background: transparent;
+}
+
+.batch-progress-item:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 .batch-progress-item-main,
@@ -4870,6 +5794,10 @@ onBeforeUnmount(() => {
     align-items: flex-start;
   }
 
+  .page-header-actions {
+    justify-content: flex-start;
+  }
+
   .header-left {
     flex-direction: column;
     align-items: flex-start;
@@ -4879,18 +5807,21 @@ onBeforeUnmount(() => {
     font-size: 20px;
   }
 
-  .context-item {
-    grid-template-columns: 1fr;
-    gap: 4px;
-  }
-
   .hook-progress-summary,
   .hook-progress-item-head {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .hook-progress-context-grid {
+  .hook-progress-task-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .value-progress-item {
+    grid-template-columns: 1fr;
+  }
+
+  .value-progress-row-meta {
     grid-template-columns: 1fr;
   }
 

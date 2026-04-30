@@ -561,7 +561,13 @@ func (uc *ReleaseOrderManager) buildGitOpsRepoBranchLockKey(
 ) (string, error) {
 	snapshot, err := uc.repo.GetDeploySnapshotByOrderID(ctx, order.ID)
 	if err == nil && strings.TrimSpace(snapshot.RepoURL) != "" {
-		branch := uc.resolveGitOpsBranchByEnv(firstNonEmpty(strings.TrimSpace(snapshot.EnvCode), strings.TrimSpace(order.EnvCode)), argocddomain.Instance{}, strings.TrimSpace(snapshot.Branch))
+		branch := uc.resolveGitOpsBranchByApplication(
+			ctx,
+			order.ApplicationID,
+			firstNonEmpty(strings.TrimSpace(snapshot.EnvCode), strings.TrimSpace(order.EnvCode)),
+			argocddomain.Instance{},
+			strings.TrimSpace(snapshot.Branch),
+		)
 		return fmt.Sprintf("repo:%s:branch:%s", strings.TrimSpace(snapshot.RepoURL), branch), nil
 	}
 	if err != nil && !errors.Is(err, domain.ErrDeploySnapshotNotFound) {

@@ -105,10 +105,104 @@ export interface ReleaseOrder {
   remark: string;
   creator_user_id?: string;
   triggered_by: string;
+  live_state_status?: "pending_confirm" | "active" | "superseded" | "";
+  live_state_is_current?: boolean;
+  live_state_can_confirm?: boolean;
+  live_state_confirmed_at?: string | null;
+  live_state_confirmed_by?: string;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface AppReleaseStateSummary {
+  application_id: string;
+  application_name: string;
+  env_code: string;
+  current_state_id: string;
+  current_release_order_id: string;
+  current_release_order_no: string;
+  current_image_tag: string;
+  current_confirmed_at: string | null;
+  current_confirmed_by: string;
+  previous_state_id: string;
+  previous_release_order_id: string;
+  previous_release_order_no: string;
+  previous_image_tag: string;
+  previous_confirmed_at: string | null;
+}
+
+export interface AppReleaseStateSummaryListResponse {
+  data: AppReleaseStateSummary[];
+}
+
+export type RollbackSupportedAction = "rollback" | "replay" | "unsupported";
+
+export interface ApplicationRollbackState {
+  state_id: string;
+  release_order_id: string;
+  release_order_no: string;
+  template_id: string;
+  template_name: string;
+  cd_provider: string;
+  git_ref: string;
+  has_ci_execution: boolean;
+  has_cd_execution: boolean;
+  image_tag: string;
+  confirmed_at: string | null;
+  confirmed_by: string;
+}
+
+export interface ApplicationRollbackCapability {
+  application_id: string;
+  application_name: string;
+  env_code: string;
+  supported_action: RollbackSupportedAction;
+  reason: string;
+  current_state: ApplicationRollbackState;
+  target_state: ApplicationRollbackState;
+}
+
+export interface ApplicationRollbackCapabilityResponse {
+  data: ApplicationRollbackCapability;
+}
+
+export interface ApplicationRollbackPrecheckParam {
+  pipeline_scope: ReleasePipelineScope;
+  param_key: string;
+  executor_param_name: string;
+  param_value: string;
+  value_source: ReleaseValueSource | string;
+}
+
+export interface ApplicationRollbackPrecheck {
+  application_id: string;
+  application_name: string;
+  env_code: string;
+  action: RollbackSupportedAction;
+  supported_action: RollbackSupportedAction;
+  reason: string;
+  executable: boolean;
+  waiting_for_lock: boolean;
+  ahead_count: number;
+  lock_enabled: boolean;
+  lock_scope: string;
+  conflict_strategy: string;
+  lock_key: string;
+  conflict_order_no: string;
+  conflict_message: string;
+  preview_scope: string;
+  template_id: string;
+  template_name: string;
+  current_state: ApplicationRollbackState;
+  target_state: ApplicationRollbackState;
+  items: ReleaseOrderPrecheckItem[];
+  params: ApplicationRollbackPrecheckParam[];
+}
+
+export interface ApplicationRollbackPrecheckResponse {
+  data: ApplicationRollbackPrecheck;
 }
 
 export interface ReleaseOrderParam {
@@ -193,10 +287,14 @@ export interface ReleaseOrderPipelineStage {
 export interface ReleaseOrderListParams {
   application_id?: string;
   approval_approver_user_id?: string;
-  binding_id?: string;
+  keyword?: string;
+  triggered_by?: string;
   env_code?: string;
+  operation_type?: ReleaseOperationType;
   status?: ReleaseOrderStatus;
   trigger_type?: ReleaseTriggerType;
+  created_at_from?: string;
+  created_at_to?: string;
   page?: number;
   page_size?: number;
 }
@@ -206,6 +304,15 @@ export interface ReleaseOrderListResponse {
   page: number;
   page_size: number;
   total: number;
+}
+
+export interface ReleaseOrderStatsResponse {
+  total: number;
+  pending: number;
+  running: number;
+  success: number;
+  failed: number;
+  cancelled: number;
 }
 
 export interface ReleaseOrderDataResponse {

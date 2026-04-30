@@ -244,6 +244,11 @@ func (r *ApplicationRepository) List(ctx context.Context, filter domain.ListFilt
 		}
 		where = append(where, "a.id IN ("+strings.Join(placeholders, ", ")+")")
 	}
+	if filter.Keyword != "" {
+		where = append(where, "(a.app_key LIKE ? OR a.name LIKE ?)")
+		like := "%" + filter.Keyword + "%"
+		args = append(args, like, like)
+	}
 	if filter.Key != "" {
 		where = append(where, "a.app_key = ?")
 		args = append(args, filter.Key)

@@ -213,6 +213,7 @@ func (h *ApplicationHandler) GetByID(c *gin.Context) {
 // @Summary      List applications
 // @Tags         applications
 // @Produce      json
+// @Param        keyword    query     string  false  "Application keyword (name or key)"
 // @Param        key        query     string  false  "Application key"
 // @Param        name       query     string  false  "Application name"
 // @Param        project_id query     string  false  "Project ID"
@@ -250,6 +251,7 @@ func (h *ApplicationHandler) List(c *gin.Context) {
 	}
 
 	apps, total, err := h.query.List(c.Request.Context(), domain.ListFilter{
+		Keyword:        c.Query("keyword"),
 		Key:            c.Query("key"),
 		Name:           c.Query("name"),
 		ProjectID:      c.Query("project_id"),

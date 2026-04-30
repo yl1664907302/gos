@@ -1036,8 +1036,8 @@ func (uc *ReleaseTemplateManager) buildTemplateHooks(
 			if err != nil {
 				return nil, err
 			}
-			if task.TaskMode != agentdomain.TaskModeTemporary {
-				return nil, fmt.Errorf("%w: agent hook must reference a temporary task; release will dispatch to agents bound on that task", ErrInvalidInput)
+			if !isReusableAgentTaskHookTarget(task) {
+				return nil, fmt.Errorf("%w: agent hook must reference a manual temporary task; dispatched history tasks cannot be used as hook templates", ErrInvalidInput)
 			}
 			item.TargetID = task.ID
 			item.TargetName = firstNonEmpty(strings.TrimSpace(task.Name), task.ID)

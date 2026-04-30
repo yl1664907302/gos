@@ -192,6 +192,32 @@ func TestParseHookExecuteStage(t *testing.T) {
 	}
 }
 
+func TestMergeAgentTaskVariablesOverridesReleaseVariables(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]string{
+		"env":          "prod",
+		"artifact_url": "https://release.example.com/a.jar",
+		"image_tag":    "100",
+	}
+
+	mergeAgentTaskVariables(values, map[string]string{
+		"artifact_url": "https://agent.example.com/b.jar",
+		" custom_key ": " custom-value ",
+		"   ":          "ignored",
+	})
+
+	if got := values["artifact_url"]; got != "https://agent.example.com/b.jar" {
+		t.Fatalf("artifact_url = %q, want agent variable override", got)
+	}
+	if got := values["custom_key"]; got != "custom-value" {
+		t.Fatalf("custom_key = %q, want trimmed custom value", got)
+	}
+	if got := values["env"]; got != "prod" {
+		t.Fatalf("env = %q, want untouched release variable", got)
+	}
+}
+
 func TestEvaluateMainReleaseStatus(t *testing.T) {
 	t.Parallel()
 

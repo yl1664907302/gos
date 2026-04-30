@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { CaretRightOutlined, CopyOutlined, EyeOutlined, KeyOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { CaretRightOutlined, CopyOutlined, EyeOutlined, KeyOutlined, PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { Modal, message } from 'ant-design-vue'
 import type { TableColumnsType } from 'ant-design-vue'
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   createAgentTask,
@@ -26,7 +26,13 @@ import {
   stopAgentTask,
   updateAgentTask,
 } from '../../api/agent'
+import * as echarts from 'echarts/core'
+import { BarChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
 import { useAuthStore } from '../../stores/auth'
+
+echarts.use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 import type { AgentInstallConfig, AgentInstance, AgentListParams, AgentRuntimeState, AgentStatus, AgentTask, AgentTaskMode, AgentTaskType, UpsertAgentPayload, AgentScript } from '../../types/agent'
 import type { CreateAgentTaskPayload } from '../../types/agent'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
@@ -61,6 +67,210 @@ const boundAgentModalVisible = ref(false)
 const currentBoundTask = ref<AgentTask | null>(null)
 const scriptOptions = ref<AgentScript[]>([])
 let autoRefreshTimer: number | null = null
+
+// ---- ECharts stats (global overview, independent of filters) ----
+const overviewChartRef = ref<HTMLElement | null>(null)
+let overviewChart: echarts.ECharts | null = null
+const overviewStatsLoading = ref(false)
+const overviewStats = reactive({
+  total: 0,
+  online: 0,
+  busy: 0,
+  offline: 0,
+  maintenance: 0,
+  disabled: 0,
+})
+
+async function loadOverviewStats() {
+  overviewStatsLoading.value = true
+  try {
+    const response = await listAgents({ page: 1, page_size: 1 })
+    overviewStats.total = response.total
+    const all = await listAgents({ page: 1, page_size: Math.max(response.total, 200) })
+    overviewStats.online = all.data.filter((a) => a.runtime_state === 'online').length
+    overviewStats.busy = all.data.filter((a) => a.runtime_state === 'busy').length
+    overviewStats.offline = all.data.filter((a) => a.runtime_state === 'offline').length
+    overviewStats.maintenance = all.data.filter((a) => a.runtime_state === 'maintenance' || a.status === 'maintenance').length
+    overviewStats.disabled = all.data.filter((a) => a.status === 'disabled').length
+    renderOverviewChart()
+  } catch {
+    // silent
+  } finally {
+    overviewStatsLoading.value = false
+  }
+}
+
+function renderOverviewChart() {
+  if (!overviewChartRef.value) return
+  if (!overviewChart) {
+    overviewChart = echarts.init(overviewChartRef.value)
+  }
+  const s = overviewStats
+  const labels = ['在线', '执行中', '离线', '维护中', '已禁用']
+  const values = [s.online, s.busy, s.offline, s.maintenance, s.disabled]
+  const colors = ['#34d399', '#60a5fa', 'rgba(148,163,184,0.68)', '#fbbf24', 'rgba(148,163,184,0.42)']
+
+  overviewChart.setOption({
+    animationDuration: 420,
+    animationEasing: 'cubicOut',
+    grid: { top: 16, right: 8, bottom: 0, left: 8, containLabel: true },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(2,6,23,0.92)',
+      borderColor: 'rgba(148,163,184,0.2)',
+      borderWidth: 1,
+      padding: [10, 12],
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+    },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLabel: { color: 'rgba(226,232,240,0.56)', fontSize: 12, fontWeight: 600 },
+      axisLine: { lineStyle: { color: 'rgba(71,85,105,0.32)' } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: { color: 'rgba(226,232,240,0.52)', fontSize: 11 },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { lineStyle: { color: 'rgba(71,85,105,0.22)' } },
+    },
+    series: [{
+      type: 'bar',
+      data: values.map((v, i) => ({
+        value: v,
+        itemStyle: {
+          color: colors[i],
+          borderRadius: [6, 6, 0, 0],
+        },
+      })),
+      barWidth: '34%',
+    }],
+  })
+}
+
+// ---- search overlay ----
+interface SearchSuggestion { id: string; title: string; subtitle: string }
+const searchVisible = ref(false)
+const searchInputRef = ref<HTMLInputElement | null>(null)
+const searchDraft = reactive({ keyword: '' })
+const searchSuggestions = ref<SearchSuggestion[]>([])
+const searchSuggestionsLoading = ref(false)
+let searchTimer: ReturnType<typeof window.setTimeout> | null = null
+let searchRequestSeq = 0
+
+function openSearchDialog() {
+  searchDraft.keyword = filters.keyword
+  searchVisible.value = true
+  void nextTick(() => { searchInputRef.value?.focus() })
+}
+
+function closeSearchDialog() { searchVisible.value = false }
+
+function resetSearchSuggestions() {
+  if (searchTimer) { clearTimeout(searchTimer); searchTimer = null }
+  searchRequestSeq += 1
+  searchSuggestions.value = []
+  searchSuggestionsLoading.value = false
+}
+
+async function loadSearchSuggestions(kw: string) {
+  const reqSeq = ++searchRequestSeq
+  searchSuggestionsLoading.value = true
+  try {
+    const response = await listAgents({ keyword: kw, page: 1, page_size: 6 })
+    if (reqSeq !== searchRequestSeq) return
+    searchSuggestions.value = (response.data || []).map((item) => ({
+      id: item.id,
+      title: item.name,
+      subtitle: `${item.agent_code} · ${item.hostname || item.host_ip || '-'}`,
+    }))
+  } catch {
+    if (reqSeq !== searchRequestSeq) return
+    searchSuggestions.value = []
+  } finally {
+    if (reqSeq === searchRequestSeq) searchSuggestionsLoading.value = false
+  }
+}
+
+function handleSearchInput() {
+  const kw = searchDraft.keyword.trim()
+  if (searchTimer) clearTimeout(searchTimer)
+  if (!kw) { resetSearchSuggestions(); return }
+  searchTimer = setTimeout(() => { searchTimer = null; void loadSearchSuggestions(kw) }, 260)
+}
+
+function handleSearchSubmit() {
+  filters.keyword = searchDraft.keyword.trim()
+  filters.page = 1
+  searchVisible.value = false
+  resetSearchSuggestions()
+  void loadAgents()
+}
+
+function handleSearchSuggestionSelect(item: SearchSuggestion) {
+  searchDraft.keyword = item.title
+  handleSearchSubmit()
+}
+// ---- modal masking (sidebar-aware) ----
+const agentFormViewportInset = ref(0)
+
+const agentFormMaskStyle = computed(() => ({
+	left: `${agentFormViewportInset.value}px`,
+	width: `calc(100% - ${agentFormViewportInset.value}px)`,
+	background: 'rgba(15, 23, 42, 0.08)',
+	backdropFilter: 'blur(10px)',
+	WebkitBackdropFilter: 'blur(10px)',
+	pointerEvents: modalVisible.value ? 'auto' : 'none',
+}))
+
+const agentFormWrapProps = computed(() => ({
+	style: {
+		left: `${agentFormViewportInset.value}px`,
+		width: `calc(100% - ${agentFormViewportInset.value}px)`,
+		pointerEvents: modalVisible.value ? 'auto' : 'none',
+	},
+}))
+
+let agentFormViewportObserver: ResizeObserver | null = null
+
+function readAgentFormViewportInset() {
+	if (typeof document === 'undefined') return 0
+	const appLayout = document.querySelector('.app-layout')
+	if (appLayout) {
+		const rawWidth = window.getComputedStyle(appLayout).getPropertyValue('--layout-sider-width').trim()
+		const parsedWidth = Number.parseFloat(rawWidth)
+		if (Number.isFinite(parsedWidth) && parsedWidth >= 0) return parsedWidth
+	}
+	const sider = document.querySelector('.app-sider')
+	if (!sider) return 0
+	return Math.max(sider.getBoundingClientRect().width, 0)
+}
+
+function syncAgentFormViewportInset() {
+	agentFormViewportInset.value = readAgentFormViewportInset()
+}
+
+function observeAgentFormViewportInset() {
+	if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') return
+	const appLayout = document.querySelector('.app-layout')
+	const sider = document.querySelector('.app-sider')
+	if (!appLayout && !sider) return
+	agentFormViewportObserver?.disconnect()
+	agentFormViewportObserver = new ResizeObserver(() => {
+		syncAgentFormViewportInset()
+	})
+	if (appLayout) agentFormViewportObserver.observe(appLayout)
+	if (sider) agentFormViewportObserver.observe(sider)
+}
+
+function stopObservingAgentFormViewportInset() {
+	agentFormViewportObserver?.disconnect()
+	agentFormViewportObserver = null
+}
+
 
 const filters = reactive<Required<AgentListParams>>({
   keyword: '',
@@ -299,6 +509,7 @@ function stopAutoRefresh() {
 
 function openCreate() {
   resetForm()
+  syncAgentFormViewportInset()
   modalVisible.value = true
 }
 
@@ -312,6 +523,7 @@ function openEdit(record: AgentInstance) {
   form.status = record.status
   form.remark = record.remark || ''
   tagsText.value = (record.tags || []).join(', ')
+  syncAgentFormViewportInset()
   modalVisible.value = true
 }
 
@@ -417,7 +629,7 @@ async function handleSave() {
     detail.value = response.data
     message.success(isEditing ? 'Agent 已更新' : 'Agent 已创建')
     if (!isEditing) {
-      message.info('现在统一使用平台接入 Token 自动注册，部署时直接复制接入配置即可。')
+      message.info('现在统一使用平台接入 Token 自动注册，部署时直接复制接入配置即可')
       await openDetail(response.data)
     } else if (detailVisible.value && detail.value?.id === response.data.id) {
       await openDetail(response.data)
@@ -451,7 +663,7 @@ async function handleChangeStatus(record: AgentInstance, target: AgentStatus) {
 function handleDeleteAgent(record: AgentInstance) {
   Modal.confirm({
     title: '删除 Agent',
-    content: `删除后会移除 Agent 实例本身，常驻任务会一并清理，历史临时任务会保留日志但不再绑定这台 Agent。此操作不可恢复，确认继续吗？`,
+    content: `删除后会移除 Agent 实例本身，常驻任务会一并清理，历史临时任务会保留日志但不再绑定这台 Agent此操作不可恢复，确认继续吗？`,
     okText: '确认删除',
     cancelText: '取消',
     okButtonProps: { danger: true },
@@ -683,7 +895,19 @@ async function copyText(value: string, successText: string) {
     return
   }
   try {
-    await navigator.clipboard.writeText(value)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value)
+    } else {
+      const input = document.createElement('textarea')
+      input.value = value
+      input.setAttribute('readonly', 'readonly')
+      input.style.position = 'fixed'
+      input.style.opacity = '0'
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+    }
     message.success(successText)
   } catch {
     message.error('复制失败，请手动复制')
@@ -692,6 +916,22 @@ async function copyText(value: string, successText: string) {
 
 function copyConfigYAML(configYAML?: string) {
   void copyText(configYAML || '', '配置文件已复制')
+}
+
+function maskConfigYAML(yaml?: string): string {
+  if (!yaml) return ''
+  return yaml.replace(/(registration_token\s*:\s*).+/g, '$1*****')
+}
+
+function copyInstallCommand() {
+  if (!bootstrapConfig.value) return
+  const cmd = `wget -qO- https://gc-oa.oss-cn-shanghai.aliyuncs.com/tempUpdate/install_gos_agent.sh | sudo bash -s -- \\
+  --server-url ${bootstrapConfig.value.resolved_server_url} \\
+  --token ${bootstrapConfig.value.registration_token} \\
+  --work-dir /etc/gos-agent \\
+  --name prod-xxxx \\
+  --tags production,web`
+  void copyText(cmd, '一键安装命令已复制（包含 Token）')
 }
 
 function canExecuteTemporaryTask(task: AgentTask) {
@@ -703,19 +943,28 @@ function executeActionText(task: AgentTask) {
 }
 
 async function handleResetBootstrapToken() {
-  resettingBootstrapToken.value = true
-  try {
-    const response = await resetAgentBootstrapToken()
-    bootstrapConfig.value = response.data
-    if (detailVisible.value && detail.value?.id) {
-      await loadDetail(detail.value.id, { silent: true, includeConfig: true })
-    }
-    message.success('接入 Token 已重置，后续新部署请使用新的配置文件')
-  } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '接入 Token 重置失败'))
-  } finally {
-    resettingBootstrapToken.value = false
-  }
+  Modal.confirm({
+    title: '重置接入 Token',
+    content: '重置后旧 Token 立即失效，所有使用旧 Token 的节点将无法注册。确认继续吗？',
+    okText: '确认重置',
+    cancelText: '取消',
+    okButtonProps: { danger: true },
+    async onOk() {
+      resettingBootstrapToken.value = true
+      try {
+        const response = await resetAgentBootstrapToken()
+        bootstrapConfig.value = response.data
+        if (detailVisible.value && detail.value?.id) {
+          await loadDetail(detail.value.id, { silent: true, includeConfig: true })
+        }
+        message.success('接入 Token 已重置，后续新部署请使用新的配置文件')
+      } catch (error) {
+        message.error(extractHTTPErrorMessage(error, '接入 Token 重置失败'))
+      } finally {
+        resettingBootstrapToken.value = false
+      }
+    },
+  })
 }
 
 async function handleExecuteTemporaryTask(task: AgentTask) {
@@ -739,7 +988,7 @@ async function handleStopResidentTask(task: AgentTask) {
   }
   Modal.confirm({
     title: '停止常驻任务',
-    content: '停止后该任务将不再被 Agent 循环领取；如果当前这一轮正在执行，会在本轮结束后彻底停止。',
+    content: '停止后该任务将不再被 Agent 循环领取；如果当前这一轮正在执行，会在本轮结束后彻底停止',
     okText: '确认停止',
     cancelText: '取消',
     async onOk() {
@@ -777,7 +1026,7 @@ async function handleDeleteResidentTask(task: AgentTask) {
   }
   Modal.confirm({
     title: '删除常驻任务',
-    content: '删除后该常驻任务会从当前 Agent 中移除，无法继续自动执行。此操作不可恢复，确认继续吗？',
+    content: '删除后该常驻任务会从当前 Agent 中移除，无法继续自动执行此操作不可恢复，确认继续吗？',
     okText: '确认删除',
     cancelText: '取消',
     okButtonProps: { danger: true },
@@ -845,117 +1094,138 @@ async function handleSaveEditResidentTask() {
 }
 
 onMounted(() => {
+  syncAgentFormViewportInset()
+  observeAgentFormViewportInset()
   void loadAgents()
   void loadBootstrapConfig()
   void loadScriptOptions()
+  void loadOverviewStats()
   startAutoRefresh()
 })
 
 onBeforeUnmount(() => {
   stopAutoRefresh()
+  stopObservingAgentFormViewportInset()
+  overviewChart?.dispose()
+  overviewChart = null
 })
 </script>
 
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
-        <div class="page-header-copy">
-          <div class="page-title">Agent 管理</div>
-          <div class="page-subtitle">统一管理 Agent 心跳、接单状态与接入配置</div>
-        </div>
-        <a-space>
-          <a-button @click="loadAgents" :loading="loading">
-            <template #icon><ReloadOutlined /></template>
-            刷新
-          </a-button>
-          <a-button v-if="canManageAgent" @click="openDispatchModal">
-            下发任务
-          </a-button>
-          <a-button v-if="canViewAgent" @click="goToTaskManagement">
-            <template #icon><EyeOutlined /></template>
-            任务管理
-          </a-button>
-          <a-button v-if="canManageAgent" type="primary" @click="openCreate">
-            <template #icon><PlusOutlined /></template>
-            新增 Agent
-          </a-button>
-        </a-space>
+      <div class="page-header-copy">
+        <h2 class="page-title">节点</h2>
+      </div>
+      <div class="page-header-actions">
+        <a-button class="agent-toolbar-icon-btn" @click="openSearchDialog">
+          <template #icon><SearchOutlined /></template>
+        </a-button>
+        <a-button v-if="canManageAgent" class="agent-toolbar-action-btn" @click="openDispatchModal">
+          下发任务
+        </a-button>
+        <a-button v-if="canViewAgent" class="agent-toolbar-action-btn" @click="goToTaskManagement">
+          <template #icon><EyeOutlined /></template>
+          任务管理
+        </a-button>
+        <a-button v-if="canManageAgent" class="agent-toolbar-action-btn agent-toolbar-action-btn--primary" @click="openCreate">
+          <template #icon><PlusOutlined /></template>
+          新增 Agent
+        </a-button>
+      </div>
     </div>
+
+    <transition name="agent-search-fade">
+      <div v-if="searchVisible" class="agent-search-overlay" @click.self="closeSearchDialog">
+        <div class="agent-search-floating-panel">
+          <div class="agent-search-floating-input">
+            <SearchOutlined class="agent-search-floating-icon" />
+            <input
+              ref="searchInputRef"
+              v-model="searchDraft.keyword"
+              class="agent-search-floating-field"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="搜索编码 / 名称 / 主机 / IP"
+              @input="handleSearchInput"
+              @keydown.enter="handleSearchSubmit"
+              @keydown.esc="closeSearchDialog"
+            />
+          </div>
+          <div v-if="searchSuggestionsLoading || searchSuggestions.length > 0" class="agent-search-suggestions">
+            <div v-if="searchSuggestionsLoading" class="agent-search-suggestion-loading">正在查询</div>
+            <template v-else>
+              <button
+                v-for="item in searchSuggestions"
+                :key="item.id"
+                type="button"
+                class="agent-search-suggestion"
+                @click="handleSearchSuggestionSelect(item)"
+              >
+                <span class="agent-search-suggestion-title">{{ item.title }}</span>
+                <span class="agent-search-suggestion-subtitle">{{ item.subtitle }}</span>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <section class="overview-chart-card">
+      <div class="overview-chart-head">
+        <div class="overview-chart-copy">
+          <div class="overview-chart-label">节点统计</div>
+          <div class="overview-chart-title">全部节点运行态分布</div>
+        </div>
+        <div class="overview-chart-pill">共 {{ overviewStats.total }} 台</div>
+      </div>
+      <div ref="overviewChartRef" class="overview-chart-canvas"></div>
+      <div class="overview-chart-footnote">统计口径：汇总全部节点运行态数量，不跟随筛选条件变动</div>
+    </section>
 
     <a-card v-if="canManageAgent" class="filter-card bootstrap-card" :bordered="false">
       <div class="bootstrap-card-head">
         <div>
-          <div class="task-panel-title">Agent 接入配置</div>
-          <div class="task-panel-subtitle">平台统一生成接入 Token，目标主机只需要这份配置文件即可启动并自动注册。</div>
+          <div class="task-panel-title">快速配置</div>
         </div>
         <a-space>
-          <a-button @click="loadBootstrapConfig" :loading="bootstrapConfigLoading">
-            <template #icon><ReloadOutlined /></template>
-            刷新配置
+          <a-button v-if="bootstrapConfig" class="agent-toolbar-action-btn" @click="copyInstallCommand">
+            <template #icon><CopyOutlined /></template>
+            复制安装命令
           </a-button>
-          <a-button @click="copyConfigYAML(bootstrapConfig?.config_yaml)">
+          <a-button class="agent-toolbar-action-btn" @click="copyConfigYAML(bootstrapConfig?.config_yaml)">
             <template #icon><CopyOutlined /></template>
             复制配置
           </a-button>
-          <a-button :loading="resettingBootstrapToken" @click="handleResetBootstrapToken">
+          <a-button class="agent-toolbar-action-btn" :loading="resettingBootstrapToken" @click="handleResetBootstrapToken">
             <template #icon><KeyOutlined /></template>
             重置接入 Token
           </a-button>
         </a-space>
       </div>
       <a-spin :spinning="bootstrapConfigLoading">
-        <div class="config-meta bootstrap-meta">
-          <div>
+        <div class="config-meta">
+          <div class="config-col">
             <div class="config-label">一键安装</div>
             <pre v-if="bootstrapConfig" class="config-preview">wget -qO- https://gc-oa.oss-cn-shanghai.aliyuncs.com/tempUpdate/install_gos_agent.sh | sudo bash -s -- \
   --server-url {{ bootstrapConfig.resolved_server_url }} \
-  --token {{ bootstrapConfig.registration_token }} \
+  --token [已隐藏，点击上方复制按钮获取完整命令] \
   --work-dir /etc/gos-agent \
   --name prod-xxxx \
   --tags production,web</pre>
             <pre v-else class="config-preview">接入配置生成中…</pre>
           </div>
-          <div>
-            <div class="config-label">建议路径</div>
-            <pre class="config-preview">{{ bootstrapConfig?.suggested_path || '-' }}</pre>
-          </div>
-          <div>
+          <div class="config-col">
             <div class="config-label">启动命令</div>
             <pre class="config-preview">{{ bootstrapConfig?.launch_command ? 'nohup ' + bootstrapConfig.launch_command + ' > agent.log 2>&1 &' : '-' }}</pre>
           </div>
+          <div class="config-col config-col--yaml">
+            <div class="config-label">配置文件</div>
+            <pre class="config-preview">{{ maskConfigYAML(bootstrapConfig?.config_yaml) || '接入配置生成中…' }}</pre>
+          </div>
         </div>
-        <pre class="config-preview">{{ bootstrapConfig?.config_yaml || '接入配置生成中…' }}</pre>
       </a-spin>
-    </a-card>
-
-    <a-card class="filter-card" :bordered="false">
-      <a-form layout="inline" class="filter-form">
-        <a-form-item label="关键字">
-          <a-input v-model:value="filters.keyword" allow-clear placeholder="编码 / 名称 / 主机 / IP" @pressEnter="loadAgents" />
-        </a-form-item>
-        <a-form-item label="接单态">
-          <a-select v-model:value="filters.status" allow-clear style="width: 160px" placeholder="全部状态">
-            <a-select-option value="active">可接单</a-select-option>
-            <a-select-option value="maintenance">维护中</a-select-option>
-            <a-select-option value="disabled">已禁用</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="运行态">
-          <a-select v-model:value="filters.runtime_state" allow-clear style="width: 160px" placeholder="全部运行态">
-            <a-select-option value="online">在线</a-select-option>
-            <a-select-option value="busy">执行中</a-select-option>
-            <a-select-option value="offline">离线</a-select-option>
-            <a-select-option value="maintenance">维护中</a-select-option>
-            <a-select-option value="disabled">已禁用</a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item class="filter-form-actions">
-          <a-space>
-            <a-button type="primary" @click="filters.page = 1; loadAgents()">查询</a-button>
-            <a-button @click="filters.keyword = ''; filters.status = ''; filters.runtime_state = ''; filters.page = 1; filters.page_size = 20; loadAgents()">重置</a-button>
-          </a-space>
-        </a-form-item>
-      </a-form>
     </a-card>
 
     <a-card class="table-card" :bordered="false">
@@ -1117,7 +1387,7 @@ onBeforeUnmount(() => {
             <div class="detail-item detail-item-full">
               <div class="detail-label">接入方式</div>
               <div class="detail-value token-row">
-                <span class="muted-text">当前 Agent 使用平台统一接入 Token 自动注册，运行凭据由系统维护，无需手工配置单机 Token。</span>
+                <span class="muted-text">当前 Agent 使用平台统一接入 Token 自动注册，运行凭据由系统维护，无需手工配置单机 Token</span>
               </div>
             </div>
             <div class="detail-item detail-item-full">
@@ -1134,9 +1404,9 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
                 <a-spin :spinning="configLoading">
-                  <pre class="config-preview">{{ installConfig?.config_yaml || '配置生成中…' }}</pre>
+                  <pre class="config-preview">{{ maskConfigYAML(installConfig?.config_yaml) || '配置生成中…' }}</pre>
                 </a-spin>
-                <div class="muted-text">这份配置会带上平台接入 Token，并自动回填当前 Agent 的名称、环境和工作目录。</div>
+                <div class="muted-text">这份配置会带上平台接入 Token，并自动回填当前 Agent 的名称、环境和工作目录</div>
                 <div class="config-actions">
                   <a-button size="small" @click="copyConfigYAML(installConfig?.config_yaml)">
                     <template #icon><CopyOutlined /></template>
@@ -1316,65 +1586,96 @@ onBeforeUnmount(() => {
     </a-drawer>
 
     <a-modal
-      v-model:open="modalVisible"
-      :title="editingAgentID ? '编辑 Agent' : '新增 Agent'"
-      :confirm-loading="saving"
-      width="720"
-      @ok="handleSave"
+      :open="modalVisible"
+      :width="640"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="() => { closeModal(); saving = false; }"
+      :mask-style="agentFormMaskStyle"
+      :wrap-props="agentFormWrapProps"
+      wrap-class-name="agent-form-modal-wrap"
       @cancel="closeModal"
     >
-      <a-form layout="vertical">
-        <a-row :gutter="16">
-          <a-col :span="12">
-            <a-form-item label="Agent 编码" required>
-              <a-input v-model:value="form.agent_code" :disabled="Boolean(editingAgentID)" placeholder="例如 prod-agent-01" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="Agent 名称" required>
-              <a-input v-model:value="form.name" placeholder="用于页面展示" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="环境标识">
-              <a-input v-model:value="form.environment_code" placeholder="例如 prod / special-prod" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="12">
-            <a-form-item label="接单状态">
-              <a-select v-model:value="form.status">
-                <a-select-option value="active">可接单</a-select-option>
-                <a-select-option value="maintenance">维护中</a-select-option>
-                <a-select-option value="disabled">已禁用</a-select-option>
-              </a-select>
-            </a-form-item>
-          </a-col>
-          <a-col :span="24">
-            <a-form-item label="工作目录" required>
-              <a-input v-model:value="form.work_dir" placeholder="例如 /opt/gos-agent/work" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="24">
-            <a-form-item label="安装凭证">
-              <a-alert
-                type="info"
-                show-icon
-                message="Token 由平台自动生成"
-                description="保存后请到详情页复制配置文件，并写入目标主机上的 Agent 配置。"
-              />
-            </a-form-item>
-          </a-col>
-          <a-col :span="24">
-            <a-form-item label="标签">
-              <a-input v-model:value="tagsText" placeholder="逗号分隔，例如 prod, java, ecs" />
-            </a-form-item>
-          </a-col>
-          <a-col :span="24">
-            <a-form-item label="备注">
-              <a-textarea v-model:value="form.remark" :rows="3" placeholder="记录主机用途、职责范围或特殊限制" />
-            </a-form-item>
-          </a-col>
-        </a-row>
+      <template #title>
+        <div class="agent-form-modal-titlebar">
+          <span class="agent-form-modal-title">{{ editingAgentID ? '编辑 Agent' : '新增 Agent' }}</span>
+          <a-button class="application-toolbar-action-btn agent-form-modal-save-btn" :loading="saving" @click="handleSave">
+            保存
+          </a-button>
+        </div>
+      </template>
+
+      <a-form ref="formRef" layout="vertical" :required-mark="false" class="agent-form">
+        <div class="agent-form-note">
+          {{ editingAgentID ? '编辑态下 Agent 编码保持只读。' : '创建后使用平台统一 Token 自动注册，部署时在目标主机运行安装命令即可。' }}
+        </div>
+
+        <div class="agent-form-panel">
+          <div class="agent-form-panel-title">{{ editingAgentID ? '可编辑配置' : '基础配置' }}</div>
+
+          <a-form-item name="agent_code">
+            <template #label>
+              <span class="agent-form-label">
+                Agent 编码
+                <a-tag class="agent-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="form.agent_code" :disabled="Boolean(editingAgentID)" placeholder="例如 prod-agent-01" />
+          </a-form-item>
+
+          <a-form-item name="name">
+            <template #label>
+              <span class="agent-form-label">
+                Agent 名称
+                <a-tag class="agent-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="form.name" placeholder="用于页面展示" />
+          </a-form-item>
+
+          <a-form-item name="work_dir">
+            <template #label>
+              <span class="agent-form-label">
+                工作目录
+                <a-tag class="agent-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="form.work_dir" placeholder="例如 /opt/gos-agent/work" />
+          </a-form-item>
+
+          <a-form-item name="environment_code">
+            <template #label>
+              <span class="agent-form-label">环境标识</span>
+            </template>
+            <a-input v-model:value="form.environment_code" placeholder="例如 prod / special-prod" />
+          </a-form-item>
+
+          <a-form-item name="status">
+            <template #label>
+              <span class="agent-form-label">接单状态</span>
+            </template>
+            <a-select v-model:value="form.status">
+              <a-select-option value="active">可接单</a-select-option>
+              <a-select-option value="maintenance">维护中</a-select-option>
+              <a-select-option value="disabled">已禁用</a-select-option>
+            </a-select>
+          </a-form-item>
+
+          <a-form-item name="tags">
+            <template #label>
+              <span class="agent-form-label">标签</span>
+            </template>
+            <a-input v-model:value="tagsText" placeholder="逗号分隔，例如 prod, java, ecs" />
+          </a-form-item>
+
+          <a-form-item name="remark">
+            <template #label>
+              <span class="agent-form-label">备注</span>
+            </template>
+            <a-textarea v-model:value="form.remark" :rows="3" placeholder="记录主机用途、职责范围或特殊限制" />
+          </a-form-item>
+        </div>
       </a-form>
     </a-modal>
 
@@ -1528,11 +1829,263 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+/* ---- page header (transparent, no card bg) ---- */
+.page-header-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
 .page-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ---- header glass buttons ---- */
+.agent-toolbar-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+  padding-inline: 14px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.agent-toolbar-action-btn:hover,
+.agent-toolbar-action-btn:focus,
+.agent-toolbar-action-btn:focus-visible,
+.agent-toolbar-action-btn:active {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+.agent-toolbar-action-btn--primary {
+  background: linear-gradient(180deg, rgba(241, 247, 255, 0.9), rgba(223, 235, 255, 0.8)) !important;
+  border-color: rgba(147, 197, 253, 0.74) !important;
+  color: #1d4ed8 !important;
+}
+
+.agent-toolbar-action-btn--primary:hover,
+.agent-toolbar-action-btn--primary:focus,
+.agent-toolbar-action-btn--primary:active {
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(231, 241, 255, 0.88)) !important;
+  border-color: rgba(96, 165, 250, 0.66) !important;
+  color: #1e3a8a !important;
+}
+
+/* ---- header icon button ---- */
+.agent-toolbar-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 42px;
+	height: 42px;
+	border-radius: 16px;
+	border: 1px solid rgba(255, 255, 255, 0.34) !important;
+	background: rgba(255, 255, 255, 0.42) !important;
+	color: #0f172a !important;
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.68),
+		0 10px 22px rgba(15, 23, 42, 0.05) !important;
+	backdrop-filter: blur(14px) saturate(135%);
+	padding: 0;
+}
+
+.agent-toolbar-icon-btn:hover,
+.agent-toolbar-icon-btn:focus {
+	border-color: rgba(96, 165, 250, 0.34) !important;
+	background: rgba(255, 255, 255, 0.56) !important;
+	color: #0f172a !important;
+}
+
+/* ---- search overlay ---- */
+.agent-search-fade-enter-active { transition: opacity 0.18s ease; }
+.agent-search-fade-leave-active { transition: opacity 0.12s ease; }
+.agent-search-fade-enter-from,
+.agent-search-fade-leave-to { opacity: 0; }
+
+.agent-search-overlay {
+	position: fixed;
+	top: 0; right: 0; bottom: 0;
+	left: var(--layout-sider-width, 220px);
+	z-index: 1200;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding: 84px 24px 24px;
+	background: rgba(255, 255, 255, 0.08);
+	backdrop-filter: blur(8px) saturate(112%);
+}
+
+.agent-search-floating-panel {
+	width: min(100%, 480px);
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.agent-search-floating-input {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 48px;
+	padding: 0 14px;
+	border-radius: 16px;
+	background:
+		linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.6)),
+		rgba(255, 255, 255, 0.44);
+	border: 1px solid rgba(255, 255, 255, 0.74);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.82),
+		0 16px 32px rgba(15, 23, 42, 0.08);
+	backdrop-filter: blur(18px) saturate(125%);
+}
+
+.agent-search-floating-input:focus-within {
+	border-color: rgba(255, 255, 255, 0.82);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.9),
+		0 18px 38px rgba(15, 23, 42, 0.1);
+}
+
+.agent-search-floating-icon { color: rgba(148, 163, 184, 0.9); font-size: 14px; }
+
+.agent-search-floating-field {
+	flex: 1; min-width: 0; height: 34px; padding: 0;
+	border: none; outline: none; background: transparent; box-shadow: none;
+	color: #0f172a; font-size: 13px; line-height: 34px;
+}
+
+.agent-search-floating-field::placeholder { color: rgba(71, 85, 105, 0.72); }
+
+.agent-search-suggestions {
+	display: flex; flex-direction: column; gap: 2px;
+	padding: 8px; border-radius: 14px;
+	background: linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.94));
+	border: 1px solid rgba(148,163,184,0.14);
+	box-shadow: 0 14px 36px rgba(15,23,42,0.1), inset 0 1px 0 rgba(255,255,255,0.84);
+}
+
+.agent-search-suggestion-loading { padding: 10px 12px; color: #94a3b8; font-size: 12px; text-align: center; }
+
+.agent-search-suggestion {
+	display: flex; align-items: center; justify-content: space-between; gap: 10px;
+	width: 100%; padding: 8px 10px; border: none; border-radius: 10px;
+	background: transparent; cursor: pointer; text-align: left;
+	color: inherit; font-family: inherit;
+}
+
+.agent-search-suggestion:hover,
+.agent-search-suggestion:focus { background: rgba(239, 246, 255, 0.8); outline: none; }
+
+.agent-search-suggestion-title { color: #0f172a; font-size: 13px; font-weight: 600; }
+.agent-search-suggestion-subtitle { color: #94a3b8; font-size: 12px; }
+
+
+/* ---- overview chart card (dark dashboard) ---- */
+.overview-chart-card {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  min-height: 236px;
+  border-radius: 20px;
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 32%),
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.1), transparent 28%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.96));
+  box-shadow:
+    0 24px 48px rgba(15, 23, 42, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.overview-chart-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.32), rgba(59, 130, 246, 0.32), rgba(34, 197, 94, 0.16));
+  pointer-events: none;
+  z-index: 1;
+}
+
+.overview-chart-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overview-chart-copy {
+  min-width: 0;
+}
+
+.overview-chart-label {
+  color: rgba(148, 163, 184, 0.72);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.overview-chart-title {
+  margin-top: 4px;
+  color: #eff6ff;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.overview-chart-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(226, 232, 240, 0.78);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.overview-chart-canvas {
+  width: 100%;
+  height: 142px;
+}
+
+.overview-chart-footnote {
+  color: rgba(148, 163, 184, 0.56);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .agent-link {
@@ -1628,7 +2181,15 @@ onBeforeUnmount(() => {
 .config-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 16px;
+}
+
+.config-col {
+  min-width: 0;
+}
+
+.config-col--yaml {
+  grid-column: 1 / -1;
 }
 
 .config-label {
@@ -1658,13 +2219,15 @@ onBeforeUnmount(() => {
   word-break: break-word;
 }
 
+.config-copy-btn {
+  margin-top: 10px;
+  border-radius: 10px !important;
+  font-weight: 600;
+}
+
 .config-actions {
   display: flex;
   justify-content: flex-end;
-}
-
-.bootstrap-meta {
-  margin-bottom: 12px;
 }
 
 .tasks-header {
@@ -1825,6 +2388,29 @@ onBeforeUnmount(() => {
   color: var(--color-text-secondary);
 }
 
+@media (max-width: 1024px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .page-header-actions {
+    justify-content: flex-start;
+  }
+
+  .overview-chart-card {
+    min-height: 210px;
+  }
+
+  .overview-chart-canvas {
+    height: 132px;
+  }
+
+  .overview-chart-title {
+    font-size: 18px;
+  }
+}
+
 @media (max-width: 900px) {
   .page-header,
   .bootstrap-card-head,
@@ -1839,5 +2425,152 @@ onBeforeUnmount(() => {
   .config-meta {
     grid-template-columns: 1fr;
   }
+
+  .config-col--yaml {
+    grid-column: 1;
+  }
 }
+
+/* ---- agent form modal ---- */
+.agent-form-modal-wrap :deep(.ant-modal-content) {
+	position: relative;
+	overflow: hidden;
+	isolation: isolate;
+	border-radius: 24px;
+	border: 1px solid rgba(255, 255, 255, 0.68);
+	background:
+		radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 30%),
+		radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+	box-shadow:
+		0 32px 90px rgba(15, 23, 42, 0.18),
+		inset 0 1px 0 rgba(255, 255, 255, 0.96),
+		inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+	backdrop-filter: blur(18px) saturate(180%);
+}
+
+.agent-form-modal-wrap :deep(.ant-modal-content)::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	background:
+		linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+		radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+	pointer-events: none;
+	z-index: 0;
+}
+
+.agent-form-modal-wrap :deep(.ant-modal-header) {
+	position: relative; z-index: 1;
+	margin-bottom: 10px;
+	border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+	background: transparent;
+}
+
+.agent-form-modal-wrap :deep(.ant-modal-body) {
+	position: relative; z-index: 1;
+	padding-top: 10px;
+}
+
+.agent-form-modal-titlebar {
+	display: flex; align-items: center; justify-content: space-between;
+	gap: 16px; width: 100%;
+}
+
+.agent-form-modal-title {
+	min-width: 0;
+	color: #0f172a; font-size: 22px; font-weight: 800;
+	letter-spacing: -0.02em;
+}
+
+.agent-form-modal-save-btn.ant-btn {
+	flex: none; font-size: 14px; font-weight: 700; letter-spacing: normal;
+}
+
+.agent-form {
+	display: flex; flex-direction: column; gap: 20px;
+}
+
+.agent-form-note {
+	position: relative;
+	padding: 0 0 0 14px;
+	color: #64748b; font-size: 13px; line-height: 1.6;
+}
+
+.agent-form-note::before {
+	content: '';
+	position: absolute; left: 0; top: 3px; bottom: 3px;
+	width: 4px; border-radius: 999px;
+	background: linear-gradient(180deg, rgba(59, 130, 246, 0.42), rgba(96, 165, 250, 0.16));
+}
+
+.agent-form-panel { padding: 0; }
+
+.agent-form-panel-title {
+	display: flex; align-items: center; gap: 12px;
+	margin-bottom: 14px;
+	color: #0f172a; font-size: 14px; line-height: 1.4; font-weight: 700;
+}
+
+.agent-form-panel-title::after {
+	content: '';
+	flex: 1; height: 1px;
+	background: linear-gradient(90deg, rgba(203, 213, 225, 0.78), rgba(226, 232, 240, 0));
+	transform: translateY(1px);
+}
+
+.agent-form-note + .agent-form-panel {
+	padding-top: 18px;
+	border-top: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.agent-form-label {
+	display: inline-flex; align-items: center; gap: 8px;
+	color: #0f172a;
+}
+
+.agent-form-required-tag {
+	margin-inline-end: 0;
+	border: 1px solid rgba(191, 219, 254, 0.72);
+	background: rgba(239, 246, 255, 0.96);
+	color: #2563eb; font-size: 11px; line-height: 18px;
+}
+
+.agent-form :deep(.ant-form-item) { margin-bottom: 14px; }
+
+.agent-form :deep(.ant-form-item-label > label) {
+	color: #0f172a; font-size: 13px; font-weight: 700;
+}
+
+.agent-form :deep(.ant-input),
+.agent-form :deep(.ant-select-selector),
+.agent-form :deep(.ant-input-affix-wrapper),
+.agent-form :deep(.ant-input-textarea textarea) {
+	background: transparent !important;
+	border-color: rgba(203, 213, 225, 0.88) !important;
+	box-shadow: none !important;
+}
+
+.agent-form :deep(.ant-input:hover),
+.agent-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector),
+.agent-form :deep(.ant-input-affix-wrapper:hover) {
+	border-color: rgba(96, 165, 250, 0.48) !important;
+}
+
+.agent-form :deep(.ant-input:focus),
+.agent-form :deep(.ant-input-focused),
+.agent-form :deep(.ant-input-affix-wrapper-focused),
+.agent-form :deep(.ant-select-focused .ant-select-selector) {
+	background: transparent !important;
+	border-color: rgba(59, 130, 246, 0.56) !important;
+	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12) !important;
+}
+
+.agent-form :deep(.ant-select-disabled .ant-select-selector),
+.agent-form :deep(.ant-input[disabled]) {
+	background: transparent !important; color: #94a3b8 !important;
+}
+
+.agent-form :deep(.ant-select-selection-placeholder),
+.agent-form :deep(.ant-input::placeholder) { color: #94a3b8; }
 </style>

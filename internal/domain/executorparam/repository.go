@@ -3,6 +3,8 @@ package executorparam
 import (
 	"context"
 	"time"
+
+	pipelinedomain "gos/internal/domain/pipeline"
 )
 
 type Repository interface {
@@ -10,6 +12,7 @@ type Repository interface {
 	Upsert(ctx context.Context, items []ExecutorParamDef) (created int, updated int, err error)
 	MarkMissingInactive(ctx context.Context, executorType ExecutorType, keepIDs []string, updatedAt time.Time) (int, error)
 	ListByPipeline(ctx context.Context, filter ListFilter) ([]ExecutorParamDef, int64, error)
+	ListByApplications(ctx context.Context, filter ApplicationListFilter) ([]ExecutorParamDef, int64, error)
 	GetByID(ctx context.Context, id string) (ExecutorParamDef, error)
 	UpdateParamKey(ctx context.Context, id string, paramKey string, updatedAt time.Time) (ExecutorParamDef, error)
 	CountByParamKey(ctx context.Context, paramKey string) (int64, error)
@@ -24,4 +27,15 @@ type ListFilter struct {
 	Status       Status
 	Page         int
 	PageSize     int
+}
+
+type ApplicationListFilter struct {
+	ApplicationIDs []string
+	Keyword        string
+	BindingType    pipelinedomain.BindingType
+	Visible        *bool
+	Editable       *bool
+	Status         Status
+	Page           int
+	PageSize       int
 }

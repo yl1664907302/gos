@@ -153,6 +153,11 @@ export interface UpdatePipelineBindingPayload {
 
 export interface ExecutorParamDef {
   id: string
+  application_id?: string
+  application_name?: string
+  application_key?: string
+  binding_type?: BindingType
+  pipeline_name?: string
   pipeline_id: string
   executor_type: ExecutorType
   executor_param_name: string
@@ -180,6 +185,17 @@ export interface ApplicationExecutorParamListParams {
   visible?: boolean
   editable?: boolean
   param_key?: string
+  status?: ExecutorParamStatus
+  page?: number
+  page_size?: number
+}
+
+export interface ExecutorParamListParams {
+  application_id?: string
+  keyword?: string
+  binding_type?: BindingType
+  visible?: boolean
+  editable?: boolean
   status?: ExecutorParamStatus
   page?: number
   page_size?: number

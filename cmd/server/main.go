@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -186,6 +188,7 @@ func main() {
 		usecase.NewQueryGitOpsTemplateFields(platformParamRepo),
 		usecase.NewQueryGitOpsFieldCandidates(repo, gitopsInstanceManager),
 		usecase.NewQueryGitOpsValuesCandidates(repo, gitopsInstanceManager),
+		usecase.NewQueryGitOpsScanPathStatus(repo, gitopsInstanceManager),
 		gitopsInstanceManager,
 		authSessionManager,
 	)
@@ -237,9 +240,27 @@ func main() {
 	)
 
 	syncTask := bootstrap.StartJenkinsAutoSyncTask(cfg.Jenkins, func(ctx context.Context) error {
-		pipelineResult, err := syncPipelines.Execute(ctx)
-		if err != nil {
-			return err
+		var (
+			pipelineResult usecase.SyncPipelinesOutput
+			paramResult    usecase.SyncExecutorParamDefsOutput
+			pipelineErr    error
+			paramErr       error
+			wg             sync.WaitGroup
+		)
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			pipelineResult, pipelineErr = syncPipelines.Execute(ctx)
+		}()
+		go func() {
+			defer wg.Done()
+			paramResult, paramErr = syncExecutorParamDefs.Execute(ctx)
+		}()
+		wg.Wait()
+
+		if pipelineErr != nil {
+			return fmt.Errorf("sync pipelines: %w", pipelineErr)
 		}
 		log.Printf(
 			"jenkins auto sync completed: total=%d created=%d updated=%d inactivated=%d skipped=%d",
@@ -250,9 +271,8 @@ func main() {
 			pipelineResult.Skipped,
 		)
 
-		paramResult, err := syncExecutorParamDefs.Execute(ctx)
-		if err != nil {
-			return err
+		if paramErr != nil {
+			return fmt.Errorf("sync param defs: %w", paramErr)
 		}
 		log.Printf(
 			"jenkins param auto sync completed: total=%d created=%d updated=%d inactivated=%d skipped=%d",

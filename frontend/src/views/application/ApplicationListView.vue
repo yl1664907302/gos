@@ -1,32 +1,53 @@
 <script setup lang="ts">
 import {
-  AppstoreOutlined,
-  DownOutlined,
+  AimOutlined,
   ExclamationCircleOutlined,
   MoreOutlined,
   PlusOutlined,
   QuestionCircleOutlined,
-  ReloadOutlined,
   RocketOutlined,
+  SearchOutlined,
   SyncOutlined,
-  UpOutlined,
   WarningOutlined,
 } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { Modal, message } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import * as echarts from 'echarts/core'
+import type { ECharts } from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+import { computed, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { deleteApplication, listApplications } from '../../api/application'
 import { listProjects } from '../../api/project'
-import { listReleaseOrders, listAllReleaseTemplates } from '../../api/release'
+import {
+  createApplicationRollbackOrder,
+  getApplicationRollbackCapability,
+  getApplicationRollbackPrecheck,
+  listAppReleaseStateSummaries,
+  listReleaseOrders,
+  listAllReleaseTemplates,
+} from '../../api/release'
 import { useApplicationListStore } from '../../stores/application-list'
 import { useAuthStore } from '../../stores/auth'
-import type { Application } from '../../types/application'
+import type { Application, ApplicationStatus } from '../../types/application'
 import type { Project } from '../../types/project'
-import type { ReleaseOperationType, ReleaseOrder, ReleaseOrderBusinessStatus } from '../../types/release'
+import type {
+  ApplicationRollbackCapability,
+  ApplicationRollbackPrecheck,
+  ApplicationRollbackPrecheckParam,
+  AppReleaseStateSummary,
+  ReleaseOperationType,
+  ReleaseOrder,
+  ReleaseOrderBusinessStatus,
+  RollbackSupportedAction,
+} from '../../types/release'
 import { extractHTTPErrorMessage, isHTTPStatus } from '../../utils/http-error'
 
 type MetricTone = 'default' | 'success' | 'running' | 'danger' | 'warning'
+type OverviewCardKey = 'pending' | 'running' | 'failed' | 'ready'
+const gitOpsEnvOrder = ['dev', 'test', 'prod']
 
 function releaseBusinessStatus(order: Pick<ReleaseOrder, 'status' | 'business_status'>): ReleaseOrderBusinessStatus {
   if (order.business_status) {
@@ -62,19 +83,68 @@ function releaseBusinessStatus(order: Pick<ReleaseOrder, 'status' | 'business_st
   }
 }
 
-interface WorkbenchEnvSnapshot {
+interface WorkbenchEnvSection {
   envCode: string
-  order: ReleaseOrder
+  latestOrder: ReleaseOrder | null
+  stateSummary: AppReleaseStateSummary | null
+}
+
+function normalizedValue(value: string | null | undefined) {
+  return String(value || '').trim()
+}
+
+function resolvedCurrentLiveOrderID(section: WorkbenchEnvSection) {
+  const summaryID = normalizedValue(section.stateSummary?.current_release_order_id)
+  if (summaryID) {
+    return summaryID
+  }
+  return normalizedValue(section.latestOrder?.id)
+}
+
+function resolvedCurrentLiveOrderNo(section: WorkbenchEnvSection) {
+  const summaryNo = normalizedValue(section.stateSummary?.current_release_order_no)
+  if (summaryNo) {
+    return summaryNo
+  }
+  return normalizedValue(section.latestOrder?.order_no)
 }
 
 interface WorkbenchCard {
   application: Application
   latestOrder: ReleaseOrder | null
-  envSnapshots: WorkbenchEnvSnapshot[]
+  envSections: WorkbenchEnvSection[]
   templateNames: string[]
   releaseReady: boolean
   runningCount: number
 }
+
+interface SearchSuggestion {
+  id: string
+  title: string
+  subtitle: string
+  query: string
+}
+
+interface OverviewStatCard {
+  key: OverviewCardKey
+  label: string
+  value: string
+  hint: string
+  tone: MetricTone
+  icon: unknown
+  clickable: boolean
+}
+
+interface OverviewTrendModel {
+  labels: string[]
+  success: number[]
+  running: number[]
+  failed: number[]
+  maxValue: number
+  totalActivity: number
+}
+
+echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const router = useRouter()
 const listStore = useApplicationListStore()
@@ -87,25 +157,74 @@ const dataSource = ref<Application[]>([])
 const total = ref(0)
 const loadingTemplateAvailability = ref(false)
 const loadingRecentReleases = ref(false)
+const loadingReleaseStateSummaries = ref(false)
+const loadingOverviewMetrics = ref(false)
 const templateApplicationIDs = ref<Set<string>>(new Set())
 const templateNamesByApplication = ref<Map<string, string[]>>(new Map())
 const recentReleaseOrders = ref<ReleaseOrder[]>([])
+const overviewApplications = ref<Application[]>([])
+const overviewRecentReleaseOrders = ref<ReleaseOrder[]>([])
+const releaseStateSummaries = ref<AppReleaseStateSummary[]>([])
 const projectOptions = ref<{ label: string; value: string }[]>([])
 const introVisible = ref(false)
-const collapsedApplicationMap = ref<Record<string, boolean>>({})
-const collapseSeeded = ref(false)
+const applicationInfoDrawerVisible = ref(false)
+const selectedApplication = ref<Application | null>(null)
+const releaseDetailCardID = ref('')
+const selectedReleaseEnvByApplication = ref<Record<string, string>>({})
 const viewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1440)
 const firstWorkbenchLoaded = ref(false)
+const searchDialogVisible = ref(false)
+const searchInputRef = ref()
+const overviewTrendChartRef = ref<HTMLElement | null>(null)
+const searchSuggestions = ref<SearchSuggestion[]>([])
+const searchSuggestionsLoading = ref(false)
+const searchDraft = reactive<{
+  keyword: string
+}>({
+  keyword: '',
+})
+const rollbackActionLoadingKey = ref('')
+const rollbackCapabilityHints = ref<Map<string, ApplicationRollbackCapability>>(new Map())
+const overflowingAppKeys = ref<Record<string, boolean>>({})
+const overflowingAppTitles = ref<Record<string, boolean>>({})
+const appKeyElements = new Map<string, HTMLElement>()
+const appTitleElements = new Map<string, HTMLElement>()
 let autoRefreshTimer: ReturnType<typeof window.setInterval> | null = null
+let searchSuggestionTimer: ReturnType<typeof window.setTimeout> | null = null
+let searchSuggestionRequestSeq = 0
+let overviewTrendChart: ECharts | null = null
 
 const canManageApplication = computed(() => authStore.hasPermission('application.manage'))
 const canViewPipeline = computed(() => authStore.hasPermission('pipeline.view'))
-const visibleApplicationIDs = computed(() => new Set(dataSource.value.map((item) => String(item.id || '').trim()).filter(Boolean)))
-const workbenchLoading = computed(() => loading.value || loadingTemplateAvailability.value || loadingRecentReleases.value)
+const canOpenWorkbenchConfig = computed(() => canManageApplication.value)
+const overviewApplicationIDs = computed(() => new Set(overviewApplications.value.map((item) => String(item.id || '').trim()).filter(Boolean)))
+const overviewVisibleOrders = computed(() =>
+  overviewRecentReleaseOrders.value.filter((item) =>
+    overviewApplicationIDs.value.has(String(item.application_id || '').trim()),
+  ),
+)
+const workbenchLoading = computed(() =>
+  loading.value ||
+  loadingTemplateAvailability.value ||
+  loadingRecentReleases.value ||
+  loadingReleaseStateSummaries.value ||
+  loadingOverviewMetrics.value,
+)
 const initialWorkbenchLoading = computed(() => !firstWorkbenchLoaded.value && workbenchLoading.value && dataSource.value.length === 0)
+const projectFilterValue = computed<string | undefined>({
+  get: () => {
+    const value = String(listStore.project_id || '').trim()
+    return value || undefined
+  },
+  set: (value) => {
+    listStore.project_id = String(value || '').trim()
+  },
+})
 
 const filters = computed(() => ({
+  keyword: String(listStore.keyword || '').trim() || undefined,
   project_id: String(listStore.project_id || '').trim() || undefined,
+  status: (String(listStore.status || '').trim() as ApplicationStatus | '') || undefined,
   page: listStore.page,
   page_size: listStore.pageSize,
 }))
@@ -124,6 +243,18 @@ const recentOrdersByApplication = computed(() => {
   return grouped
 })
 
+const releaseStateSummaryByAppEnv = computed(() => {
+  const grouped = new Map<string, AppReleaseStateSummary>()
+  releaseStateSummaries.value.forEach((item) => {
+    const key = `${String(item.application_id || '').trim()}::${String(item.env_code || '').trim()}`
+    if (!key || grouped.has(key)) {
+      return
+    }
+    grouped.set(key, item)
+  })
+  return grouped
+})
+
 const workbenchCards = computed<WorkbenchCard[]>(() =>
   dataSource.value.map((application) => {
     const appID = String(application.id || '').trim()
@@ -136,15 +267,20 @@ const workbenchCards = computed<WorkbenchCard[]>(() =>
       }
       envMap.set(envCode, item)
     })
-    const envSnapshots = orderedEnvCodes(Array.from(envMap.keys())).map((envCode) => ({
+    const summaryEnvCodes = releaseStateSummaries.value
+      .filter((item) => String(item.application_id || '').trim() === appID)
+      .map((item) => String(item.env_code || '').trim())
+      .filter(Boolean)
+    const envSections = orderedEnvCodes(Array.from(new Set([...envMap.keys(), ...summaryEnvCodes]))).map((envCode) => ({
       envCode,
-      order: envMap.get(envCode)!,
+      latestOrder: envMap.get(envCode) || null,
+      stateSummary: releaseStateSummaryByAppEnv.value.get(`${appID}::${envCode}`) || null,
     }))
     const templateNames = templateNamesByApplication.value.get(appID) || []
     return {
       application,
       latestOrder: orders[0] || null,
-      envSnapshots,
+      envSections,
       templateNames,
       releaseReady: canReleaseApplication(appID),
       runningCount: orders.filter((item) => releaseBusinessStatus(item) === 'deploying').length,
@@ -153,101 +289,726 @@ const workbenchCards = computed<WorkbenchCard[]>(() =>
 )
 
 const workbenchColumnCount = computed(() => {
-  if (viewportWidth.value <= 768) {
+  if (viewportWidth.value <= 980) {
     return 1
+  }
+  if (viewportWidth.value <= 1680) {
+    return 2
   }
   return 3
 })
 
-const workbenchColumns = computed<WorkbenchCard[][]>(() => {
-  const columnCount = Math.max(1, workbenchColumnCount.value)
-  const columns: WorkbenchCard[][] = Array.from({ length: columnCount }, () => [])
-  workbenchCards.value.forEach((card, index) => {
-    columns[index % columnCount].push(card)
+function cardActivityStatusText(runningCount: number) {
+  return runningCount > 0 ? '正在发布' : '暂无动作'
+}
+
+function cardActivityStatusClass(runningCount: number) {
+  return runningCount > 0 ? 'workbench-status-chip-running' : 'workbench-status-chip-idle'
+}
+
+function releaseOverviewText(card: WorkbenchCard) {
+  return card.latestOrder ? `最近发布：${card.latestOrder.order_no}` : '最近发布：暂无最近发布'
+}
+
+function releaseOverviewStatusText(card: WorkbenchCard) {
+  return `状态：${cardActivityStatusText(card.runningCount)}`
+}
+
+function releaseStatusChipClass(status: ReleaseOrderBusinessStatus) {
+  switch (status) {
+    case 'deploy_success':
+      return 'dashboard-chip dashboard-chip-running'
+    case 'deploying':
+      return 'dashboard-chip dashboard-chip-warning'
+    case 'deploy_failed':
+    case 'rejected':
+    case 'cancelled':
+      return 'dashboard-chip dashboard-chip-danger'
+    default:
+      return 'dashboard-chip dashboard-chip-neutral'
+  }
+}
+
+function releaseOrderStatusText(order: ReleaseOrder | null | undefined) {
+  if (!order) {
+    return '暂无状态'
+  }
+  return releaseStatusText(releaseBusinessStatus(order))
+}
+
+function releaseOrderStatusTagClass(order: ReleaseOrder | null | undefined) {
+  if (!order) {
+    return 'dashboard-chip dashboard-chip-neutral'
+  }
+  return releaseStatusChipClass(releaseBusinessStatus(order))
+}
+
+function currentLiveImageTag(section: WorkbenchEnvSection) {
+  return normalizedValue(section.stateSummary?.current_image_tag) || normalizedValue(section.latestOrder?.image_tag) || '-'
+}
+
+function currentLiveConfirmedAt(section: WorkbenchEnvSection) {
+  return (
+    section.stateSummary?.current_confirmed_at ||
+    section.latestOrder?.live_state_confirmed_at ||
+    section.latestOrder?.finished_at ||
+    section.latestOrder?.updated_at ||
+    ''
+  )
+}
+
+function currentLiveConfirmedBy(section: WorkbenchEnvSection) {
+  return normalizedValue(section.stateSummary?.current_confirmed_by) || normalizedValue(section.latestOrder?.live_state_confirmed_by) || '-'
+}
+
+function currentLiveOrderCardClass(section: WorkbenchEnvSection) {
+  if (!resolvedCurrentLiveOrderNo(section)) {
+    return 'env-status-neutral'
+  }
+  if (!section.latestOrder) {
+    return 'env-status-success'
+  }
+  return releaseStatusClass(releaseBusinessStatus(section.latestOrder))
+}
+
+function hasReleaseDetailData(card: WorkbenchCard) {
+  return Boolean(card.latestOrder) || card.envSections.some((section) => Boolean(resolvedCurrentLiveOrderNo(section)))
+}
+
+function releaseDetailEnvSections(card: WorkbenchCard) {
+  const sections = card.envSections.filter((section) => Boolean(resolvedCurrentLiveOrderNo(section)) || Boolean(section.latestOrder))
+  return sections.length > 0 ? sections : card.envSections
+}
+
+function selectedReleaseSection(card: WorkbenchCard) {
+  const sections = releaseDetailEnvSections(card)
+  if (sections.length === 0) {
+    return null
+  }
+  const applicationID = normalizedValue(card.application.id)
+  const selectedEnv = normalizedValue(selectedReleaseEnvByApplication.value[applicationID])
+  return sections.find((section) => section.envCode === selectedEnv) || sections[0]
+}
+
+function setSelectedReleaseEnv(applicationID: string, envCode: string) {
+  const id = normalizedValue(applicationID)
+  const normalizedEnvCode = normalizedValue(envCode)
+  if (!id || !normalizedEnvCode) {
+    return
+  }
+  selectedReleaseEnvByApplication.value = {
+    ...selectedReleaseEnvByApplication.value,
+    [id]: normalizedEnvCode,
+  }
+}
+
+function ensureSelectedReleaseEnv(card: WorkbenchCard) {
+  const section = selectedReleaseSection(card)
+  if (!section) {
+    return
+  }
+  setSelectedReleaseEnv(card.application.id, section.envCode)
+}
+
+function canSwitchReleaseEnv(card: WorkbenchCard) {
+  return releaseDetailEnvSections(card).length > 1
+}
+
+function switchReleaseEnv(card: WorkbenchCard) {
+  const sections = releaseDetailEnvSections(card)
+  if (sections.length <= 1) {
+    return
+  }
+  const currentEnv = selectedReleaseSection(card)?.envCode || sections[0].envCode
+  const currentIndex = Math.max(0, sections.findIndex((section) => section.envCode === currentEnv))
+  const nextSection = sections[(currentIndex + 1) % sections.length]
+  setSelectedReleaseEnv(card.application.id, nextSection.envCode)
+}
+
+function releaseDetailEnvText(card: WorkbenchCard) {
+  return selectedReleaseSection(card)?.envCode || normalizedValue(card.latestOrder?.env_code) || '-'
+}
+
+function releaseDetailCurrentOrderID(card: WorkbenchCard) {
+  const section = selectedReleaseSection(card)
+  return section ? resolvedCurrentLiveOrderID(section) : ''
+}
+
+function releaseDetailCurrentOrderNo(card: WorkbenchCard) {
+  const section = selectedReleaseSection(card)
+  return section ? resolvedCurrentLiveOrderNo(section) : ''
+}
+
+function releaseDetailLatestOrder(card: WorkbenchCard) {
+  const section = selectedReleaseSection(card)
+  return section ? section.latestOrder : card.latestOrder
+}
+
+function releaseDetailLatestOrderID(card: WorkbenchCard) {
+  return normalizedValue(releaseDetailLatestOrder(card)?.id)
+}
+
+function releaseDetailLatestOrderNo(card: WorkbenchCard) {
+  return normalizedValue(releaseDetailLatestOrder(card)?.order_no)
+}
+
+function releaseDetailActionText(card: WorkbenchCard) {
+  return hasReleaseDetailData(card) ? '详情' : '查单'
+}
+
+function projectLabel(application: Application) {
+  return application.project_name
+    ? `${application.project_name}${application.project_key ? ` (${application.project_key})` : ''}`
+    : '-'
+}
+
+function baselineInfoRows(application: Application) {
+  return [
+    { key: 'name', label: '应用名称', value: application.name || '-' },
+    { key: 'key', label: '应用 Key', value: application.key || '-' },
+    { key: 'project', label: '归属项目', value: projectLabel(application) },
+    { key: 'status', label: '状态', value: applicationStatusText(application.status) },
+    { key: 'owner', label: '负责人', value: application.owner || '-' },
+    { key: 'artifact_type', label: '制品类型', value: application.artifact_type || '-' },
+    { key: 'language', label: '语言', value: application.language || '-' },
+    { key: 'repo_url', label: '仓库地址', value: application.repo_url || '-' },
+    { key: 'description', label: '描述', value: application.description || '-' },
+    { key: 'updated_at', label: '更新时间', value: formatDateTime(application.updated_at) },
+  ]
+}
+
+function gitOpsEnvRank(envCode: string) {
+  const index = gitOpsEnvOrder.indexOf(String(envCode || '').trim().toLowerCase())
+  return index >= 0 ? index : gitOpsEnvOrder.length
+}
+
+function sortedGitOpsMappings(application: Application) {
+  return [...(application.gitops_branch_mappings || [])].sort((left, right) => {
+    const rankDiff = gitOpsEnvRank(left.env_code) - gitOpsEnvRank(right.env_code)
+    if (rankDiff !== 0) {
+      return rankDiff
+    }
+    const envDiff = String(left.env_code || '').localeCompare(String(right.env_code || ''))
+    if (envDiff !== 0) {
+      return envDiff
+    }
+    return String(left.branch || '').localeCompare(String(right.branch || ''))
   })
-  return columns
+}
+
+function openApplicationInfoDrawer(application: Application) {
+  selectedApplication.value = application
+  applicationInfoDrawerVisible.value = true
+}
+
+function closeApplicationInfoDrawer() {
+  applicationInfoDrawerVisible.value = false
+}
+
+function toggleReleaseDetailCard(card: WorkbenchCard) {
+  const id = normalizedValue(card.application.id)
+  if (!id) {
+    return
+  }
+  if (releaseDetailCardID.value === id) {
+    releaseDetailCardID.value = ''
+    return
+  }
+  ensureSelectedReleaseEnv(card)
+  releaseDetailCardID.value = id
+}
+
+function closeReleaseDetailCard() {
+  releaseDetailCardID.value = ''
+}
+
+function isReleaseDetailCard(applicationID: string) {
+  return releaseDetailCardID.value === normalizedValue(applicationID)
+}
+
+function handleReleaseDetailAction(card: WorkbenchCard) {
+  if (!hasReleaseDetailData(card)) {
+    toReleaseRecords(card.application.id)
+    return
+  }
+  toggleReleaseDetailCard(card)
+}
+
+function setAppKeyElement(applicationID: string, element: Element | null) {
+  const id = String(applicationID || '').trim()
+  if (!id) {
+    return
+  }
+  if (element instanceof HTMLElement) {
+    appKeyElements.set(id, element)
+    return
+  }
+  appKeyElements.delete(id)
+}
+
+function setAppTitleElement(applicationID: string, element: Element | null) {
+  const id = String(applicationID || '').trim()
+  if (!id) {
+    return
+  }
+  if (element instanceof HTMLElement) {
+    appTitleElements.set(id, element)
+    return
+  }
+  appTitleElements.delete(id)
+}
+
+function shouldShowAppKeyFade(applicationID: string) {
+  const id = String(applicationID || '').trim()
+  return overflowingAppKeys.value[id] === true && overflowingAppTitles.value[id] === true
+}
+
+function measureAppKeyOverflow() {
+  const nextKey: Record<string, boolean> = {}
+  const nextTitle: Record<string, boolean> = {}
+  appKeyElements.forEach((element, id) => {
+    nextKey[id] = element.scrollWidth - element.clientWidth > 1
+  })
+  appTitleElements.forEach((element, id) => {
+    nextTitle[id] = element.scrollWidth - element.clientWidth > 1
+  })
+  overflowingAppKeys.value = nextKey
+  overflowingAppTitles.value = nextTitle
+}
+
+function scheduleMeasureAppKeyOverflow() {
+  void nextTick(() => {
+    if (typeof window !== 'undefined') {
+      window.requestAnimationFrame(() => {
+        measureAppKeyOverflow()
+      })
+      return
+    }
+    measureAppKeyOverflow()
+  })
+}
+
+const overviewTrendModel = computed<OverviewTrendModel>(() => {
+  const end = dayjs().startOf('hour')
+  const start = end.subtract(23, 'hour')
+  const labels = Array.from({ length: 24 }, (_, index) => start.add(index, 'hour').format('HH:mm'))
+  const success = Array.from({ length: 24 }, () => 0)
+  const running = Array.from({ length: 24 }, () => 0)
+  const failed = Array.from({ length: 24 }, () => 0)
+
+  overviewVisibleOrders.value.forEach((item) => {
+    const timestamp = dayjs(item.updated_at || item.finished_at || item.started_at || item.created_at)
+    if (!timestamp.isValid()) {
+      return
+    }
+    const hourIndex = timestamp.startOf('hour').diff(start, 'hour')
+    if (hourIndex < 0 || hourIndex >= 24) {
+      return
+    }
+
+    const status = releaseBusinessStatus(item)
+    if (status === 'deploy_success') {
+      success[hourIndex] += 1
+      return
+    }
+    if (status === 'deploy_failed') {
+      failed[hourIndex] += 1
+      return
+    }
+    if (status === 'deploying') {
+      running[hourIndex] += 1
+    }
+  })
+
+  const maxValue = Math.max(1, ...success, ...running, ...failed)
+  const totalActivity = [...success, ...running, ...failed].reduce((sum, item) => sum + item, 0)
+
+  return {
+    labels,
+    success,
+    running,
+    failed,
+    maxValue,
+    totalActivity,
+  }
 })
 
-const overviewMetrics = computed(() => {
-  const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
+const overviewSummaryCards = computed<OverviewStatCard[]>(() => {
   const today = dayjs()
-  const runningCount = new Set(visibleOrders.filter((item) => releaseBusinessStatus(item) === 'deploying').map((item) => item.id)).size
-  const failedToday = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'deploy_failed' && dayjs(item.updated_at).isSame(today, 'day')).length
+  const pendingIDs = new Set<string>()
+  const runningIDs = new Set<string>()
+  let failedToday = 0
+
+  overviewVisibleOrders.value.forEach((item) => {
+    const orderID = String(item.id || '').trim()
+    const status = releaseBusinessStatus(item)
+    if ((status === 'pending_approval' || status === 'approving') && orderID) {
+      pendingIDs.add(orderID)
+    }
+    if (status === 'deploying' && orderID) {
+      runningIDs.add(orderID)
+    }
+    if (status === 'deploy_failed' && dayjs(item.updated_at || item.created_at).isSame(today, 'day')) {
+      failedToday += 1
+    }
+  })
+
   return [
-    { key: 'applications', label: '应用总数', value: String(total.value), tone: 'default' as MetricTone, icon: AppstoreOutlined },
     {
-      key: 'ready',
-      label: '可直接发布',
-      value: String(workbenchCards.value.filter((item) => item.releaseReady).length),
-      tone: 'success' as MetricTone,
-      icon: RocketOutlined,
+      key: 'pending',
+      label: '待审批',
+      value: String(pendingIDs.size),
+      hint: '审批工作台中的待处理单',
+      tone: 'warning',
+      icon: ExclamationCircleOutlined,
+      clickable: true,
     },
     {
       key: 'running',
-      label: '运行中发布',
-      value: String(runningCount),
-      tone: 'running' as MetricTone,
+      label: '发布中',
+      value: String(runningIDs.size),
+      hint: '当前处于部署执行的发布单',
+      tone: 'running',
       icon: SyncOutlined,
+      clickable: true,
     },
     {
-      key: 'failed_today',
+      key: 'failed',
       label: '今日失败',
       value: String(failedToday),
-      tone: 'danger' as MetricTone,
+      hint: '今天发布失败的单子',
+      tone: 'danger',
       icon: WarningOutlined,
+      clickable: true,
+    },
+    {
+      key: 'ready',
+      label: '可发布',
+      value: String(
+        overviewApplications.value.filter((item) => canReleaseApplication(String(item.id || '').trim())).length,
+      ),
+      hint: '有模板且具备发布权限',
+      tone: 'success',
+      icon: RocketOutlined,
+      clickable: false,
     },
   ]
 })
 
-const spotlightCard = computed(() => {
-  const visibleOrders = recentReleaseOrders.value.filter((item) => visibleApplicationIDs.value.has(String(item.application_id || '').trim()))
-  const pendingApprovalOrders = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'pending_approval')
-  const approvingOrders = visibleOrders.filter((item) => releaseBusinessStatus(item) === 'approving')
-  const approvedToday = visibleOrders.filter(
-    (item) => releaseBusinessStatus(item) === 'approved' && dayjs(item.updated_at).isSame(dayjs(), 'day'),
-  )
-
-  if (pendingApprovalOrders.length > 0 || approvingOrders.length > 0) {
-    const priorityOrder = approvingOrders[0] || pendingApprovalOrders[0]
-    const pendingCount = pendingApprovalOrders.length
-    const approvingCount = approvingOrders.length
-    return {
-      tone: approvingCount > 0 ? 'warning' as MetricTone : 'running' as MetricTone,
-      label: '当前关注',
-      title: pendingCount + approvingCount > 1 ? `有 ${pendingCount + approvingCount} 张单子等待审批` : '有 1 张单子等待审批',
-      text: `${priorityOrder.application_name} · ${priorityOrder.env_code || '未标注环境'} · ${priorityOrder.order_no}`,
-      meta: `待审批 ${pendingCount} · 审批中 ${approvingCount} · 点击进入审批工作台`,
-      status: releaseBusinessStatus(priorityOrder),
-      needsAttention: true,
-      attentionLabel: '待处理',
-    }
+const overviewHeaderMeta = computed(() => {
+  if (overviewApplications.value.length === 0) {
+    return '尚无可见应用'
   }
-
-  if (approvedToday.length > 0) {
-    const latestApproved = approvedToday[0]
-    return {
-      tone: 'success' as MetricTone,
-      label: '当前关注',
-      title: `今日已有 ${approvedToday.length} 张单子完成审批`,
-      text: `${latestApproved.application_name} · ${latestApproved.env_code || '未标注环境'} · ${latestApproved.order_no}`,
-      meta: '点击进入审批工作台，继续处理后续审批单',
-      status: 'approved' as ReleaseOrderBusinessStatus,
-      needsAttention: false,
-      attentionLabel: '',
-    }
+  if (overviewTrendModel.value.totalActivity <= 0) {
+    return `全部应用 ${overviewApplications.value.length} · 近 24 小时暂无波动`
   }
-
-  return {
-    tone: 'default' as MetricTone,
-    label: '当前关注',
-    title: '当前没有待处理审批',
-    text: '审批工作台当前没有待审批或审批中的发布单',
-    meta: '点击进入审批工作台查看全部审批记录',
-    status: 'pending_execution' as ReleaseOrderBusinessStatus,
-    needsAttention: false,
-    attentionLabel: '',
-  }
+  return `全部应用 ${overviewApplications.value.length} · 近 24 小时共 ${overviewTrendModel.value.totalActivity} 次状态变化`
 })
+
+async function listAllApplicationsForOverview() {
+  const pageSize = 100
+  let page = 1
+  const items: Application[] = []
+
+  for (;;) {
+    const response = await listApplications({
+      page,
+      page_size: pageSize,
+    })
+    items.push(...(response.data || []))
+    if (items.length >= response.total || (response.data || []).length < pageSize) {
+      break
+    }
+    page += 1
+  }
+
+  return items
+}
+
+async function mapSettledWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+) {
+  const results: PromiseSettledResult<R>[] = new Array(items.length)
+  let cursor = 0
+
+  async function runNext() {
+    for (;;) {
+      const index = cursor
+      cursor += 1
+      if (index >= items.length) {
+        return
+      }
+      try {
+        results[index] = {
+          status: 'fulfilled',
+          value: await worker(items[index]),
+        }
+      } catch (error) {
+        results[index] = {
+          status: 'rejected',
+          reason: error,
+        }
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.max(1, Math.min(limit, items.length || 1)) }, () =>
+      runNext(),
+    ),
+  )
+  return results
+}
+
+async function loadOverviewMetrics(options: { silent?: boolean } = {}) {
+  if (!options.silent) {
+    loadingOverviewMetrics.value = true
+  }
+  try {
+    const applications = await listAllApplicationsForOverview()
+    overviewApplications.value = applications
+
+    const applicationIDs = applications
+      .map((item) => String(item.id || '').trim())
+      .filter(Boolean)
+    if (applicationIDs.length === 0) {
+      overviewRecentReleaseOrders.value = []
+      return
+    }
+
+    const results = await mapSettledWithConcurrency(
+      applicationIDs,
+      8,
+      (applicationID) =>
+        listReleaseOrders(
+          {
+            application_id: applicationID,
+            page: 1,
+            page_size: 100,
+          },
+          {
+            timeout: 30_000,
+          },
+        ),
+    )
+
+    const merged: ReleaseOrder[] = []
+    let successCount = 0
+    results.forEach((result) => {
+      if (result.status !== 'fulfilled') {
+        return
+      }
+      successCount += 1
+      merged.push(...result.value.data)
+    })
+
+    if (successCount === 0) {
+      throw new Error('overview recent release requests all failed')
+    }
+
+    overviewRecentReleaseOrders.value = merged.sort(
+      (left, right) => dayjs(right.created_at).valueOf() - dayjs(left.created_at).valueOf(),
+    )
+  } catch (error) {
+    overviewApplications.value = []
+    overviewRecentReleaseOrders.value = []
+    if (!options.silent && !isHTTPStatus(error, 403)) {
+      message.error(extractHTTPErrorMessage(error, '状态卡片汇总加载失败'))
+    }
+  } finally {
+    if (!options.silent) {
+      loadingOverviewMetrics.value = false
+    }
+  }
+}
+
+function overviewStatCardClass(tone: MetricTone) {
+  switch (tone) {
+    case 'success':
+      return 'overview-summary-card-success'
+    case 'running':
+      return 'overview-summary-card-running'
+    case 'warning':
+      return 'overview-summary-card-warning'
+    case 'danger':
+      return 'overview-summary-card-danger'
+    default:
+      return 'overview-summary-card-default'
+  }
+}
+
+function renderOverviewTrendChart() {
+  if (!overviewTrendChartRef.value) {
+    return
+  }
+  if (!overviewTrendChart) {
+    overviewTrendChart = echarts.init(overviewTrendChartRef.value)
+  }
+  const model = overviewTrendModel.value
+  overviewTrendChart.setOption(
+    {
+      animationDuration: 420,
+      animationEasing: 'cubicOut',
+      grid: {
+        top: 28,
+        right: 14,
+        bottom: 18,
+        left: 14,
+        containLabel: true,
+      },
+      tooltip: {
+        trigger: 'axis',
+        backgroundColor: 'rgba(2, 6, 23, 0.92)',
+        borderColor: 'rgba(148, 163, 184, 0.2)',
+        borderWidth: 1,
+        padding: [10, 12],
+        textStyle: {
+          color: '#e2e8f0',
+          fontSize: 12,
+        },
+        axisPointer: {
+          type: 'line',
+          lineStyle: {
+            color: 'rgba(148, 163, 184, 0.28)',
+          },
+        },
+      },
+      legend: {
+        top: 0,
+        right: 0,
+        icon: 'circle',
+        itemWidth: 8,
+        itemHeight: 8,
+        textStyle: {
+          color: 'rgba(226, 232, 240, 0.7)',
+          fontSize: 12,
+          fontWeight: 600,
+        },
+      },
+      xAxis: {
+        type: 'category',
+        boundaryGap: false,
+        data: model.labels,
+        axisLabel: {
+          color: 'rgba(226, 232, 240, 0.56)',
+          fontSize: 11,
+          interval: 2,
+        },
+        axisLine: {
+          lineStyle: {
+            color: 'rgba(71, 85, 105, 0.32)',
+          },
+        },
+        axisTick: {
+          show: false,
+        },
+      },
+      yAxis: {
+        type: 'value',
+        minInterval: 1,
+        splitNumber: Math.min(4, model.maxValue),
+        axisLabel: {
+          color: 'rgba(226, 232, 240, 0.52)',
+          fontSize: 11,
+        },
+        axisLine: {
+          show: false,
+        },
+        axisTick: {
+          show: false,
+        },
+        splitLine: {
+          lineStyle: {
+            color: 'rgba(71, 85, 105, 0.22)',
+          },
+        },
+      },
+      series: [
+        {
+          name: '成功',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2.5, color: '#34d399' },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(52, 211, 153, 0.26)' },
+              { offset: 1, color: 'rgba(52, 211, 153, 0.02)' },
+            ]),
+          },
+          data: model.success,
+        },
+        {
+          name: '执行',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2.5, color: '#60a5fa' },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(96, 165, 250, 0.22)' },
+              { offset: 1, color: 'rgba(96, 165, 250, 0.02)' },
+            ]),
+          },
+          data: model.running,
+        },
+        {
+          name: '失败',
+          type: 'line',
+          smooth: true,
+          symbol: 'none',
+          lineStyle: { width: 2.5, color: '#f87171' },
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: 'rgba(248, 113, 113, 0.22)' },
+              { offset: 1, color: 'rgba(248, 113, 113, 0.02)' },
+            ]),
+          },
+          data: model.failed,
+        },
+      ],
+    },
+    true,
+  )
+  overviewTrendChart.resize()
+}
+
+function disposeOverviewTrendChart() {
+  overviewTrendChart?.dispose()
+  overviewTrendChart = null
+}
+
+function handleOverviewCardClick(card: OverviewStatCard) {
+  if (!card.clickable) {
+    return
+  }
+  if (card.key === 'pending') {
+    toApprovalWorkbench()
+    return
+  }
+  if (card.key === 'running') {
+    void router.push({
+      path: '/releases',
+      query: {
+        status: 'deploying',
+      },
+    })
+    return
+  }
+  if (card.key === 'failed') {
+    const dateText = dayjs().format('YYYY-MM-DD')
+    void router.push({
+      path: '/releases',
+      query: {
+        status: 'deploy_failed',
+        created_at_from: dateText,
+        created_at_to: dateText,
+      },
+    })
+  }
+}
 
 function canReleaseApplication(applicationID: string) {
   return (
@@ -255,6 +1016,34 @@ function canReleaseApplication(applicationID: string) {
     templateApplicationIDs.value.has(String(applicationID || '').trim()) &&
     !loadingTemplateAvailability.value
   )
+}
+
+function rollbackActionKey(applicationID: string, envCode: string) {
+  return `${String(applicationID || '').trim()}::${String(envCode || '').trim()}`
+}
+
+function isRollbackActionLoading(applicationID: string, envCode: string) {
+  return rollbackActionLoadingKey.value === rollbackActionKey(applicationID, envCode)
+}
+
+function rollbackActionLabelForEnv(applicationID: string, envCode: string) {
+  const key = rollbackActionKey(applicationID, envCode)
+  const capability = rollbackCapabilityHints.value.get(key)
+  if (!capability) {
+    return '标准回滚'
+  }
+  if (capability.supported_action === 'replay') {
+    return '标准重放'
+  }
+  const currentState = capability.current_state
+  const provider = String(currentState?.cd_provider || '').trim().toLowerCase()
+  if (currentState?.has_ci_execution && !currentState?.has_cd_execution) {
+    return '标准重放'
+  }
+  if (currentState?.has_cd_execution && provider !== '' && provider !== 'argocd') {
+    return '标准重放'
+  }
+  return '标准回滚'
 }
 
 function orderedEnvCodes(items: string[]) {
@@ -279,37 +1068,16 @@ function orderedEnvCodes(items: string[]) {
     })
 }
 
-function syncCollapsedApplications(applications: Application[], preserve = false, previousIDs: Set<string> = new Set()) {
-  const ids = applications.map((item) => String(item.id || '').trim()).filter(Boolean)
-  if (!preserve || !collapseSeeded.value) {
-    collapsedApplicationMap.value = Object.fromEntries(ids.map((id) => [id, true]))
-    collapseSeeded.value = true
-    return
-  }
-  const next: Record<string, boolean> = {}
-  ids.forEach((id) => {
-    if (Object.prototype.hasOwnProperty.call(collapsedApplicationMap.value, id)) {
-      next[id] = collapsedApplicationMap.value[id]
-      return
-    }
-    if (!previousIDs.has(id)) {
-      next[id] = true
-    }
-  })
-  collapsedApplicationMap.value = next
-}
-
-async function loadApplications(options: { silent?: boolean; preserveCollapse?: boolean } = {}) {
+async function loadApplications(options: { silent?: boolean } = {}) {
   if (!options.silent) {
     loading.value = true
   }
   try {
-    const previousIDs = new Set(dataSource.value.map((item) => String(item.id || '').trim()).filter(Boolean))
     const response = await listApplications(filters.value)
     dataSource.value = response.data
     total.value = response.total
     listStore.setPage(response.page, response.page_size)
-    syncCollapsedApplications(response.data, options.preserveCollapse, previousIDs)
+    scheduleMeasureAppKeyOverflow()
   } catch (error) {
     if (!options.silent) {
       message.error(extractHTTPErrorMessage(error, '应用列表加载失败'))
@@ -332,8 +1100,8 @@ async function loadProjectOptions() {
     }))
     const current = String(listStore.project_id || '').trim()
     const hasCurrent = current && projectOptions.value.some((item) => item.value === current)
-    if (!hasCurrent) {
-      listStore.project_id = projectOptions.value[0]?.value || ''
+    if (current && !hasCurrent) {
+      listStore.project_id = ''
       listStore.setPage(1, listStore.pageSize)
     }
   } catch (error) {
@@ -432,28 +1200,168 @@ async function loadRecentReleases(options: { silent?: boolean } = {}) {
   }
 }
 
+async function loadReleaseStateSummaries(options: { silent?: boolean } = {}) {
+  if (!options.silent) {
+    loadingReleaseStateSummaries.value = true
+  }
+  try {
+    const applicationIDs = dataSource.value.map((item) => String(item.id || '').trim()).filter(Boolean)
+    if (applicationIDs.length === 0) {
+      releaseStateSummaries.value = []
+      return
+    }
+    const response = await listAppReleaseStateSummaries(applicationIDs)
+    releaseStateSummaries.value = response.data || []
+    await loadRollbackCapabilityHints()
+  } catch (error) {
+    releaseStateSummaries.value = []
+    rollbackCapabilityHints.value = new Map()
+    if (!options.silent && !isHTTPStatus(error, 403)) {
+      message.error(extractHTTPErrorMessage(error, '当前/上次版本加载失败'))
+    }
+  } finally {
+    if (!options.silent) {
+      loadingReleaseStateSummaries.value = false
+    }
+  }
+}
+
+async function loadRollbackCapabilityHints() {
+  const entryMap = new Map<string, { applicationID: string; envCode: string }>()
+  workbenchCards.value.forEach((card) => {
+    const applicationID = String(card.application.id || '').trim()
+    card.envSections.forEach((section) => {
+      const envCode = String(section.envCode || '').trim()
+      if (!applicationID || !envCode) {
+        return
+      }
+      entryMap.set(rollbackActionKey(applicationID, envCode), {
+        applicationID,
+        envCode,
+      })
+    })
+  })
+  const entries = [...entryMap.values()]
+
+  if (entries.length === 0) {
+    rollbackCapabilityHints.value = new Map()
+    return
+  }
+
+  const next = new Map<string, ApplicationRollbackCapability>()
+  const results = await Promise.allSettled(
+    entries.map(async (item) => {
+      const response = await getApplicationRollbackCapability(item.applicationID, {
+        env_code: item.envCode,
+      })
+      return {
+        key: rollbackActionKey(item.applicationID, item.envCode),
+        capability: response.data,
+      }
+    }),
+  )
+
+  results.forEach((result) => {
+    if (result.status !== 'fulfilled') {
+      return
+    }
+    next.set(result.value.key, result.value.capability)
+  })
+  rollbackCapabilityHints.value = next
+}
+
+async function applyWorkbenchFilters() {
+  await loadApplications()
+  await Promise.all([loadOverviewMetrics(), loadRecentReleases(), loadReleaseStateSummaries()])
+}
+
+function openSearchDialog() {
+  searchDraft.keyword = String(listStore.keyword || '').trim()
+  searchDialogVisible.value = true
+  void nextTick(() => {
+    searchInputRef.value?.focus?.()
+  })
+}
+
+function closeSearchDialog() {
+  searchDialogVisible.value = false
+}
+
+function resetSearchDraft() {
+  searchDraft.keyword = ''
+}
+
+function resetSearchSuggestions() {
+  if (searchSuggestionTimer) {
+    window.clearTimeout(searchSuggestionTimer)
+    searchSuggestionTimer = null
+  }
+  searchSuggestionRequestSeq += 1
+  searchSuggestions.value = []
+  searchSuggestionsLoading.value = false
+}
+
+async function loadSearchSuggestions(keyword: string) {
+  const requestSeq = ++searchSuggestionRequestSeq
+  searchSuggestionsLoading.value = true
+  try {
+    const response = await listApplications({
+      keyword,
+      project_id: String(listStore.project_id || '').trim() || undefined,
+      status: (String(listStore.status || '').trim() as ApplicationStatus | '') || undefined,
+      page: 1,
+      page_size: 6,
+    })
+    if (requestSeq !== searchSuggestionRequestSeq) {
+      return
+    }
+    searchSuggestions.value = (response.data || []).map((item) => ({
+      id: String(item.id || '').trim(),
+      title: String(item.name || '').trim(),
+      subtitle: String(item.key || '').trim(),
+      query: String(item.key || item.name || '').trim(),
+    }))
+  } catch {
+    if (requestSeq !== searchSuggestionRequestSeq) {
+      return
+    }
+    searchSuggestions.value = []
+  } finally {
+    if (requestSeq === searchSuggestionRequestSeq) {
+      searchSuggestionsLoading.value = false
+    }
+  }
+}
+
+function handleSearchSubmit() {
+  listStore.keyword = String(searchDraft.keyword || '').trim()
+  listStore.setPage(1, listStore.pageSize)
+  searchDialogVisible.value = false
+  void applyWorkbenchFilters()
+}
+
+function handleSearchSuggestionSelect(item: SearchSuggestion) {
+  searchDraft.keyword = item.query
+  handleSearchSubmit()
+}
+
 function handleProjectChange() {
   listStore.setPage(1, listStore.pageSize)
-  void (async () => {
-    await loadApplications()
-    await loadRecentReleases()
-  })()
+  void applyWorkbenchFilters()
 }
 
 function handleReset() {
   listStore.resetFilters()
-  listStore.project_id = projectOptions.value[0]?.value || ''
-  void (async () => {
-    await loadApplications()
-    await loadRecentReleases()
-  })()
+  resetSearchDraft()
+  searchDialogVisible.value = false
+  void applyWorkbenchFilters()
 }
 
 function handlePageChange(page: number, pageSize: number) {
   listStore.setPage(page, pageSize)
   void (async () => {
-    await loadApplications({ preserveCollapse: true })
-    await loadRecentReleases()
+    await loadApplications()
+    await Promise.all([loadRecentReleases(), loadReleaseStateSummaries()])
   })()
 }
 
@@ -469,10 +1377,6 @@ function toCreate() {
   void router.push('/applications/new')
 }
 
-function toDetail(id: string) {
-  void router.push(`/applications/${id}`)
-}
-
 function toEdit(id: string) {
   void router.push(`/applications/${id}/edit`)
 }
@@ -483,6 +1387,7 @@ function toBindings(id: string) {
 
 function toRelease(id: string) {
   if (!canReleaseApplication(id)) {
+    message.warning('当前应用未绑定发布模板或无发布权限，请先完成应用配置')
     return
   }
   void router.push({
@@ -505,35 +1410,25 @@ function toTemplates(id: string) {
   })
 }
 
-function toReleaseOrderDetail(id: string) {
-  void router.push(`/releases/${id}`)
+function toReleaseOrderDetail(id: string | null | undefined) {
+  const releaseOrderID = String(id || '').trim()
+  if (!releaseOrderID) {
+    return
+  }
+  void router.push(`/releases/${releaseOrderID}`)
 }
 
 function toApprovalWorkbench() {
   void router.push('/release-approvals')
 }
 
-async function refreshWorkbench() {
-  await loadApplications({ preserveCollapse: true })
-  await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
-}
-
 async function refreshWorkbenchSilently() {
-  await loadApplications({ silent: true, preserveCollapse: true })
-  await Promise.all([loadTemplateAvailability({ silent: true }), loadRecentReleases({ silent: true })])
-}
-
-function toggleCardCollapsed(applicationID: string) {
-  const id = String(applicationID || '').trim()
-  collapsedApplicationMap.value = {
-    ...collapsedApplicationMap.value,
-    [id]: !collapsedApplicationMap.value[id],
-  }
-}
-
-function isCardCollapsed(applicationID: string) {
-  const id = String(applicationID || '').trim()
-  return collapsedApplicationMap.value[id] !== false
+  await loadApplications({ silent: true })
+  await Promise.all([
+    loadTemplateAvailability({ silent: true }),
+    loadRecentReleases({ silent: true }),
+    loadReleaseStateSummaries({ silent: true }),
+  ])
 }
 
 function startAutoRefresh() {
@@ -550,8 +1445,47 @@ function stopAutoRefresh() {
   }
 }
 
+watch(
+  [
+    () => searchDialogVisible.value,
+    () => String(searchDraft.keyword || '').trim(),
+    () => String(listStore.project_id || '').trim(),
+    () => String(listStore.status || '').trim(),
+  ],
+  ([visible, keyword]) => {
+    if (searchSuggestionTimer) {
+      window.clearTimeout(searchSuggestionTimer)
+      searchSuggestionTimer = null
+    }
+    if (!visible || !keyword) {
+      resetSearchSuggestions()
+      return
+    }
+    searchSuggestionsLoading.value = true
+    searchSuggestionTimer = window.setTimeout(() => {
+      void loadSearchSuggestions(keyword)
+    }, 180)
+  },
+)
+
+watch(
+  [() => initialWorkbenchLoading.value, () => overviewTrendModel.value],
+  ([loading]) => {
+    if (loading) {
+      disposeOverviewTrendChart()
+      return
+    }
+    void nextTick(() => {
+      renderOverviewTrendChart()
+    })
+  },
+  { deep: true },
+)
+
 function handleResize() {
   viewportWidth.value = window.innerWidth
+  scheduleMeasureAppKeyOverflow()
+  overviewTrendChart?.resize()
 }
 
 async function handleDelete(id: string) {
@@ -562,12 +1496,280 @@ async function handleDelete(id: string) {
     if (dataSource.value.length === 1 && listStore.page > 1) {
       listStore.setPage(listStore.page - 1, listStore.pageSize)
     }
-    await loadApplications({ preserveCollapse: true })
-    await loadRecentReleases()
+    await loadApplications()
+    await Promise.all([loadOverviewMetrics(), loadRecentReleases(), loadReleaseStateSummaries()])
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, '应用删除失败'))
   } finally {
     deletingId.value = ''
+  }
+}
+
+function confirmDeleteApplication(id: string) {
+  Modal.confirm({
+    title: '确认删除应用',
+    icon: h(ExclamationCircleOutlined),
+    content: '删除后不可恢复，相关发布记录不会自动清理',
+    okText: '删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => handleDelete(id),
+  })
+}
+
+async function createRollbackOrderForCard(
+  card: WorkbenchCard,
+  envCode: string,
+  action: Exclude<RollbackSupportedAction, 'unsupported'>,
+) {
+  const applicationID = String(card.application.id || '').trim()
+  const actionKey = rollbackActionKey(applicationID, envCode)
+  rollbackActionLoadingKey.value = actionKey
+  try {
+    const response = await createApplicationRollbackOrder(applicationID, {
+      env_code: envCode,
+      action,
+    })
+    message.success(`${action === 'rollback' ? '标准回滚' : '标准重放'}单已创建：${response.data.order_no}`)
+    await Promise.all([
+      loadOverviewMetrics({ silent: true }),
+      loadRecentReleases({ silent: true }),
+      loadReleaseStateSummaries({ silent: true }),
+    ])
+    void router.push(`/releases/${response.data.id}`)
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, action === 'rollback' ? '标准回滚创建失败' : '标准重放创建失败'))
+  } finally {
+    rollbackActionLoadingKey.value = ''
+  }
+}
+
+function rollbackActionText(action: Exclude<RollbackSupportedAction, 'unsupported'>) {
+  return action === 'rollback' ? '标准回滚' : '标准重放'
+}
+
+function rollbackPreviewScopeText(scope: string) {
+  return String(scope || '').trim().toLowerCase() === 'cd' ? 'CD 参数' : 'CI 参数'
+}
+
+function rollbackPrecheckStatusText(status: string) {
+  switch (String(status || '').trim().toLowerCase()) {
+    case 'pass':
+      return '通过'
+    case 'warn':
+      return '提示'
+    case 'blocked':
+      return '阻塞'
+    default:
+      return '未知'
+  }
+}
+
+function rollbackPrecheckStatusClass(status: string) {
+  switch (String(status || '').trim().toLowerCase()) {
+    case 'pass':
+      return 'rollback-preview-check-tag rollback-preview-check-tag-pass'
+    case 'warn':
+      return 'rollback-preview-check-tag rollback-preview-check-tag-warn'
+    case 'blocked':
+      return 'rollback-preview-check-tag rollback-preview-check-tag-blocked'
+    default:
+      return 'rollback-preview-check-tag'
+  }
+}
+
+function rollbackPreviewValueText(value: string) {
+  const text = String(value || '').trim()
+  if (!text) {
+    return '空值'
+  }
+  return text.length > 64 ? `${text.slice(0, 61)}...` : text
+}
+
+function buildRollbackPreviewContent(
+  precheck: ApplicationRollbackPrecheck,
+) {
+  const action: Exclude<RollbackSupportedAction, 'unsupported'> =
+    precheck.action === 'replay' ? 'replay' : 'rollback'
+  const params = precheck.params || []
+  const grouped = new Map<string, ApplicationRollbackPrecheckParam[]>()
+  params.forEach((item) => {
+    const scope = String(item.pipeline_scope || 'ci').trim().toLowerCase() || 'ci'
+    const list = grouped.get(scope) || []
+    list.push(item)
+    grouped.set(scope, list)
+  })
+  const scopeOrder = ['ci', 'cd']
+  const scopeKeys = [...grouped.keys()].sort((left, right) => {
+    const leftIndex = scopeOrder.indexOf(left)
+    const rightIndex = scopeOrder.indexOf(right)
+    if (leftIndex >= 0 || rightIndex >= 0) {
+      if (leftIndex < 0) {
+        return 1
+      }
+      if (rightIndex < 0) {
+        return -1
+      }
+      return leftIndex - rightIndex
+    }
+    return left.localeCompare(right)
+  })
+
+  return h('div', { class: 'rollback-preview-modal' }, [
+    h('div', { class: 'rollback-preview-hero' }, [
+      h('div', { class: 'rollback-preview-hero-copy' }, [
+        h('div', { class: 'rollback-preview-hero-title' }, `${rollbackActionText(action)}预审通过后将创建新单`),
+        h(
+          'div',
+          { class: 'rollback-preview-hero-desc' },
+          action === 'rollback'
+            ? '将按目标历史版本的 Helm 部署快照恢复 GitOps 配置，并继续执行 CD'
+            : '当前环境仅支持标准重放，将按目标历史版本的参数快照重新创建执行单',
+        ),
+      ]),
+      h('span', { class: `rollback-preview-action-badge rollback-preview-action-badge-${action}` }, rollbackActionText(action)),
+    ]),
+    h('div', { class: 'rollback-preview-summary' }, [
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '动作'),
+        h('span', { class: 'rollback-preview-summary-value' }, rollbackActionText(action)),
+      ]),
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '环境'),
+        h('span', { class: 'rollback-preview-summary-value' }, precheck.env_code || '-'),
+      ]),
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '当前版本'),
+        h(
+          'span',
+          { class: 'rollback-preview-summary-value' },
+          precheck.current_state.release_order_no || '未确认生效',
+        ),
+      ]),
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '目标版本'),
+        h(
+          'span',
+          { class: 'rollback-preview-summary-value' },
+          precheck.target_state.release_order_no || '无可回退目标',
+        ),
+      ]),
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '模板'),
+        h(
+          'span',
+          { class: 'rollback-preview-summary-value' },
+          precheck.template_name || precheck.target_state.template_name || '-',
+        ),
+      ]),
+      h('div', { class: 'rollback-preview-summary-item' }, [
+        h('span', { class: 'rollback-preview-summary-label' }, '执行范围'),
+        h(
+          'span',
+          { class: 'rollback-preview-summary-value' },
+          precheck.preview_scope ? rollbackPreviewScopeText(precheck.preview_scope) : '-',
+        ),
+      ]),
+    ]),
+    precheck.reason
+      ? h('div', { class: 'rollback-preview-reason' }, precheck.reason)
+      : null,
+    h(
+      'div',
+      { class: 'rollback-preview-checks' },
+      (precheck.items || []).map((item) =>
+        h('div', { class: 'rollback-preview-check-item', key: item.key }, [
+          h('span', { class: rollbackPrecheckStatusClass(item.status) }, rollbackPrecheckStatusText(item.status)),
+          h('div', { class: 'rollback-preview-check-copy' }, [
+            h('div', { class: 'rollback-preview-check-title' }, item.name || item.key || '预审项'),
+            h('div', { class: 'rollback-preview-check-message' }, item.message || '-'),
+          ]),
+        ]),
+      ),
+    ),
+    ...scopeKeys.map((scope) =>
+      h('div', { class: 'rollback-preview-scope', key: scope }, [
+        h('div', { class: 'rollback-preview-scope-title' }, rollbackPreviewScopeText(scope)),
+        h(
+          'div',
+          { class: 'rollback-preview-param-list' },
+          (grouped.get(scope) || []).map((item, index) =>
+            h('div', { class: 'rollback-preview-param-item', key: `${scope}-${item.param_key}-${item.executor_param_name}-${index}` }, [
+              h('span', { class: 'rollback-preview-param-key' }, item.param_key || item.executor_param_name || '未命名参数'),
+              h('span', { class: 'rollback-preview-param-value' }, rollbackPreviewValueText(item.param_value)),
+            ]),
+          ),
+        ),
+      ]),
+    ),
+    params.length === 0
+      ? h('div', { class: 'rollback-preview-empty' }, '来源版本没有可展示的参数快照')
+      : null,
+  ])
+}
+
+async function openRollbackPreviewModal(
+  card: WorkbenchCard,
+  envCode: string,
+  action: Exclude<RollbackSupportedAction, 'unsupported'>,
+) {
+  const applicationID = String(card.application.id || '').trim()
+  const precheckResponse = await getApplicationRollbackPrecheck(applicationID, {
+    env_code: envCode,
+    action,
+  })
+  const precheck = precheckResponse.data
+  if (!precheck.executable) {
+    message.warning(precheck.conflict_message || precheck.reason || '当前环境暂不支持创建恢复单')
+    return
+  }
+  Modal.confirm({
+    title: action === 'rollback' ? '标准回滚预审' : '标准重放预审',
+    width: 820,
+    okText: `确认创建${rollbackActionText(action)}单`,
+    cancelText: '取消',
+    wrapClassName: 'rollback-preview-confirm-modal',
+    icon: null,
+    content: buildRollbackPreviewContent(precheck),
+    onOk: () => createRollbackOrderForCard(card, envCode, action),
+  })
+}
+
+async function handleStandardRollback(card: WorkbenchCard, envCode: string) {
+  const applicationID = String(card.application.id || '').trim()
+  if (!applicationID || !envCode) {
+    message.warning('当前应用缺少可识别的环境，无法验证回滚支持')
+    return
+  }
+  const actionKey = rollbackActionKey(applicationID, envCode)
+  rollbackActionLoadingKey.value = actionKey
+  try {
+    const response = await getApplicationRollbackCapability(applicationID, {
+      env_code: envCode,
+    })
+    const capability = response.data
+    if (capability.supported_action === 'unsupported') {
+      message.warning(capability.reason || '当前环境暂不支持标准回滚')
+      return
+    }
+    if (capability.supported_action === 'replay') {
+      Modal.confirm({
+        title: '仅支持标准重放',
+        content: capability.reason || '当前环境不支持标准回滚，仅支持标准重放，是否继续？',
+        okText: '继续预审',
+        cancelText: '取消',
+        icon: h(ExclamationCircleOutlined),
+        onOk: () => openRollbackPreviewModal(card, envCode, 'replay'),
+      })
+      return
+    }
+    await openRollbackPreviewModal(card, envCode, 'rollback')
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, '正在验证回滚支持失败'))
+  } finally {
+    if (rollbackActionLoadingKey.value === actionKey) {
+      rollbackActionLoadingKey.value = ''
+    }
   }
 }
 
@@ -577,6 +1779,29 @@ function applicationStatusText(status: Application['status']) {
 
 function applicationStatusClass(status: Application['status']) {
   return status === 'active' ? 'app-state-chip-active' : 'app-state-chip-inactive'
+}
+
+function formatDateTime(value: string) {
+  if (!value) {
+    return '-'
+  }
+  const date = dayjs(value)
+  return date.isValid() ? date.format('YYYY-MM-DD HH:mm:ss') : '-'
+}
+
+function releaseStatusTone(status: ReleaseOrderBusinessStatus) {
+  switch (status) {
+    case 'deploy_success':
+      return 'success'
+    case 'deploying':
+      return 'running'
+    case 'deploy_failed':
+    case 'rejected':
+    case 'cancelled':
+      return 'failed'
+    default:
+      return 'pending'
+  }
 }
 
 function releaseStatusText(status: ReleaseOrderBusinessStatus) {
@@ -633,7 +1858,7 @@ function operationTypeText(operationType: ReleaseOperationType | '' | null | und
     case 'rollback':
       return '标准回滚'
     case 'replay':
-      return '重放回滚'
+      return '标准重放'
     default:
       return '普通发布'
   }
@@ -647,21 +1872,6 @@ function operationTypeClass(operationType: ReleaseOperationType | '' | null | un
       return 'dashboard-chip dashboard-chip-warning'
     default:
       return 'dashboard-chip dashboard-chip-neutral'
-  }
-}
-
-function spotlightClass(tone: MetricTone) {
-  switch (tone) {
-    case 'success':
-      return 'spotlight-card-success'
-    case 'running':
-      return 'spotlight-card-running'
-    case 'warning':
-      return 'spotlight-card-warning'
-    case 'danger':
-      return 'spotlight-card-danger'
-    default:
-      return 'spotlight-card-default'
   }
 }
 
@@ -682,59 +1892,124 @@ function templateSummary(names: string[]) {
   return `${names[0]} 等 ${names.length} 个模板`
 }
 
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && searchDialogVisible.value) {
+    event.preventDefault()
+    closeSearchDialog()
+    return
+  }
+  if (event.key === 'Escape' && applicationInfoDrawerVisible.value) {
+    event.preventDefault()
+    closeApplicationInfoDrawer()
+    return
+  }
+  if (event.key === 'Escape' && releaseDetailCardID.value) {
+    event.preventDefault()
+    closeReleaseDetailCard()
+  }
+}
+
 onMounted(() => {
   void (async () => {
     await loadProjectOptions()
     await loadApplications()
-    await Promise.all([loadTemplateAvailability(), loadRecentReleases()])
+    await Promise.all([loadTemplateAvailability(), loadOverviewMetrics(), loadRecentReleases(), loadReleaseStateSummaries()])
     firstWorkbenchLoaded.value = true
+    scheduleMeasureAppKeyOverflow()
   })()
   window.addEventListener('resize', handleResize)
+  window.addEventListener('keydown', handleGlobalKeydown)
   startAutoRefresh()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  window.removeEventListener('keydown', handleGlobalKeydown)
   stopAutoRefresh()
+  resetSearchSuggestions()
+  disposeOverviewTrendChart()
 })
 </script>
 
 <template>
   <div class="page-wrapper">
-    <div class="page-header-card page-header">
+    <div class="page-header application-page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">我的应用</h2>
-        <p class="page-subtitle">围绕应用查看环境状态、最近发布与可用动作，把发布入口直接放到工作台第一屏</p>
+        <h2 class="page-title">应用</h2>
       </div>
-      <a-space>
-        <a-button @click="openIntroDrawer">
+      <div class="page-header-actions">
+        <a-button class="application-toolbar-icon-btn" @click="openSearchDialog">
+          <template #icon>
+            <SearchOutlined />
+          </template>
+        </a-button>
+        <a-select
+          v-model:value="projectFilterValue"
+          class="application-toolbar-project-select"
+          allow-clear
+          option-filter-prop="label"
+          placeholder="项目"
+          :loading="loadingProjects"
+          :options="projectOptions"
+          @change="handleProjectChange"
+        />
+        <a-button class="application-toolbar-action-btn" @click="openIntroDrawer">
           <template #icon>
             <QuestionCircleOutlined />
           </template>
           发布流程介绍
         </a-button>
-        <a-button @click="refreshWorkbench">
-          <template #icon>
-            <ReloadOutlined />
-          </template>
-          刷新
-        </a-button>
-        <a-button v-if="canManageApplication" type="primary" @click="toCreate">
+        <a-button v-if="canManageApplication" class="application-toolbar-action-btn" @click="toCreate">
           <template #icon>
             <PlusOutlined />
           </template>
           新增应用
         </a-button>
-      </a-space>
+      </div>
     </div>
 
-    <a-card class="application-overview-card" :bordered="true">
+    <transition name="application-search-fade">
+      <div v-if="searchDialogVisible" class="application-search-overlay" @click.self="closeSearchDialog">
+        <div class="application-search-floating-panel">
+          <div class="application-search-floating-input">
+            <SearchOutlined class="application-search-floating-icon" />
+            <input
+              ref="searchInputRef"
+              v-model="searchDraft.keyword"
+              class="application-search-floating-field"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="名称或 Key"
+              @keydown.enter="handleSearchSubmit"
+            />
+          </div>
+          <div v-if="searchSuggestionsLoading || searchSuggestions.length > 0" class="application-search-suggestions">
+            <div v-if="searchSuggestionsLoading" class="application-search-suggestion-loading">正在查询</div>
+            <template v-else>
+              <button
+                v-for="item in searchSuggestions"
+                :key="item.id"
+                type="button"
+                class="application-search-suggestion"
+                @click="handleSearchSuggestionSelect(item)"
+              >
+                <span class="application-search-suggestion-title">{{ item.title }}</span>
+                <span v-if="item.subtitle" class="application-search-suggestion-subtitle">{{ item.subtitle }}</span>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <a-card class="application-overview-card" :bordered="false">
       <div v-if="initialWorkbenchLoading" class="overview-loading-state">
         <div class="overview-loading-header">
           <SyncOutlined spin class="overview-loading-icon" />
           <div>
             <div class="overview-loading-title">正在汇总应用视图</div>
-            <div class="overview-loading-text">正在加载应用、模板与最近发布记录，页面准备好后会自动展示工作台。</div>
+            <div class="overview-loading-text">正在加载应用、模板与最近发布记录，页面准备好后会自动展示工作台</div>
           </div>
         </div>
         <div class="overview-loading-grid">
@@ -742,230 +2017,248 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-else class="overview-layout">
-        <div class="overview-metrics-grid">
-          <div
-            v-for="item in overviewMetrics"
+        <section class="overview-chart-panel">
+          <div class="overview-chart-header">
+            <div>
+              <div class="overview-chart-label">发布态势</div>
+              <div class="overview-chart-title">近 24 小时执行概览</div>
+            </div>
+            <div class="overview-chart-meta">{{ overviewHeaderMeta }}</div>
+          </div>
+          <div ref="overviewTrendChartRef" class="overview-chart-canvas"></div>
+          <div class="overview-chart-footnote">统计口径：按发布单最近状态更新时间汇总</div>
+        </section>
+        <div class="overview-summary-grid">
+          <button
+            v-for="item in overviewSummaryCards"
             :key="item.key"
-            class="overview-metric-card"
-            :class="`overview-metric-card-${item.tone}`"
+            class="overview-summary-card"
+            :class="[overviewStatCardClass(item.tone), item.clickable ? 'overview-summary-card-clickable' : '']"
+            type="button"
+            @click="handleOverviewCardClick(item)"
           >
-            <component :is="item.icon" class="overview-metric-icon" />
-            <div class="overview-metric-copy">
-              <div class="overview-metric-label">{{ item.label }}</div>
-              <div class="overview-metric-value">{{ item.value }}</div>
+            <div class="overview-summary-head">
+              <span class="overview-summary-icon">
+                <component :is="item.icon" />
+              </span>
+              <span v-if="item.clickable" class="overview-summary-badge">查看</span>
             </div>
-          </div>
+            <div class="overview-summary-label">{{ item.label }}</div>
+            <div class="overview-summary-value">{{ item.value }}</div>
+            <div class="overview-summary-hint">{{ item.hint }}</div>
+          </button>
         </div>
-        <button class="spotlight-card spotlight-card-button" :class="spotlightClass(spotlightCard.tone)" type="button" @click="toApprovalWorkbench">
-          <div class="spotlight-head">
-            <div class="spotlight-label">{{ spotlightCard.label }}</div>
-            <div v-if="spotlightCard.needsAttention" class="spotlight-attention-badge">
-              <span class="spotlight-attention-dot"></span>
-              <span>{{ spotlightCard.attentionLabel }}</span>
-            </div>
-          </div>
-          <div class="spotlight-title">{{ spotlightCard.title }}</div>
-          <div class="spotlight-text">{{ spotlightCard.text }}</div>
-          <div class="spotlight-meta">{{ spotlightCard.meta }}</div>
-        </button>
-      </div>
-    </a-card>
-
-    <a-card class="filter-card" :bordered="true">
-      <div class="advanced-search-panel">
-        <a-form layout="inline" class="filter-form">
-          <a-form-item label="项目">
-            <a-select
-              v-model:value="listStore.project_id"
-              class="filter-status-select"
-              allow-clear
-              show-search
-              option-filter-prop="label"
-              placeholder="请选择项目"
-              :loading="loadingProjects"
-              :options="projectOptions"
-              @change="handleProjectChange"
-            />
-          </a-form-item>
-          <a-form-item class="filter-form-actions">
-            <a-space>
-              <a-button @click="handleReset">重置</a-button>
-            </a-space>
-          </a-form-item>
-        </a-form>
       </div>
     </a-card>
 
     <div v-if="initialWorkbenchLoading" class="workbench-loading-state">
       <div class="workbench-loading-copy">
         <div class="workbench-loading-title">应用工作台加载中</div>
-        <div class="workbench-loading-text">我们正在整理环境状态、最近发布和模板可用性，请稍等片刻。</div>
+        <div class="workbench-loading-text">我们正在整理环境状态、最近发布和模板可用性，请稍等片刻</div>
       </div>
       <div class="workbench-skeleton-grid">
         <a-skeleton v-for="index in 6" :key="index" active :paragraph="{ rows: 6 }" class="workbench-skeleton-card" />
       </div>
     </div>
 
-    <div v-else-if="workbenchCards.length > 0" class="application-workbench-columns" :class="`application-workbench-columns-${workbenchColumnCount}`">
-      <div v-for="(column, columnIndex) in workbenchColumns" :key="`column-${columnIndex}`" class="application-workbench-column">
-        <a-card
-          v-for="card in column"
-          :key="card.application.id"
-          class="application-workbench-card"
-          :class="{ 'application-workbench-card-collapsed': isCardCollapsed(card.application.id) }"
-          :bordered="true"
-        >
-          <div class="workbench-card-header">
-            <div class="workbench-card-header-copy">
-              <div class="workbench-card-title-row">
-                <button class="workbench-app-title" type="button" @click="toDetail(card.application.id)">
-                  {{ card.application.name }}
-                </button>
-                <span class="workbench-app-key">{{ card.application.key }}</span>
-              </div>
-              <div class="workbench-app-project">
-                {{ card.application.project_name ? `归属项目：${card.application.project_name}` : '归属项目：未配置' }}
-              </div>
-              <p class="workbench-app-description">
-                {{ card.application.description || '暂无应用描述' }}
-              </p>
-            </div>
-            <div class="workbench-card-header-actions">
-              <span class="workbench-app-state" :class="applicationStatusClass(card.application.status)">
-                {{ applicationStatusText(card.application.status) }}
-              </span>
-              <a-button class="workbench-card-collapse" @click="toggleCardCollapsed(card.application.id)">
-                <template #icon>
-                  <component :is="isCardCollapsed(card.application.id) ? DownOutlined : UpOutlined" />
-                </template>
-                {{ isCardCollapsed(card.application.id) ? '展开' : '折叠' }}
-              </a-button>
-            </div>
-          </div>
-
-          <div v-show="isCardCollapsed(card.application.id)" class="workbench-card-collapsed-summary">
-            <span class="workbench-collapsed-item workbench-collapsed-item-block">
-              最近发布：{{ card.latestOrder?.order_no || '暂无最近发布' }}
-            </span>
-            <div class="workbench-collapsed-tail">
-              <div class="workbench-collapsed-meta">
-                <span class="workbench-collapsed-item">
-                  {{ card.runningCount > 0 ? `执行中 ${card.runningCount} 次` : '当前无运行中发布' }}
-                </span>
-              </div>
-              <div class="workbench-collapsed-action">
-                <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
-              </div>
-            </div>
-          </div>
-
-          <div v-show="!isCardCollapsed(card.application.id)" class="workbench-card-expanded">
-            <div class="workbench-meta-row">
-              <span class="workbench-meta-chip">
-                项目：{{ card.application.project_name || '-' }}
-              </span>
-              <span class="workbench-meta-chip">负责人：{{ card.application.owner || '-' }}</span>
-              <span class="workbench-meta-chip">语言：{{ card.application.language || '-' }}</span>
-              <span class="workbench-meta-chip">制品：{{ card.application.artifact_type || '-' }}</span>
-            </div>
-
-            <div class="workbench-template-strip" :class="{ 'workbench-template-strip-muted': !card.releaseReady }">
-              <div class="workbench-strip-label">当前模板</div>
-              <div class="workbench-strip-value">{{ templateSummary(card.templateNames) }}</div>
-              <span
-                class="dashboard-chip"
-                :class="card.releaseReady ? 'dashboard-chip-running' : 'dashboard-chip-neutral'"
-              >
-                {{ card.releaseReady ? '可直接发布' : '待配置模板' }}
-              </span>
-            </div>
-
-            <div class="latest-release-panel">
-              <div class="section-header-row">
-                <div class="section-title">最近发布</div>
-                <span v-if="loadingRecentReleases" class="section-loading-chip">
-                  <SyncOutlined spin />
-                  正在同步
-                </span>
-              </div>
-              <template v-if="card.latestOrder">
-                <div class="latest-release-main">
-                  <button class="latest-release-order" type="button" @click="toReleaseOrderDetail(card.latestOrder.id)">
-                    {{ card.latestOrder.order_no }}
-                  </button>
-                  <div class="latest-release-tags">
-                    <span class="dashboard-chip" :class="operationTypeClass(card.latestOrder.operation_type)">
-                      {{ operationTypeText(card.latestOrder.operation_type) }}
-                    </span>
-                    <span class="dashboard-chip release-status-chip" :class="releaseStatusClass(releaseBusinessStatus(card.latestOrder))">
-                      <SyncOutlined v-if="releaseBusinessStatus(card.latestOrder) === 'deploying'" spin class="running-spin-icon" />
-                      {{ releaseStatusText(releaseBusinessStatus(card.latestOrder)) }}
-                    </span>
+    <div
+      v-else-if="workbenchCards.length > 0"
+      class="application-workbench-columns"
+      :class="`application-workbench-columns-${workbenchColumnCount}`"
+    >
+      <a-card
+        v-for="card in workbenchCards"
+        :key="card.application.id"
+        class="application-workbench-card"
+        :class="[
+          'application-workbench-card-collapsed',
+          card.runningCount > 0 ? 'application-workbench-card-running' : '',
+          isReleaseDetailCard(card.application.id) ? 'application-workbench-card-release-active' : '',
+        ]"
+        :bordered="false"
+      >
+        <div class="workbench-card-shell" :class="{ 'workbench-card-shell-running': card.runningCount > 0 }">
+          <transition name="workbench-card-detail-switch" mode="out-in">
+            <div
+              v-if="!isReleaseDetailCard(card.application.id)"
+              :key="`${card.application.id}-summary`"
+              class="workbench-card-view workbench-card-summary-view"
+            >
+              <div class="workbench-card-header-shell">
+                <div class="workbench-card-header">
+                  <div class="workbench-card-header-copy">
+                    <div class="workbench-app-eyebrow">
+                      <span class="workbench-app-project">
+                        {{ card.application.project_name || '未配置' }}
+                      </span>
+                      <span class="workbench-app-owner-inline">{{ card.application.owner || '未配置' }}</span>
+                    </div>
+                    <div class="workbench-card-title-row">
+                      <button
+                        class="workbench-app-title"
+                        type="button"
+                        :ref="(el) => setAppTitleElement(card.application.id, el)"
+                        @click="openApplicationInfoDrawer(card.application)"
+                      >
+                        {{ card.application.name }}
+                      </button>
+                      <span
+                        class="workbench-app-key"
+                        :class="{ 'workbench-app-key-overflowing': shouldShowAppKeyFade(card.application.id) }"
+                        :title="card.application.key"
+                        :ref="(el) => setAppKeyElement(card.application.id, el)"
+                      >{{ card.application.key }}</span>
+                    </div>
                   </div>
                 </div>
-                <div class="latest-release-meta">
-                  <span>{{ card.latestOrder.env_code || '未标注环境' }}</span>
-                  <span>{{ formatTime(card.latestOrder.updated_at || card.latestOrder.created_at) }}</span>
-                  <span>{{ card.runningCount > 0 ? `运行中 ${card.runningCount} 次` : '当前无运行中发布' }}</span>
+              </div>
+              <div class="workbench-card-header-actions">
+                <span class="workbench-app-state" :class="applicationStatusClass(card.application.status)">
+                  {{ applicationStatusText(card.application.status) }}
+                </span>
+              </div>
+
+              <div class="workbench-card-collapsed-summary workbench-card-release-summary">
+                <div class="workbench-collapsed-latest">
+                  <button
+                    v-if="card.latestOrder"
+                    class="workbench-collapsed-chip workbench-collapsed-chip-order"
+                    type="button"
+                    @click="toReleaseOrderDetail(card.latestOrder.id)"
+                  >
+                    {{ releaseOverviewText(card) }}
+                  </button>
+                  <span v-else class="workbench-collapsed-chip workbench-collapsed-chip-order workbench-collapsed-chip-muted">{{ releaseOverviewText(card) }}</span>
                 </div>
-              </template>
-              <div v-else-if="loadingRecentReleases" class="inline-loading-state">
-                <SyncOutlined spin class="inline-loading-icon" />
-                <span>最近发布正在加载，请稍等片刻。</span>
-              </div>
-              <a-empty v-else description="暂无最近发布" :image="false" class="workbench-empty-state" />
-            </div>
-
-            <div class="workbench-actions">
-              <a-space wrap>
-                <a-button @click="toDetail(card.application.id)">详情</a-button>
-                <a-button @click="toReleaseRecords(card.application.id)">发布记录</a-button>
-                <a-button @click="toTemplates(card.application.id)">模板</a-button>
-              </a-space>
-            </div>
-
-            <div class="workbench-footer-row">
-              <div class="workbench-footer-actions">
-                <a-button type="primary" :disabled="!card.releaseReady" @click="toRelease(card.application.id)">发布</a-button>
-                <a-popover
-                  v-if="canViewPipeline || canManageApplication"
-                  trigger="click"
-                  placement="topRight"
-                  overlay-class-name="workbench-manage-popover"
-                >
-                  <template #content>
-                    <div class="workbench-manage-actions">
-                      <a-button v-if="canViewPipeline" block @click="toBindings(card.application.id)">管线绑定</a-button>
-                      <a-button v-if="canManageApplication" block @click="toEdit(card.application.id)">编辑</a-button>
-                      <a-popconfirm
-                        v-if="canManageApplication"
-                        title="确认删除当前应用吗？"
-                        ok-text="删除"
-                        cancel-text="取消"
-                        @confirm="handleDelete(card.application.id)"
-                      >
+                <div class="workbench-collapsed-tail">
+                  <div class="workbench-collapsed-meta">
+                    <span class="workbench-collapsed-chip workbench-status-chip" :class="cardActivityStatusClass(card.runningCount)">
+                      <span v-if="card.runningCount > 0" class="workbench-status-chip-dot"></span>
+                      {{ releaseOverviewStatusText(card) }}
+                    </span>
+                  </div>
+                  <div class="workbench-collapsed-content">
+                    <a-button class="workbench-primary-action" type="primary" @click="toRelease(card.application.id)">发布</a-button>
+                    <a-button
+                      class="workbench-primary-action workbench-release-detail-trigger"
+                      type="primary"
+                      :aria-pressed="isReleaseDetailCard(card.application.id)"
+                      @click="handleReleaseDetailAction(card)"
+                    >
+                      <template #icon>
+                        <AimOutlined />
+                      </template>
+                      {{ releaseDetailActionText(card) }}
+                    </a-button>
+                    <a-popover
+                      v-if="canOpenWorkbenchConfig"
+                      trigger="click"
+                      placement="topRight"
+                      overlay-class-name="workbench-manage-popover"
+                    >
+                      <template #content>
+                        <div class="workbench-manage-actions">
+                          <a-button class="workbench-secondary-action" @click="toTemplates(card.application.id)">查看模版</a-button>
+                          <a-button
+                            v-if="canViewPipeline || canManageApplication"
+                            class="workbench-secondary-action"
+                            @click="toBindings(card.application.id)"
+                          >
+                            管线绑定
+                          </a-button>
+                          <a-button
+                            v-if="canManageApplication"
+                            class="workbench-secondary-action"
+                            @click="toEdit(card.application.id)"
+                          >
+                            编辑
+                          </a-button>
+                          <a-button
+                            v-if="canManageApplication"
+                            class="workbench-secondary-action workbench-danger-action"
+                            danger
+                            :style="{ color: '#ef4444', borderColor: 'rgba(248, 113, 113, 0.28)' }"
+                            :loading="deletingId === card.application.id"
+                            @click="confirmDeleteApplication(card.application.id)"
+                          >
+                            删除
+                          </a-button>
+                        </div>
+                      </template>
+                      <a-button class="workbench-manage-trigger workbench-config-trigger workbench-primary-action" type="primary">
                         <template #icon>
-                          <ExclamationCircleOutlined class="danger-icon" />
+                          <MoreOutlined />
                         </template>
-                        <a-button block danger :loading="deletingId === card.application.id">删除</a-button>
-                      </a-popconfirm>
-                    </div>
-                  </template>
-                  <a-button class="workbench-manage-trigger">
-                    更多操作
-                    <template #icon>
-                      <MoreOutlined />
-                    </template>
-                  </a-button>
-                </a-popover>
+                        配置
+                      </a-button>
+                    </a-popover>
+                    <a-button
+                      v-else
+                      class="workbench-manage-trigger workbench-config-trigger workbench-primary-action workbench-config-readonly"
+                      type="primary"
+                      @click.stop.prevent
+                    >
+                      <template #icon>
+                        <MoreOutlined />
+                      </template>
+                      配置
+                    </a-button>
+                  </div>
+                </div>
               </div>
             </div>
-          </div>
-        </a-card>
-      </div>
+            <div
+              v-else
+              :key="`${card.application.id}-release-detail`"
+              class="workbench-card-view workbench-card-release-detail"
+            >
+              <div class="workbench-release-detail-head">
+                <span class="workbench-release-detail-env">{{ releaseDetailEnvText(card) }}</span>
+                <span class="workbench-app-state" :class="applicationStatusClass(card.application.status)">
+                  {{ applicationStatusText(card.application.status) }}
+                </span>
+              </div>
+              <div class="workbench-release-state-stack">
+                <button
+                  v-if="releaseDetailCurrentOrderID(card)"
+                  class="state-bubble state-bubble-current latest-release-order-bubble"
+                  type="button"
+                  @click="toReleaseOrderDetail(releaseDetailCurrentOrderID(card))"
+                >
+                  生效：{{ releaseDetailCurrentOrderNo(card) }}
+                </button>
+                <span v-else class="state-bubble state-bubble-current latest-release-order-bubble">
+                  生效：未确认生效
+                </span>
+                <button
+                  v-if="releaseDetailLatestOrderID(card)"
+                  class="state-bubble state-bubble-latest latest-release-order-bubble"
+                  type="button"
+                  @click="toReleaseOrderDetail(releaseDetailLatestOrderID(card))"
+                >
+                  最近：{{ releaseDetailLatestOrderNo(card) }}
+                </button>
+                <span v-else class="state-bubble state-bubble-latest latest-release-order-bubble">
+                  最近：暂无最近发布
+                </span>
+              </div>
+              <div class="workbench-release-detail-actions">
+                <a-button
+                  v-if="canSwitchReleaseEnv(card)"
+                  class="workbench-secondary-action"
+                  @click="switchReleaseEnv(card)"
+                >
+                  切换
+                </a-button>
+                <a-button class="workbench-secondary-action" @click="toReleaseRecords(card.application.id)">发布单</a-button>
+                <a-button class="workbench-secondary-action" @click="closeReleaseDetailCard">返回</a-button>
+              </div>
+            </div>
+          </transition>
+        </div>
+      </a-card>
     </div>
-
-    <a-card v-else class="table-card" :bordered="true">
+    <a-card v-if="!initialWorkbenchLoading && workbenchCards.length === 0" class="table-card" :bordered="true">
       <a-empty description="当前没有符合条件的应用" />
     </a-card>
 
@@ -983,66 +2276,185 @@ onUnmounted(() => {
       />
     </div>
 
-    <a-drawer :open="introVisible" title="发布流程介绍" width="620" @close="closeIntroDrawer">
-      <a-space direction="vertical" size="large" class="intro-drawer-content">
-        <a-alert
-          type="info"
-          show-icon
-          message="这张图用于帮助用户理解应用、CI、参数、ArgoCD 与 GitOps 之间的关系。"
-          description="应用是发布对象；CI 管线负责构建与产出动态值；发布参数负责在 CI/CD 之间传递上下文；ArgoCD 与 GitOps 实例一起决定最终修改哪份 Git 声明并部署到哪个集群。"
-        />
+    <a-drawer :open="applicationInfoDrawerVisible" title="应用信息" width="640" @close="closeApplicationInfoDrawer">
+      <a-descriptions v-if="selectedApplication" :column="1" bordered>
+        <a-descriptions-item v-for="item in baselineInfoRows(selectedApplication)" :key="item.key" :label="item.label">
+          {{ item.value }}
+        </a-descriptions-item>
+        <a-descriptions-item label="GitOps 映射">
+          <div v-if="selectedApplication.gitops_branch_mappings?.length" class="application-info-mini-table-scroll">
+            <table class="application-info-mini-table application-info-mini-table-gitops">
+              <thead>
+                <tr>
+                  <th>环境</th>
+                  <th>分支</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(mapping, index) in sortedGitOpsMappings(selectedApplication)"
+                  :key="`${mapping.env_code}-${mapping.branch}-${index}`"
+                >
+                  <td>{{ mapping.env_code || '-' }}</td>
+                  <td>{{ mapping.branch || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <span v-else>当前未配置映射</span>
+        </a-descriptions-item>
+        <a-descriptions-item label="发布分支">
+          <div v-if="selectedApplication.release_branches?.length" class="application-info-mini-table-scroll">
+            <table class="application-info-mini-table application-info-mini-table-release">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>分支</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(branch, index) in selectedApplication.release_branches"
+                  :key="`${branch.name}-${branch.branch}-${index}`"
+                >
+                  <td>{{ branch.name || '-' }}</td>
+                  <td>{{ branch.branch || '-' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <span v-else>当前未配置发布分支</span>
+        </a-descriptions-item>
+      </a-descriptions>
+    </a-drawer>
 
-        <div class="flow-section">
-          <div class="flow-node primary">
-            <div class="flow-title">应用 App</div>
-            <div class="flow-desc">应用是整条发布链路的中心对象，模板、绑定和发布单都围绕当前应用展开。</div>
+    <a-drawer class="architecture-drawer" :open="introVisible" title="发布架构关系" width="760" @close="closeIntroDrawer">
+      <div class="intro-drawer-content architecture-content">
+        <section class="architecture-hero">
+          <div class="architecture-kicker">Architecture</div>
+          <div class="architecture-heading">GOS 用模板和发布单把应用、执行编排与交付底座连接起来</div>
+          <div class="architecture-copy">
+            应用定义发布对象，发布模板定义执行单元、字段映射与 Hook，发布单承载一次实际执行上下文。交付阶段既可以直接走 CD 管线，也可以通过 ArgoCD + GitOps 修改声明并同步到目标集群。
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node">
-            <div class="flow-title">CI 管线</div>
-            <div class="flow-desc">负责拉代码、构建、推镜像，并产出镜像版本等动态值。</div>
+          <div class="architecture-chip-row">
+            <span class="architecture-chip">应用为中心对象</span>
+            <span class="architecture-chip">模板定义执行方式</span>
+            <span class="architecture-chip accent">ArgoCD 依赖 GitOps 实例</span>
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node">
-            <div class="flow-title">发布参数</div>
-            <div class="flow-desc">包含基础环境、标准字段映射值和 CI 运行期产出，是后续 CD 的输入上下文。</div>
-          </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-branch">
-            <div class="flow-branch-title">CD 方式</div>
-            <div class="flow-branch-grid">
-              <div class="flow-node">
-                <div class="flow-title">CD 管线</div>
-                <div class="flow-desc">直接走绑定的 CD 管线，适合已有 Jenkins/CD 流程。</div>
-              </div>
-              <div class="flow-node accent">
-                <div class="flow-title">ArgoCD</div>
-                <div class="flow-desc">平台先修改 GitOps 配置，再触发 ArgoCD，同步到目标集群。</div>
-              </div>
+        </section>
+
+        <section class="architecture-layer architecture-layer-entry">
+          <div class="architecture-layer-head">
+            <span class="architecture-layer-index">01</span>
+            <div>
+              <div class="architecture-layer-title">业务入口</div>
+              <div class="architecture-layer-summary">围绕应用建立模板与发布单，确定谁能发、怎么发、发什么</div>
             </div>
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node accent">
-            <div class="flow-title">ArgoCD 实例</div>
-            <div class="flow-desc">发布时会根据基础环境 env 命中具体的 ArgoCD 实例，决定使用哪套集群入口与应用视图。</div>
+          <div class="architecture-node-grid architecture-node-grid-three">
+            <article class="architecture-node primary">
+              <div class="architecture-node-title">应用</div>
+              <div class="architecture-node-desc">承载发布对象、项目归属、分支映射与环境视图</div>
+              <div class="architecture-node-tags">
+                <span>App</span>
+                <span>分支</span>
+              </div>
+            </article>
+            <article class="architecture-node primary">
+              <div class="architecture-node-title">发布模板</div>
+              <div class="architecture-node-desc">定义 CI/CD 执行单元、参数映射、审批人与 Hook 策略</div>
+              <div class="architecture-node-tags">
+                <span>CI/CD</span>
+                <span>Hook</span>
+              </div>
+            </article>
+            <article class="architecture-node primary">
+              <div class="architecture-node-title">发布单</div>
+              <div class="architecture-node-desc">落地一次执行上下文，记录参数快照、审批状态与执行进度</div>
+              <div class="architecture-node-tags">
+                <span>快照</span>
+                <span>状态</span>
+              </div>
+            </article>
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node accent">
-            <div class="flow-title">GitOps 实例</div>
-            <div class="flow-desc">ArgoCD 实例会关联一个 GitOps 实例，GitOps 实例负责提供本地工作目录、Git 凭据和提交身份。</div>
+        </section>
+
+        <div class="architecture-link">模板把应用配置转换成执行上下文，并在发布单中固化</div>
+
+        <section class="architecture-layer architecture-layer-control">
+          <div class="architecture-layer-head">
+            <span class="architecture-layer-index">02</span>
+            <div>
+              <div class="architecture-layer-title">执行编排</div>
+              <div class="architecture-layer-summary">这一层负责构建参数、控制审批并发，并决定通知与 Hook 何时触发</div>
+            </div>
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node accent">
-            <div class="flow-title">Git 仓库</div>
-            <div class="flow-desc">具体仓库与路径由 ArgoCD Application 解析，平台在这里更新 values 或 YAML，再提交推送。</div>
+          <div class="architecture-node-grid architecture-node-grid-four">
+            <article class="architecture-node">
+              <div class="architecture-node-title">CI 执行单元</div>
+              <div class="architecture-node-desc">拉代码、构建、产出镜像版本等运行期动态值</div>
+            </article>
+            <article class="architecture-node">
+              <div class="architecture-node-title">参数映射</div>
+              <div class="architecture-node-desc">把基础环境、分支与标准字段映射到 CI/CD 与 Agent 参数</div>
+            </article>
+            <article class="architecture-node">
+              <div class="architecture-node-title">审批与并发</div>
+              <div class="architecture-node-desc">控制执行入口，避免同应用同环境并发冲突</div>
+            </article>
+            <article class="architecture-node">
+              <div class="architecture-node-title">通知与 Hook</div>
+              <div class="architecture-node-desc">根据构建完成、发布完成或失败结果触发通知与脚本</div>
+            </article>
           </div>
-          <div class="flow-arrow">↓</div>
-          <div class="flow-node accent">
-            <div class="flow-title">目标集群</div>
-            <div class="flow-desc">Git 变更推送后，由 ArgoCD Sync 与健康检查完成最终部署落地。</div>
+        </section>
+
+        <div class="architecture-link accent">交付阶段支持直接 CD 或 GitOps 驱动的 ArgoCD 两条底座</div>
+
+        <section class="architecture-layer architecture-layer-runtime">
+          <div class="architecture-layer-head">
+            <span class="architecture-layer-index">03</span>
+            <div>
+              <div class="architecture-layer-title">交付底座</div>
+              <div class="architecture-layer-summary">发布上下文在这里真正落地到流水线、仓库声明与集群</div>
+            </div>
           </div>
-        </div>
-      </a-space>
+          <div class="architecture-runtime-grid">
+            <article class="architecture-node architecture-runtime-direct">
+              <div class="architecture-node-title">CD 管线</div>
+              <div class="architecture-node-desc">直接调用绑定的 Jenkins/CD 流程，适合已有自定义部署逻辑</div>
+              <div class="architecture-node-tags">
+                <span>Jenkins</span>
+                <span>直接部署</span>
+              </div>
+            </article>
+            <article class="architecture-runtime-cluster">
+              <div class="architecture-runtime-cluster-head">ArgoCD / GitOps 路径</div>
+              <div class="architecture-runtime-chain">
+                <article class="architecture-node accent">
+                  <div class="architecture-node-title">ArgoCD 实例</div>
+                  <div class="architecture-node-desc">按 env 命中目标实例，决定使用哪套应用入口与集群视图</div>
+                </article>
+                <div class="architecture-runtime-arrow">→</div>
+                <article class="architecture-node accent">
+                  <div class="architecture-node-title">GitOps 实例</div>
+                  <div class="architecture-node-desc">提供工作目录、Git 凭据、提交身份与本地路径映射</div>
+                </article>
+                <div class="architecture-runtime-arrow">→</div>
+                <article class="architecture-node accent">
+                  <div class="architecture-node-title">Git 仓库</div>
+                  <div class="architecture-node-desc">修改 values 或 YAML 并提交推送，成为 ArgoCD 的真实输入</div>
+                </article>
+                <div class="architecture-runtime-arrow">→</div>
+                <article class="architecture-node accent">
+                  <div class="architecture-node-title">目标集群</div>
+                  <div class="architecture-node-desc">ArgoCD Sync 与健康检查完成最终部署与状态回传</div>
+                </article>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
     </a-drawer>
   </div>
 </template>
@@ -1055,8 +2467,283 @@ onUnmounted(() => {
   gap: 20px;
 }
 
+.application-page-header {
+  padding: 4px 0 0;
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+:deep(.application-toolbar-icon-btn.ant-btn),
+:deep(.application-toolbar-action-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-icon-btn.ant-btn) {
+  width: 42px;
+  min-width: 42px;
+  padding-inline: 0;
+}
+
+:deep(.application-toolbar-project-select.ant-select) {
+  min-width: 156px;
+  width: min(220px, 32vw);
+}
+
+:deep(.application-toolbar-project-select.ant-select .ant-select-selector) {
+  display: flex;
+  align-items: center;
+  height: 42px !important;
+  padding: 0 14px !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-wrap) {
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-placeholder),
+:deep(.application-toolbar-project-select.ant-select .ant-select-arrow),
+:deep(.application-toolbar-project-select.ant-select .ant-select-clear) {
+  color: rgba(15, 23, 42, 0.62) !important;
+}
+
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-placeholder),
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-item) {
+  display: flex;
+  align-items: center;
+  line-height: 1 !important;
+}
+
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-item),
+:deep(.application-toolbar-project-select.ant-select .ant-select-selection-search-input) {
+  color: #0f172a !important;
+  font-weight: 700;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn) {
+  padding-inline: 14px;
+  font-weight: 600;
+}
+
+:deep(.application-toolbar-icon-btn.ant-btn:hover),
+:deep(.application-toolbar-icon-btn.ant-btn:focus),
+:deep(.application-toolbar-icon-btn.ant-btn:focus-visible),
+:deep(.application-toolbar-icon-btn.ant-btn:active),
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-action-btn.ant-btn:focus-visible),
+:deep(.application-toolbar-action-btn.ant-btn:active) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+:deep(.application-toolbar-project-select.ant-select:hover .ant-select-selector),
+:deep(.application-toolbar-project-select.ant-select.ant-select-focused .ant-select-selector),
+:deep(.application-toolbar-project-select.ant-select.ant-select-open .ant-select-selector) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
 .application-overview-card {
   border-radius: var(--radius-xl);
+}
+
+:deep(.application-overview-card.ant-card) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+:deep(.application-overview-card .ant-card-body) {
+  padding: 0 !important;
+  background: transparent !important;
+}
+
+.application-search-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--layout-sider-width, 220px);
+  z-index: 1200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 84px 24px 24px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px) saturate(112%);
+}
+
+.application-search-floating-panel {
+  width: min(100%, 480px);
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  backdrop-filter: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.application-search-floating-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 14px;
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.6)),
+    rgba(255, 255, 255, 0.44);
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    0 16px 32px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px) saturate(125%);
+}
+
+.application-search-floating-icon {
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 14px;
+}
+
+.application-search-floating-field {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 34px;
+}
+
+.application-search-floating-field::placeholder {
+  color: rgba(71, 85, 105, 0.72);
+}
+
+.application-search-floating-input:focus-within {
+  border-color: rgba(255, 255, 255, 0.82);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.66)),
+    rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 18px 36px rgba(15, 23, 42, 0.1);
+}
+
+.application-search-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.36)),
+    rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 16px 30px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px) saturate(124%);
+}
+
+.application-search-suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.34);
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.application-search-suggestion:hover {
+  background: rgba(255, 255, 255, 0.54);
+  transform: translateY(-1px);
+}
+
+.application-search-suggestion-loading {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.28);
+  color: rgba(51, 65, 85, 0.76);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.application-search-suggestion-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.application-search-suggestion-subtitle {
+  color: rgba(51, 65, 85, 0.74);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.application-search-fade-enter-active,
+.application-search-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.application-search-fade-enter-from,
+.application-search-fade-leave-to {
+  opacity: 0;
+}
+
+.application-search-fade-enter-from .application-search-floating-panel,
+.application-search-fade-leave-to .application-search-floating-panel {
+  transform: translateY(-8px);
+  opacity: 0;
+}
+
+.application-search-fade-enter-to .application-search-floating-panel,
+.application-search-fade-leave-from .application-search-floating-panel {
+  transform: translateY(0);
+  opacity: 1;
 }
 
 .overview-loading-state {
@@ -1103,246 +2790,405 @@ onUnmounted(() => {
 
 .overview-layout {
   display: grid;
-  grid-template-columns: minmax(0, 2.2fr) minmax(280px, 1fr);
+  grid-template-columns: minmax(0, 1.9fr) minmax(320px, 1fr);
   gap: 18px;
 }
 
-.overview-metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.overview-metric-card {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-height: 110px;
-  border-radius: 20px;
-  padding: 20px;
-  border: 1px solid rgba(96, 165, 250, 0.12);
-  background:
-    radial-gradient(circle at top right, rgba(96, 165, 250, 0.16), transparent 46%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.94));
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.2);
-}
-
-.overview-metric-card-default {
-  border-color: rgba(148, 163, 184, 0.18);
-}
-
-.overview-metric-card-success {
-  border-color: rgba(74, 222, 128, 0.26);
-  background:
-    radial-gradient(circle at top right, rgba(74, 222, 128, 0.2), transparent 42%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(22, 101, 52, 0.9));
-}
-
-.overview-metric-card-running {
-  border-color: rgba(96, 165, 250, 0.28);
-  background:
-    radial-gradient(circle at top right, rgba(96, 165, 250, 0.22), transparent 42%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(29, 78, 216, 0.88));
-}
-
-.overview-metric-card-danger {
-  border-color: rgba(248, 113, 113, 0.28);
-  background:
-    radial-gradient(circle at top right, rgba(248, 113, 113, 0.24), transparent 42%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(127, 29, 29, 0.92));
-}
-
-.overview-metric-icon {
-  font-size: 24px;
-  color: rgba(239, 246, 255, 0.92);
-}
-
-.overview-metric-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.overview-metric-label {
-  color: rgba(226, 232, 240, 0.72);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.overview-metric-value {
-  color: #f8fafc;
-  font-size: 30px;
-  font-weight: 800;
-  line-height: 1;
-}
-
-.spotlight-card {
-  min-height: 236px;
+.overview-chart-panel {
+  position: relative;
+  min-height: 284px;
   border-radius: 24px;
-  padding: 24px;
-  border: 1px solid rgba(96, 165, 250, 0.12);
-  box-shadow: 0 20px 44px rgba(15, 23, 42, 0.22);
-}
-
-.spotlight-card-button {
-  width: 100%;
-  text-align: left;
-  cursor: pointer;
-  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
-}
-
-.spotlight-card-button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.24);
-}
-
-.spotlight-card-default {
+  padding: 22px 22px 18px;
+  border: 1px solid rgba(71, 85, 105, 0.4);
   background:
-    radial-gradient(circle at top right, rgba(148, 163, 184, 0.16), transparent 48%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.95));
+    radial-gradient(circle at top right, rgba(52, 211, 153, 0.14), transparent 24%),
+    radial-gradient(circle at top left, rgba(96, 165, 250, 0.16), transparent 30%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.98), rgba(15, 23, 42, 0.96) 48%, rgba(19, 30, 53, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 22px 48px rgba(2, 6, 23, 0.16);
+  overflow: hidden;
 }
 
-.spotlight-card-success {
-  background:
-    radial-gradient(circle at top right, rgba(74, 222, 128, 0.24), transparent 48%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(22, 101, 52, 0.92));
+.overview-chart-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, 0.46), rgba(52, 211, 153, 0.32), rgba(56, 189, 248, 0));
+  pointer-events: none;
 }
 
-.spotlight-card-running {
-  background:
-    radial-gradient(circle at top right, rgba(96, 165, 250, 0.24), transparent 48%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(29, 78, 216, 0.9));
+.overview-chart-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 18px;
+  margin-bottom: 20px;
 }
 
-.spotlight-card-warning {
-  background:
-    radial-gradient(circle at top right, rgba(251, 191, 36, 0.26), transparent 48%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(146, 64, 14, 0.94));
-}
-
-.spotlight-card-danger {
-  background:
-    radial-gradient(circle at top right, rgba(248, 113, 113, 0.24), transparent 48%),
-    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(127, 29, 29, 0.94));
-}
-
-.spotlight-label {
-  color: rgba(226, 232, 240, 0.72);
-  font-size: 13px;
+.overview-chart-label {
+  color: rgba(125, 211, 252, 0.92);
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
 
-.spotlight-head {
+.overview-chart-title {
+  margin-top: 8px;
+  color: #f8fafc;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.overview-chart-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  background: rgba(15, 23, 42, 0.44);
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.overview-chart-canvas {
+  height: 188px;
+  width: 100%;
+}
+
+.overview-chart-footnote {
+  margin-top: 8px;
+  color: rgba(226, 232, 240, 0.54);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.overview-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.overview-summary-card {
+  display: flex;
+  width: 100%;
+  min-height: 135px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(71, 85, 105, 0.38);
+  background:
+    radial-gradient(circle at top right, rgba(148, 163, 184, 0.12), transparent 32%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(30, 41, 59, 0.94));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 18px 38px rgba(15, 23, 42, 0.14);
+  appearance: none;
+  text-align: left;
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.overview-summary-card-clickable {
+  cursor: pointer;
+}
+
+.overview-summary-card-clickable:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 22px 44px rgba(15, 23, 42, 0.18);
+}
+
+.overview-summary-head {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
 }
 
-.spotlight-attention-badge {
+.overview-summary-icon {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid rgba(248, 113, 113, 0.28);
-  color: rgba(254, 242, 242, 0.96);
-  font-size: 12px;
-  font-weight: 700;
-  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.08), 0 10px 24px rgba(127, 29, 29, 0.18);
-}
-
-.spotlight-attention-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #fb7185;
-  box-shadow: 0 0 0 6px rgba(251, 113, 133, 0.14);
-  animation: spotlightPulse 1.8s ease-in-out infinite;
-}
-
-.spotlight-title {
-  margin-top: 16px;
-  color: #f8fafc;
-  font-size: 26px;
-  font-weight: 800;
-  line-height: 1.24;
-}
-
-.spotlight-text {
-  margin-top: 12px;
-  color: rgba(241, 245, 249, 0.9);
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(248, 250, 252, 0.9);
   font-size: 15px;
-  line-height: 1.7;
 }
 
-.spotlight-meta {
-  margin-top: 22px;
+.overview-summary-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
   color: rgba(226, 232, 240, 0.72);
-  font-size: 13px;
+  font-size: 11px;
+  font-weight: 700;
 }
 
-.spotlight-link-hint {
-  margin-top: 18px;
-  color: rgba(248, 250, 252, 0.94);
+.overview-summary-label {
+  color: rgba(226, 232, 240, 0.74);
   font-size: 13px;
   font-weight: 700;
 }
 
-@keyframes spotlightPulse {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 1;
-  }
+.overview-summary-value {
+  color: #f8fafc;
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1;
+}
 
-  50% {
-    transform: scale(1.18);
-    opacity: 0.82;
-  }
+.overview-summary-hint {
+  margin-top: auto;
+  color: rgba(226, 232, 240, 0.58);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.overview-summary-card-default {
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+.overview-summary-card-success {
+  border-color: rgba(74, 222, 128, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(74, 222, 128, 0.2), transparent 34%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(22, 101, 52, 0.92));
+}
+
+.overview-summary-card-running {
+  border-color: rgba(96, 165, 250, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(96, 165, 250, 0.2), transparent 34%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(29, 78, 216, 0.9));
+}
+
+.overview-summary-card-warning {
+  border-color: rgba(251, 191, 36, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(251, 191, 36, 0.18), transparent 34%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(146, 64, 14, 0.92));
+}
+
+.overview-summary-card-danger {
+  border-color: rgba(248, 113, 113, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(248, 113, 113, 0.2), transparent 34%),
+    linear-gradient(160deg, rgba(15, 23, 42, 0.98), rgba(127, 29, 29, 0.92));
 }
 
 .application-workbench-columns {
   display: grid;
+  width: 100%;
   gap: 20px;
   align-items: start;
+  grid-auto-flow: row;
 }
 
-.filter-form {
+.application-search-card {
+  margin-top: 4px;
+}
+
+.application-search-shell {
   display: flex;
-  flex-wrap: wrap;
-  gap: 14px 16px;
+  justify-content: flex-start;
 }
 
-.filter-form :deep(.ant-form-item) {
+.application-search-bar {
+  position: relative;
+  display: flex;
   align-items: center;
-  margin-inline-end: 0;
-  margin-bottom: 0;
+  gap: 16px;
+  width: min(100%, 760px);
+  max-width: 70%;
+  min-height: 72px;
+  padding: 14px 16px;
+  border-radius: 24px;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.1), transparent 26%),
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.14), transparent 32%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(15, 23, 42, 0.88));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 18px 42px rgba(2, 6, 23, 0.12);
+  backdrop-filter: blur(18px);
+  overflow: hidden;
 }
 
-.filter-form :deep(.ant-form-item-label) {
-  padding-inline-end: 10px;
+.application-search-bar::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, 0.5), rgba(34, 197, 94, 0.36), rgba(56, 189, 248, 0));
+  pointer-events: none;
 }
 
-.filter-form :deep(.ant-form-item-control) {
-  min-width: 150px;
+.application-search-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-width: 0;
+  color: rgba(226, 232, 240, 0.82);
+}
+
+.application-search-meta-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 0 6px rgba(52, 211, 153, 0.14);
+}
+
+.application-search-meta-label {
+  color: rgba(226, 232, 240, 0.86);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.application-search-meta-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.32);
+  background: rgba(15, 23, 42, 0.56);
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.application-search-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 320px;
+  min-width: 260px;
+  padding-left: 40px;
+  padding-right: 8px;
+  border-radius: 18px;
+  border: 1px solid rgba(71, 85, 105, 0.38);
+  background: rgba(15, 23, 42, 0.56);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.application-search-field:hover {
+  border-color: rgba(96, 165, 250, 0.34);
+  background: rgba(15, 23, 42, 0.64);
+}
+
+.application-search-field:focus-within {
+  border-color: rgba(56, 189, 248, 0.46);
+  background: rgba(15, 23, 42, 0.7);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 0 0 4px rgba(56, 189, 248, 0.12);
+}
+
+.application-search-field-icon {
+  position: absolute;
+  left: 14px;
+  color: rgba(125, 211, 252, 0.84);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.application-search-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+:deep(.application-search-select.ant-select) {
+  width: 100%;
+}
+
+:deep(.application-search-select .ant-select-selector) {
+  height: 46px !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 34px 0 0 !important;
+}
+
+:deep(.application-search-select .ant-select-selection-search-input) {
+  height: 46px !important;
+  color: #f8fafc;
+}
+
+:deep(.application-search-select .ant-select-selection-item) {
+  display: inline-flex;
+  align-items: center;
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+:deep(.application-search-select .ant-select-selection-placeholder) {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(148, 163, 184, 0.92);
+}
+
+:deep(.application-search-select .ant-select-arrow),
+:deep(.application-search-select .ant-select-clear) {
+  color: rgba(148, 163, 184, 0.92);
+}
+
+:deep(.application-search-reset.ant-btn) {
+  height: 44px;
+  padding-inline: 18px;
+  border-radius: 16px;
+  border-color: rgba(71, 85, 105, 0.34) !important;
+  background: rgba(15, 23, 42, 0.42) !important;
+  color: rgba(226, 232, 240, 0.86) !important;
+  box-shadow: none !important;
+}
+
+:deep(.application-search-reset.ant-btn:hover),
+:deep(.application-search-reset.ant-btn:focus),
+:deep(.application-search-reset.ant-btn:focus-visible) {
+  border-color: rgba(96, 165, 250, 0.28) !important;
+  background: rgba(30, 41, 59, 0.72) !important;
+  color: #f8fafc !important;
+}
+
+:deep(.application-search-reset.ant-btn:active) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(15, 23, 42, 0.78) !important;
+  color: #f8fafc !important;
 }
 
 .application-workbench-columns-3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.application-workbench-columns-1 {
-  grid-template-columns: minmax(0, 1fr);
+.application-workbench-columns-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.application-workbench-column {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  min-width: 0;
+.application-workbench-columns-1 {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .workbench-skeleton-grid {
@@ -1381,109 +3227,342 @@ onUnmounted(() => {
 }
 
 .application-workbench-card {
+  --workbench-card-bg:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.12), transparent 24%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.98), rgba(15, 23, 42, 0.98) 42%, rgba(19, 30, 53, 0.98));
+  position: relative;
   min-width: 0;
   align-self: start;
-  border-radius: 22px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(248, 250, 252, 0.96));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.88),
-    0 18px 38px rgba(15, 23, 42, 0.05);
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.application-workbench-card::before {
+  display: none;
 }
 
 :deep(.application-workbench-card .ant-card-body) {
+  position: relative;
+  display: block;
+  height: 100%;
+  min-height: 100%;
+  padding: 0;
+  overflow: visible;
+}
+
+.workbench-card-shell {
+  --workbench-card-padding: 24px;
+  --workbench-action-right-offset: 18px;
+  position: relative;
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-height: 100%;
-  padding: 24px;
+  overflow: hidden;
+  border-radius: 24px;
+  border: 1px solid rgba(71, 85, 105, 0.48);
+  background: var(--workbench-card-bg);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 24px 52px rgba(2, 6, 23, 0.28);
+  padding: var(--workbench-card-padding);
+  isolation: isolate;
+}
+
+.workbench-card-shell::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, 0.55), rgba(34, 197, 94, 0.4), rgba(56, 189, 248, 0));
+  pointer-events: none;
+  z-index: 0;
+}
+
+.workbench-card-shell::after {
+  content: '';
+  position: absolute;
+  inset: -20% -30%;
+  background:
+    linear-gradient(112deg, transparent 36%, rgba(56, 189, 248, 0.16) 46%, rgba(34, 197, 94, 0.14) 54%, transparent 66%),
+    radial-gradient(circle at 18% 50%, rgba(56, 189, 248, 0.18), transparent 22%),
+    radial-gradient(circle at 82% 50%, rgba(34, 197, 94, 0.16), transparent 24%);
+  opacity: 0;
+  transform: translateX(-18%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.workbench-card-shell > * {
+  position: relative;
+  z-index: 1;
+}
+
+.workbench-card-shell-running {
+  border-color: rgba(56, 189, 248, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 24px 52px rgba(2, 6, 23, 0.3),
+    0 0 0 1px rgba(56, 189, 248, 0.12),
+    0 0 28px rgba(56, 189, 248, 0.14),
+    0 0 36px rgba(34, 197, 94, 0.12);
+  animation: workbench-card-running-breathe 3.1s ease-in-out infinite;
+}
+
+.workbench-card-shell-running::before {
+  height: 2px;
+  background:
+    linear-gradient(90deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, 0.72), rgba(34, 197, 94, 0.62), rgba(56, 189, 248, 0.76), rgba(56, 189, 248, 0));
+  background-size: 220% 100%;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.24);
+  animation: workbench-card-running-topline 2.5s linear infinite;
+}
+
+.workbench-card-shell-running::after {
+  opacity: 0.86;
+  animation: workbench-card-running-sweep 4.1s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+@keyframes workbench-card-running-breathe {
+  0%,
+  100% {
+    transform: translateY(0);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.07),
+      0 24px 52px rgba(2, 6, 23, 0.3),
+      0 0 0 1px rgba(56, 189, 248, 0.12),
+      0 0 28px rgba(56, 189, 248, 0.14),
+      0 0 36px rgba(34, 197, 94, 0.12);
+  }
+
+  50% {
+    transform: translateY(-1px) scale(1.002);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.1),
+      0 28px 60px rgba(2, 6, 23, 0.34),
+      0 0 0 1px rgba(56, 189, 248, 0.18),
+      0 0 40px rgba(56, 189, 248, 0.2),
+      0 0 52px rgba(34, 197, 94, 0.16);
+  }
+}
+
+@keyframes workbench-card-running-topline {
+  0% {
+    background-position: 0% 50%;
+    opacity: 0.74;
+  }
+
+  50% {
+    background-position: 100% 50%;
+    opacity: 0.94;
+  }
+
+  100% {
+    background-position: 200% 50%;
+    opacity: 0.76;
+  }
+}
+
+@keyframes workbench-card-running-sweep {
+  0% {
+    opacity: 0.44;
+    transform: translateX(-22%) scale(1.01);
+  }
+
+  50% {
+    opacity: 0.82;
+    transform: translateX(10%) scale(1.02);
+  }
+
+  100% {
+    opacity: 0.44;
+    transform: translateX(28%) scale(1.01);
+  }
 }
 
 .application-workbench-card-collapsed {
+  height: 250px;
   min-height: 250px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.99), rgba(250, 251, 253, 0.98));
+}
+
+.workbench-card-header-shell {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 96px;
 }
 
 .workbench-card-header {
+  position: relative;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: none;
 }
 
 .workbench-card-header-actions {
+  position: absolute;
+  top: 14px;
+  right: var(--workbench-action-right-offset);
   display: flex;
   align-items: center;
+  flex-direction: row;
   gap: 10px;
+  flex-shrink: 0;
+  z-index: 2;
 }
 
 .workbench-card-header-copy {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
+  width: 100%;
   min-width: 0;
+}
+
+.workbench-app-eyebrow {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding-right: 150px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .workbench-card-title-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
 }
 
 .workbench-app-title {
   border: none;
   background: transparent;
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
   padding: 0;
-  color: var(--color-text-main);
-  font-size: 22px;
+  color: #f8fafc;
+  font-size: 23px;
   font-weight: 800;
   line-height: 1.2;
   cursor: pointer;
   text-align: left;
+  transition: color 0.2s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
 }
 
 .workbench-app-title:hover {
-  color: var(--color-dashboard-800);
+  color: #4ade80;
 }
 
 .workbench-app-key {
   display: inline-flex;
+  position: relative;
   align-items: center;
-  padding: 6px 10px;
+  justify-content: flex-start;
+  flex: 0 1 auto;
+  min-width: 0;
+  width: auto;
+  max-width: 100%;
+  padding: 6px 14px 6px 10px;
   border-radius: 999px;
-  background: rgba(30, 41, 59, 0.06);
-  color: var(--color-dashboard-800);
+  border: 1px solid rgba(100, 116, 139, 0.36);
+  background: rgba(15, 23, 42, 0.64);
+  color: #cbd5e1;
   font-size: 12px;
   font-weight: 700;
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workbench-app-key-overflowing::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0), rgba(15, 23, 42, 0.96) 82%);
+  pointer-events: none;
+}
+
+
+.workbench-app-project,
+.workbench-app-owner-inline {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.38);
+  background: rgba(15, 23, 42, 0.48);
+  color: rgba(191, 219, 254, 0.88);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.03em;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .workbench-app-project {
-  color: var(--color-text-soft);
-  font-size: 13px;
-  line-height: 1.5;
+  flex: 0 1 auto;
+  max-width: 100%;
 }
 
-.workbench-app-description {
-  margin: 0;
-  color: var(--color-text-soft);
-  font-size: 14px;
-  line-height: 1.8;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  min-height: calc(1.8em * 2);
+.workbench-app-owner-inline {
+  flex: 0 1 auto;
+  max-width: 100%;
 }
+
 
 .workbench-app-state {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   padding: 8px 12px;
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.workbench-app-state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.06);
 }
 
 .workbench-card-collapse {
@@ -1494,12 +3573,11 @@ onUnmounted(() => {
   margin-top: auto;
   padding-top: 18px;
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.workbench-card-expanded {
-  margin-top: 18px;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .workbench-collapsed-item {
@@ -1507,15 +3585,11 @@ onUnmounted(() => {
   align-items: center;
   padding: 8px 12px;
   border-radius: 999px;
-  background: rgba(248, 250, 252, 0.92);
-  border: 1px solid rgba(226, 232, 240, 0.92);
-  color: var(--color-text-soft);
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(71, 85, 105, 0.36);
+  color: rgba(226, 232, 240, 0.72);
   font-size: 12px;
   font-weight: 600;
-}
-
-.workbench-collapsed-item-block {
-  width: 100%;
 }
 
 .workbench-collapsed-tail {
@@ -1534,29 +3608,187 @@ onUnmounted(() => {
   min-width: 0;
 }
 
-.workbench-collapsed-action {
+.workbench-collapsed-content {
   display: flex;
+  align-items: center;
+  gap: 10px;
   justify-content: flex-end;
   flex-shrink: 0;
+  margin-right: calc(var(--workbench-action-right-offset) - var(--workbench-card-padding));
+}
+
+.workbench-collapsed-latest {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workbench-collapsed-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  width: max-content;
+  max-width: 100%;
+  min-height: 36px;
+  border: 1px solid rgba(71, 85, 105, 0.36);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.58);
+  padding: 8px 14px;
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  box-sizing: border-box;
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    monospace;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+.workbench-collapsed-chip-order {
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    monospace;
+}
+
+button.workbench-collapsed-chip {
+  cursor: pointer;
+}
+
+button.workbench-collapsed-chip:hover {
+  border-color: rgba(125, 211, 252, 0.28);
+  color: #bae6fd;
+  transform: translateY(-1px);
+}
+
+.workbench-collapsed-chip-muted {
+  color: rgba(226, 232, 240, 0.66);
 }
 
 .app-state-chip-active {
-  color: #166534;
-  background: rgba(220, 252, 231, 0.96);
-  border: 1px solid rgba(134, 239, 172, 0.9);
+  color: #4ade80;
+  background: rgba(20, 83, 45, 0.35);
+  border: 1px solid rgba(74, 222, 128, 0.34);
 }
 
 .app-state-chip-inactive {
-  color: #475569;
-  background: rgba(241, 245, 249, 0.96);
-  border: 1px solid rgba(203, 213, 225, 0.88);
+  color: #cbd5e1;
+  background: rgba(30, 41, 59, 0.52);
+  border: 1px solid rgba(100, 116, 139, 0.34);
 }
 
 .workbench-meta-row {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 0;
+}
+
+.workbench-release-overview {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  border: none;
+  box-shadow: none;
+}
+
+.workbench-release-overview-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+  width: min(var(--workbench-overview-chip-width, max-content), 100%);
+  max-width: 100%;
+  min-height: 36px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  background: rgba(15, 23, 42, 0.54);
+  color: rgba(226, 232, 240, 0.8);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+button.workbench-release-overview-chip {
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.18s ease, color 0.18s ease, transform 0.18s ease;
+}
+
+button.workbench-release-overview-chip:hover {
+  border-color: rgba(125, 211, 252, 0.28);
+  color: #bae6fd;
+  transform: translateY(-1px);
+}
+
+.workbench-release-overview-chip-order {
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    monospace;
+}
+
+.workbench-release-overview-chip-muted {
+  color: rgba(226, 232, 240, 0.64);
+}
+
+.workbench-status-chip {
+  gap: 8px;
+}
+
+.workbench-status-chip-running {
+  border-color: rgba(56, 189, 248, 0.32);
+  color: #bae6fd;
+  background: rgba(30, 64, 175, 0.26);
+}
+
+.workbench-status-chip-idle {
+  border-color: rgba(71, 85, 105, 0.34);
+  color: rgba(226, 232, 240, 0.74);
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.workbench-status-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #38bdf8;
+  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55);
+  animation: workbench-status-pulse 1.5s ease-out infinite;
+}
+
+@keyframes workbench-status-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.55);
+    transform: scale(1);
+  }
+
+  70% {
+    box-shadow: 0 0 0 8px rgba(56, 189, 248, 0);
+    transform: scale(1.06);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+    transform: scale(1);
+  }
 }
 
 .workbench-meta-chip {
@@ -1564,20 +3796,36 @@ onUnmounted(() => {
   align-items: center;
   padding: 7px 12px;
   border-radius: 999px;
-  background: rgba(248, 250, 252, 0.92);
-  border: 1px solid rgba(226, 232, 240, 0.92);
-  color: var(--color-text-soft);
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(71, 85, 105, 0.32);
+  color: rgba(226, 232, 240, 0.76);
   font-size: 12px;
   font-weight: 600;
 }
 
-.workbench-template-strip,
-.latest-release-panel {
+.workbench-template-strip {
   margin-top: 18px;
   border-radius: 18px;
   padding: 16px 18px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(71, 85, 105, 0.32);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.64), rgba(15, 23, 42, 0.48)),
+    rgba(2, 6, 23, 0.38);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.latest-release-panel {
+  margin-top: 18px;
+  margin-bottom: 12px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
 }
 
 .workbench-template-strip {
@@ -1588,12 +3836,14 @@ onUnmounted(() => {
 }
 
 .workbench-template-strip-muted {
-  background: rgba(248, 250, 252, 0.95);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.54), rgba(15, 23, 42, 0.42)),
+    rgba(2, 6, 23, 0.34);
 }
 
 .workbench-strip-label,
 .section-title {
-  color: var(--color-dashboard-800);
+  color: rgba(125, 211, 252, 0.92);
   font-size: 13px;
   font-weight: 700;
 }
@@ -1616,9 +3866,9 @@ onUnmounted(() => {
   gap: 6px;
   padding: 6px 10px;
   border-radius: 999px;
-  background: rgba(239, 246, 255, 0.86);
-  border: 1px solid rgba(96, 165, 250, 0.18);
-  color: var(--color-dashboard-800);
+  background: rgba(15, 23, 42, 0.56);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  color: rgba(186, 230, 253, 0.9);
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
@@ -1632,79 +3882,513 @@ onUnmounted(() => {
 .workbench-strip-value {
   flex: 1;
   min-width: 180px;
-  color: var(--color-text-main);
+  color: #f8fafc;
   font-size: 14px;
   font-weight: 600;
 }
 
 .env-status-success {
-  border-color: rgba(34, 197, 94, 0.2);
-  background: linear-gradient(180deg, rgba(240, 253, 244, 0.98), rgba(255, 255, 255, 0.96));
+  border-color: rgba(74, 222, 128, 0.26);
+  background:
+    radial-gradient(circle at top right, rgba(74, 222, 128, 0.16), transparent 36%),
+    linear-gradient(180deg, rgba(6, 78, 59, 0.22), rgba(15, 23, 42, 0.82));
 }
 
 .env-status-running {
-  border-color: rgba(96, 165, 250, 0.22);
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.98), rgba(255, 255, 255, 0.96));
+  border-color: rgba(56, 189, 248, 0.28);
+  background:
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.16), transparent 36%),
+    linear-gradient(180deg, rgba(30, 64, 175, 0.18), rgba(15, 23, 42, 0.82));
 }
 
 .env-status-failed {
-  border-color: rgba(248, 113, 113, 0.22);
-  background: linear-gradient(180deg, rgba(254, 242, 242, 0.98), rgba(255, 255, 255, 0.96));
+  border-color: rgba(248, 113, 113, 0.28);
+  background:
+    radial-gradient(circle at top right, rgba(248, 113, 113, 0.16), transparent 36%),
+    linear-gradient(180deg, rgba(127, 29, 29, 0.2), rgba(15, 23, 42, 0.82));
 }
 
 .env-status-pending,
 .env-status-neutral {
-  border-color: rgba(148, 163, 184, 0.18);
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(255, 255, 255, 0.96));
+  border-color: rgba(71, 85, 105, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(148, 163, 184, 0.12), transparent 36%),
+    linear-gradient(180deg, rgba(30, 41, 59, 0.16), rgba(15, 23, 42, 0.8));
 }
 
-.latest-release-main {
+.latest-release-state-bubbles {
   margin-top: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.latest-release-order {
-  border: none;
-  background: transparent;
-  padding: 0;
-  color: var(--color-dashboard-800);
-  font-size: 15px;
-  font-weight: 800;
-  cursor: pointer;
-}
-
-.latest-release-order:hover {
-  color: var(--color-dashboard-900);
-}
-
-.latest-release-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.release-status-chip {
+.env-release-view {
+  margin-top: 14px;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.env-switch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.env-switch-btn {
+  border: 1px solid rgba(71, 85, 105, 0.36);
+  background: rgba(15, 23, 42, 0.44);
+  color: rgba(226, 232, 240, 0.76);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.22s ease;
+}
+
+.env-switch-btn:hover {
+  border-color: rgba(56, 189, 248, 0.42);
+  color: #bae6fd;
+}
+
+.env-switch-btn-active {
+  border-color: rgba(56, 189, 248, 0.52);
+  background: rgba(30, 64, 175, 0.26);
+  color: #bae6fd;
+}
+
+.env-card-switch-enter-active,
+.env-card-switch-leave-active {
+  transition: opacity 0.24s ease, transform 0.24s ease;
+}
+
+.env-card-switch-enter-from {
+  opacity: 0;
+  transform: translateX(12px);
+}
+
+.env-card-switch-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+
+.env-release-card {
+  border-radius: 16px;
+  padding: 14px 16px;
+  border: 1px solid rgba(71, 85, 105, 0.32);
+  background: rgba(15, 23, 42, 0.48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.env-release-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.env-release-env {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  min-width: 52px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  background: rgba(2, 6, 23, 0.48);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
 }
 
-.running-spin-icon {
-  color: var(--color-dashboard-900);
+.env-release-state-bubbles {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-release-main {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-release-empty {
+  margin-top: 12px;
+  color: rgba(226, 232, 240, 0.68);
+  font-size: 12px;
+}
+
+.application-workbench-card-release-active {
+  height: 250px;
+  min-height: 250px;
+}
+
+.application-workbench-card-release-active .workbench-card-shell {
+  height: 100%;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.workbench-card-view {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+}
+
+.workbench-card-release-summary {
+  width: 100%;
+}
+
+.workbench-card-release-detail {
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0;
+}
+
+.workbench-release-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workbench-release-detail-env {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  color: #f8fafc;
+  font-size: 23px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+}
+
+.workbench-release-state-stack {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 12px;
+}
+
+.workbench-release-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.25fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.latest-release-panel.workbench-release-detail-section,
+.env-release-view.workbench-release-detail-section {
+  margin: 0;
+  flex: none;
+  min-height: 0;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.1), transparent 38%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.58), rgba(15, 23, 42, 0.42));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  padding: 16px;
+}
+
+.workbench-release-detail-section-empty {
+  justify-content: flex-start;
+}
+
+.workbench-release-detail-empty-text {
+  margin-top: 14px;
+  color: rgba(226, 232, 240, 0.68);
   font-size: 13px;
+  line-height: 1.7;
 }
 
-.latest-release-meta {
+.workbench-release-env-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  max-height: 278px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.workbench-release-detail-meta {
   margin-top: 12px;
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  color: var(--color-text-soft);
+  gap: 8px;
+  color: rgba(203, 213, 225, 0.82);
   font-size: 12px;
+  line-height: 1.6;
+}
+
+.workbench-release-detail-meta span {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.32);
+  background: rgba(2, 6, 23, 0.24);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-release-detail-actions {
+  margin-top: auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.workbench-card-release-detail :deep(.workbench-secondary-action.ant-btn) {
+  border-color: rgba(71, 85, 105, 0.28) !important;
+  background: rgba(15, 23, 42, 0.38) !important;
+  color: rgba(226, 232, 240, 0.56) !important;
+  box-shadow: none !important;
+}
+
+.workbench-card-release-detail :deep(.workbench-secondary-action.ant-btn:hover),
+.workbench-card-release-detail :deep(.workbench-secondary-action.ant-btn:focus),
+.workbench-card-release-detail :deep(.workbench-secondary-action.ant-btn:focus-visible) {
+  border-color: rgba(96, 165, 250, 0.26) !important;
+  background: rgba(30, 41, 59, 0.62) !important;
+  color: rgba(248, 250, 252, 0.86) !important;
+}
+
+.workbench-release-detail-empty {
+  min-height: 120px;
+}
+
+.workbench-card-detail-switch-enter-active,
+.workbench-card-detail-switch-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.workbench-card-detail-switch-enter-from {
+  opacity: 0;
+  transform: translateX(16px);
+}
+
+.workbench-card-detail-switch-leave-to {
+  opacity: 0;
+  transform: translateX(-16px);
+}
+
+.env-release-main span.state-bubble {
+  cursor: default;
+}
+
+:deep(.rollback-preview-modal) {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+:deep(.rollback-preview-summary) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+}
+
+:deep(.rollback-preview-summary-item) {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+:deep(.rollback-preview-summary-label) {
+  min-width: 56px;
+  color: #7c8597;
+}
+
+:deep(.rollback-preview-summary-value) {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+:deep(.rollback-preview-reason) {
+  padding: 10px 12px;
+  border: 1px solid #ffe7ba;
+  border-radius: 12px;
+  background: #fff7e8;
+  color: #ad6800;
+}
+
+:deep(.rollback-preview-checks) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:deep(.rollback-preview-check-item) {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e6ebf5;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+:deep(.rollback-preview-check-tag) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+:deep(.rollback-preview-check-tag-pass) {
+  color: #166534;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+:deep(.rollback-preview-check-tag-warn) {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+:deep(.rollback-preview-check-tag-blocked) {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.16);
+}
+
+:deep(.rollback-preview-check-copy) {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+:deep(.rollback-preview-check-title) {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+:deep(.rollback-preview-check-message) {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+:deep(.rollback-preview-scope) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+:deep(.rollback-preview-scope-title) {
+  color: #1f2937;
+  font-weight: 600;
+}
+
+:deep(.rollback-preview-param-list) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+:deep(.rollback-preview-param-item) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e6ebf5;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+:deep(.rollback-preview-param-key) {
+  font-size: 12px;
+  color: #7c8597;
+}
+
+:deep(.rollback-preview-param-value) {
+  color: #1f2937;
+  word-break: break-all;
+}
+
+:deep(.rollback-preview-empty) {
+  color: #7c8597;
+}
+
+.state-bubble {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  border: none;
+  border-radius: 999px;
+  min-height: 38px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.state-bubble:hover {
+  transform: translateY(-1px);
+}
+
+.state-bubble-current {
+  background: rgba(22, 101, 52, 0.36);
+  color: #86efac;
+  box-shadow: 0 10px 18px rgba(22, 101, 52, 0.18);
+}
+
+.state-bubble-latest {
+  background: rgba(180, 83, 9, 0.34);
+  color: #fcd34d;
+  box-shadow: 0 10px 18px rgba(180, 83, 9, 0.2);
+}
+
+.latest-release-main {
+  margin-top: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.latest-release-order-bubble {
+  font-family:
+    'SFMono-Regular',
+    'Consolas',
+    'Liberation Mono',
+    monospace;
 }
 
 .workbench-actions {
@@ -1712,18 +4396,17 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
 }
 
 .workbench-footer-row {
-  margin-top: 16px;
+  margin-top: auto;
   padding-top: 16px;
-  border-top: 1px dashed rgba(148, 163, 184, 0.24);
+  border-top: 1px dashed rgba(71, 85, 105, 0.44);
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 14px;
+  gap: 12px;
 }
 
 .workbench-footer-actions {
@@ -1733,16 +4416,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 
-.env-status-running .running-spin-icon {
-  color: #1d4ed8;
-}
-
 .inline-loading-state {
   margin-top: 12px;
   display: inline-flex;
   align-items: center;
   gap: 10px;
-  color: var(--color-text-soft);
+  color: rgba(226, 232, 240, 0.72);
   font-size: 13px;
   font-weight: 600;
 }
@@ -1753,7 +4432,7 @@ onUnmounted(() => {
 }
 
 .inline-loading-icon {
-  color: var(--color-dashboard-800);
+  color: #7dd3fc;
 }
 
 .workbench-manage-trigger {
@@ -1775,8 +4454,208 @@ onUnmounted(() => {
 .workbench-empty-state {
   margin-top: 12px;
   border-radius: 16px;
-  border: 1px dashed rgba(148, 163, 184, 0.28);
-  background: rgba(248, 250, 252, 0.86);
+  border: 1px dashed rgba(71, 85, 105, 0.42);
+  background: rgba(15, 23, 42, 0.42);
+  min-height: 100px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+}
+
+.workbench-empty-state :deep(.ant-empty-description) {
+  color: rgba(226, 232, 240, 0.6);
+  font-size: 13px;
+}
+
+.application-workbench-card :deep(.dashboard-chip) {
+  border-color: rgba(71, 85, 105, 0.36);
+  background: rgba(15, 23, 42, 0.56);
+  color: rgba(226, 232, 240, 0.78);
+}
+
+.application-workbench-card :deep(.dashboard-chip-running) {
+  border-color: rgba(74, 222, 128, 0.32);
+  background: rgba(21, 128, 61, 0.26);
+  color: #86efac;
+}
+
+.application-workbench-card :deep(.dashboard-chip-warning) {
+  border-color: rgba(251, 191, 36, 0.28);
+  background: rgba(146, 64, 14, 0.28);
+  color: #fde68a;
+}
+
+.application-workbench-card :deep(.dashboard-chip-danger) {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(127, 29, 29, 0.3);
+  color: #fecaca;
+}
+
+.application-workbench-card :deep(.dashboard-chip-neutral) {
+  border-color: rgba(71, 85, 105, 0.34);
+  background: rgba(15, 23, 42, 0.5);
+  color: #cbd5e1;
+}
+
+.application-workbench-card :deep(.ant-btn) {
+  border-radius: 12px;
+}
+
+:deep(.workbench-primary-action.ant-btn),
+:deep(.env-release-action.ant-btn),
+:deep(.workbench-secondary-action.ant-btn),
+:deep(.workbench-manage-trigger.ant-btn) {
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 16px;
+  font-weight: 700;
+}
+
+:deep(.workbench-manage-trigger.ant-btn .ant-btn-icon),
+:deep(.workbench-primary-action.ant-btn .ant-btn-icon),
+:deep(.workbench-secondary-action.ant-btn .ant-btn-icon),
+:deep(.env-release-action.ant-btn .ant-btn-icon) {
+  display: inline-flex;
+  align-items: center;
+}
+
+:deep(.workbench-primary-action.ant-btn) {
+  border-color: rgba(30, 64, 175, 0.18) !important;
+  background: #1d4ed8 !important;
+  color: #eff6ff !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-primary-action.ant-btn:hover),
+:deep(.workbench-primary-action.ant-btn:focus),
+:deep(.workbench-primary-action.ant-btn:focus-visible),
+:deep(.workbench-primary-action.ant-btn:active) {
+  border-color: rgba(29, 78, 216, 0.28) !important;
+  background: #2563eb !important;
+  color: #ffffff !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-primary-action.ant-btn[disabled]),
+:deep(.workbench-primary-action.ant-btn.ant-btn-disabled) {
+  border-color: rgba(30, 64, 175, 0.28) !important;
+  background: #1d4ed8 !important;
+  color: #eff6ff !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-config-readonly.ant-btn) {
+  cursor: not-allowed !important;
+}
+
+:deep(.workbench-secondary-action.ant-btn),
+:deep(.workbench-card-collapse.ant-btn),
+:deep(.env-release-action.ant-btn) {
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: #1e3a8a !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-secondary-action.ant-btn:hover),
+:deep(.workbench-card-collapse.ant-btn:hover),
+:deep(.env-release-action.ant-btn:hover),
+:deep(.workbench-secondary-action.ant-btn:focus),
+:deep(.workbench-card-collapse.ant-btn:focus),
+:deep(.env-release-action.ant-btn:focus),
+:deep(.workbench-secondary-action.ant-btn:focus-visible),
+:deep(.workbench-card-collapse.ant-btn:focus-visible),
+:deep(.env-release-action.ant-btn:focus-visible),
+:deep(.workbench-secondary-action.ant-btn:active),
+:deep(.workbench-card-collapse.ant-btn:active),
+:deep(.env-release-action.ant-btn:active) {
+  border-color: rgba(59, 130, 246, 0.24) !important;
+  color: #1d4ed8 !important;
+  background: rgba(239, 246, 255, 0.92) !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-secondary-action.ant-btn[disabled]),
+:deep(.workbench-card-collapse.ant-btn[disabled]),
+:deep(.env-release-action.ant-btn[disabled]),
+:deep(.workbench-secondary-action.ant-btn.ant-btn-disabled),
+:deep(.workbench-card-collapse.ant-btn.ant-btn-disabled),
+:deep(.env-release-action.ant-btn.ant-btn-disabled) {
+  border-color: rgba(148, 163, 184, 0.18) !important;
+  background: rgba(241, 245, 249, 0.84) !important;
+  color: rgba(100, 116, 139, 0.7) !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-manage-popover .ant-popover-inner) {
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(248, 250, 252, 0.88)),
+    rgba(255, 255, 255, 0.9);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.1);
+  backdrop-filter: blur(18px);
+}
+
+:deep(.workbench-manage-popover .ant-popover-inner-content) {
+  padding: 0;
+}
+
+:deep(.workbench-manage-popover .workbench-manage-actions .ant-btn) {
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: #1e3a8a !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-manage-popover .workbench-manage-actions .ant-btn:hover),
+:deep(.workbench-manage-popover .workbench-manage-actions .ant-btn:focus),
+:deep(.workbench-manage-popover .workbench-manage-actions .ant-btn:focus-visible),
+:deep(.workbench-manage-popover .workbench-manage-actions .ant-btn:active) {
+  border-color: rgba(59, 130, 246, 0.24) !important;
+  color: #1d4ed8 !important;
+  background: rgba(239, 246, 255, 0.92) !important;
+}
+
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous) {
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.9) !important;
+  color: #ef4444 !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous span) {
+  color: #ef4444 !important;
+}
+
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:hover),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:focus),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:focus-visible),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:active),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:hover),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:focus),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:focus-visible),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:active) {
+  border-color: rgba(248, 113, 113, 0.28) !important;
+  color: #dc2626 !important;
+  background: rgba(254, 242, 242, 0.98) !important;
+  box-shadow: none !important;
+}
+
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:hover span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:focus span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:focus-visible span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn:active span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:hover span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:focus span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:focus-visible span),
+:deep(.workbench-manage-popover .workbench-danger-action.ant-btn.ant-btn-dangerous:active span) {
+  color: #dc2626 !important;
 }
 
 .danger-icon {
@@ -1786,79 +4665,340 @@ onUnmounted(() => {
 .pagination-area {
   display: flex;
   justify-content: flex-end;
+  margin-top: 40px;
+}
+
+.application-info-mini-table-scroll {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #e6ebf5;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.application-info-mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 13px;
+}
+
+.application-info-mini-table th,
+.application-info-mini-table td {
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.application-info-mini-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.application-info-mini-table td {
+  border-top: 1px solid #edf2f7;
+  color: #1f2937;
+  line-height: 1.55;
+}
+
+.application-info-mini-table th:first-child,
+.application-info-mini-table td:first-child {
+  width: 34%;
+  color: #334155;
+  font-weight: 700;
 }
 
 .intro-drawer-content {
   width: 100%;
 }
 
-.flow-section {
+:deep(.architecture-drawer .ant-drawer-header) {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.1), transparent 28%),
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.94));
+}
+
+:deep(.architecture-drawer .ant-drawer-title),
+:deep(.architecture-drawer .ant-drawer-close) {
+  color: #eff6ff;
+}
+
+:deep(.architecture-drawer .ant-drawer-body) {
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.1), transparent 30%),
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.12), transparent 34%),
+    linear-gradient(180deg, #081120 0%, #0e1728 42%, #13203a 100%);
+}
+
+.architecture-content {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 18px;
 }
 
-.flow-arrow {
-  color: var(--color-dashboard-800);
-  font-size: 20px;
-  line-height: 1;
-  text-align: center;
+.architecture-hero,
+.architecture-layer,
+.architecture-runtime-cluster {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(17, 24, 39, 0.88), rgba(15, 23, 42, 0.72));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 16px 34px rgba(2, 6, 23, 0.2);
 }
 
-.flow-node {
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 16px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
-  padding: 16px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+.architecture-hero {
+  padding: 22px 22px 18px;
 }
 
-.flow-node.primary {
-  border-color: rgba(59, 130, 246, 0.22);
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%);
+.architecture-kicker {
+  color: #38bdf8;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
 }
 
-.flow-node.accent {
-  border-color: rgba(96, 165, 250, 0.2);
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%);
+.architecture-heading {
+  margin-top: 12px;
+  color: #f8fafc;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
-.flow-title {
-  color: var(--color-text-main);
-  font-size: 15px;
+.architecture-copy {
+  margin-top: 12px;
+  color: rgba(226, 232, 240, 0.88);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.architecture-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.architecture-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(96, 165, 250, 0.2);
+  background: rgba(15, 23, 42, 0.52);
+  color: #eff6ff;
+  font-size: 12px;
   font-weight: 600;
-  margin-bottom: 6px;
 }
 
-.flow-desc {
-  color: var(--color-text-soft);
+.architecture-chip.accent {
+  border-color: rgba(52, 211, 153, 0.24);
+  color: #ecfeff;
+}
+
+.architecture-layer {
+  padding: 20px;
+}
+
+.architecture-layer-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.architecture-layer-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  background: rgba(37, 99, 235, 0.18);
+  color: #bfdbfe;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.architecture-layer-title {
+  color: #f8fafc;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.architecture-layer-summary {
+  margin-top: 4px;
+  color: rgba(203, 213, 225, 0.9);
   font-size: 13px;
   line-height: 1.7;
 }
 
-.flow-branch {
-  border: 1px dashed rgba(148, 163, 184, 0.32);
-  border-radius: 18px;
-  padding: 16px;
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.96));
-}
-
-.flow-branch-title {
-  color: var(--color-dashboard-800);
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 12px;
-}
-
-.flow-branch-grid {
+.architecture-node-grid {
   display: grid;
-  grid-template-columns: 1fr;
   gap: 12px;
 }
 
+.architecture-node-grid-three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.architecture-node-grid-four {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.architecture-node {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.96), rgba(15, 23, 42, 0.78));
+  padding: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.architecture-node.primary {
+  border-color: rgba(59, 130, 246, 0.24);
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.98), rgba(15, 23, 42, 0.82));
+}
+
+.architecture-node.accent {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: linear-gradient(180deg, rgba(6, 78, 59, 0.24), rgba(15, 23, 42, 0.82));
+}
+
+.architecture-node-title {
+  color: #f8fafc;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.architecture-node-desc {
+  margin-top: 8px;
+  color: rgba(226, 232, 240, 0.82);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.architecture-node-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.architecture-node-tags span {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.56);
+  color: #dbeafe;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.architecture-link {
+  position: relative;
+  margin: -4px 14px -2px;
+  padding-left: 18px;
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.architecture-link.accent {
+  color: #059669;
+}
+
+.architecture-link::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.7);
+  transform: translateY(-50%);
+  box-shadow: 0 0 18px rgba(96, 165, 250, 0.34);
+}
+
+.architecture-link.accent::before {
+  background: rgba(52, 211, 153, 0.76);
+  box-shadow: 0 0 18px rgba(52, 211, 153, 0.34);
+}
+
+.architecture-runtime-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.architecture-runtime-direct {
+  height: 100%;
+}
+
+.architecture-runtime-cluster {
+  padding: 18px;
+}
+
+.architecture-runtime-cluster-head {
+  color: #ccfbf1;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-bottom: 14px;
+}
+
+.architecture-runtime-chain {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.architecture-runtime-arrow {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: rgba(94, 234, 212, 0.82);
+  font-size: 18px;
+  font-weight: 700;
+}
+
 @media (max-width: 1200px) {
+  .architecture-node-grid-three,
+  .architecture-node-grid-four,
+  .architecture-runtime-grid,
+  .architecture-runtime-chain {
+    grid-template-columns: 1fr;
+  }
+
+  .architecture-link {
+    margin-inline: 4px;
+  }
+
   .overview-loading-grid,
   .overview-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workbench-skeleton-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workbench-release-detail-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1869,19 +5009,86 @@ onUnmounted(() => {
     align-items: flex-start;
   }
 
+  .page-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 768px) {
-  .overview-metrics-grid,
+  .overview-summary-grid,
   .application-workbench-columns,
   .workbench-skeleton-grid {
     grid-template-columns: 1fr;
+  }
+
+  .overview-chart-header {
+    grid-template-columns: 1fr;
+  }
+
+  .overview-chart-meta {
+    justify-content: flex-start;
+    white-space: normal;
+  }
+
+  .application-workbench-card,
+  .application-workbench-card-collapsed,
+  .application-workbench-card-expanded {
+    height: auto;
+    min-height: 0;
+  }
+
+  .workbench-card-shell {
+    position: relative;
+    top: auto;
+    right: auto;
+    bottom: auto;
+    left: auto;
+    min-height: 0;
+    height: auto;
+  }
+
+  .workbench-card-expanded {
+    margin-top: 18px;
+  }
+
+  .workbench-card-expanded,
+  .latest-release-panel,
+  .env-release-view {
+    min-height: unset;
+  }
+
+  .env-release-view {
+    overflow: visible;
+  }
+
+  .workbench-release-env-list {
+    max-height: none;
+    overflow: visible;
   }
 
   .workbench-card-header,
   .workbench-template-strip {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .workbench-card-title-row {
+    width: 100%;
+  }
+
+  .workbench-baseline-table,
+  .workbench-baseline-modules {
+    grid-template-columns: 1fr;
+  }
+
+  .workbench-app-eyebrow {
+    padding-right: 0;
+  }
+
+  .workbench-card-header-actions {
+    position: static;
+    z-index: auto;
   }
 
   .workbench-card-header-actions {
@@ -1898,11 +5105,288 @@ onUnmounted(() => {
   .pagination-area {
     justify-content: center;
   }
+
+  :deep(.application-toolbar-project-select.ant-select) {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workbench-card-shell-running,
+  .workbench-card-shell-running::before,
+  .workbench-card-shell-running::after {
+    animation: none !important;
+    transform: none !important;
+  }
 }
 
 @media (min-width: 640px) {
   .flow-branch-grid {
     grid-template-columns: 1fr 1fr;
+  }
+}
+</style>
+
+<style>
+.rollback-preview-confirm-modal .ant-modal-confirm-body {
+  align-items: flex-start;
+}
+
+.rollback-preview-confirm-modal .ant-modal-confirm-paragraph {
+  max-width: 100%;
+}
+
+.rollback-preview-confirm-modal .ant-modal-confirm-content {
+  margin-top: 14px;
+}
+
+.rollback-preview-confirm-modal .ant-modal-body {
+  padding: 24px;
+}
+
+.rollback-preview-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.rollback-preview-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(251, 191, 36, 0.16), transparent 38%),
+    linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.rollback-preview-hero-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rollback-preview-hero-title {
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.rollback-preview-hero-desc {
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.rollback-preview-action-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-width: 88px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.rollback-preview-action-badge-rollback {
+  color: #9f1239;
+  background: rgba(244, 114, 182, 0.14);
+}
+
+.rollback-preview-action-badge-replay {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.rollback-preview-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  padding: 16px 18px;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 16px;
+  background: #f8fafc;
+}
+
+.rollback-preview-summary-item {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.rollback-preview-summary-label {
+  min-width: 56px;
+  color: #7c8597;
+  font-size: 12px;
+}
+
+.rollback-preview-summary-value {
+  color: #1f2937;
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.rollback-preview-reason {
+  padding: 12px 14px;
+  border: 1px solid #ffe7ba;
+  border-radius: 14px;
+  background: #fff7e8;
+  color: #ad6800;
+  line-height: 1.7;
+}
+
+.rollback-preview-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rollback-preview-check-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e6ebf5;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.rollback-preview-check-tag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.rollback-preview-check-tag-pass {
+  color: #166534;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.rollback-preview-check-tag-warn {
+  color: #92400e;
+  background: rgba(245, 158, 11, 0.16);
+}
+
+.rollback-preview-check-tag-blocked {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.16);
+}
+
+.rollback-preview-check-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rollback-preview-check-title {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rollback-preview-check-message {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.rollback-preview-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rollback-preview-scope-title {
+  color: #1f2937;
+  font-weight: 700;
+}
+
+.rollback-preview-param-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.rollback-preview-param-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid #e6ebf5;
+  border-radius: 14px;
+  background: #f8fafc;
+}
+
+.rollback-preview-param-key {
+  font-size: 12px;
+  color: #7c8597;
+}
+
+.rollback-preview-param-value {
+  color: #1f2937;
+  word-break: break-all;
+}
+
+.rollback-preview-empty {
+  color: #7c8597;
+  text-align: center;
+}
+
+@media (max-width: 768px) {
+  .application-search-bar {
+    max-width: 100%;
+    width: 100%;
+    align-items: stretch;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .application-search-meta,
+  .application-search-actions {
+    width: 100%;
+  }
+
+  .application-search-actions {
+    justify-content: flex-end;
+  }
+
+  .application-search-field {
+    min-width: 100%;
+  }
+
+  .rollback-preview-hero,
+  .rollback-preview-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .rollback-preview-hero {
+    flex-direction: column;
+  }
+
+  .rollback-preview-param-list,
+  .rollback-preview-summary {
+    grid-template-columns: 1fr;
   }
 }
 </style>

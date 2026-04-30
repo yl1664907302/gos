@@ -3,7 +3,7 @@ import { ExclamationCircleOutlined, PlusOutlined, SafetyCertificateOutlined } fr
 import { message } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   createPlatformParamDict,
   deletePlatformParamDict,
@@ -45,6 +45,7 @@ const detailData = ref<PlatformParamDict | null>(null)
 const modalVisible = ref(false)
 const modalMode = ref<FormMode>('create')
 const formRef = ref<FormInstance>()
+const platformParamFormViewportInset = ref(0)
 
 const filters = reactive({
   param_key: '',
@@ -73,7 +74,6 @@ const initialColumns: TableColumnsType<PlatformParamDict> = [
   { title: '字段类型', dataIndex: 'param_type', key: 'param_type', width: 120 },
   { title: '字段能力', key: 'abilities', width: 280 },
   { title: '状态', dataIndex: 'status', key: 'status', width: 110 },
-  { title: '更新时间', dataIndex: 'updated_at', key: 'updated_at', width: 190 },
   { title: '操作', key: 'actions', width: 220, fixed: 'right' },
 ]
 const { columns } = useResizableColumns(initialColumns, { minWidth: 100, maxWidth: 520, hitArea: 10 })
@@ -89,8 +89,83 @@ const statusOptions = [
   { label: '启用', value: 1 },
   { label: '停用', value: 0 },
 ] as const
+const statusFilterOptions = [
+  { label: '全部状态', value: '' as const },
+  ...statusOptions,
+]
 
 const modalTitle = computed(() => (modalMode.value === 'create' ? '新增标准字段' : '编辑标准字段'))
+const platformParamFormMaskStyle = computed(() => ({
+  left: `${platformParamFormViewportInset.value}px`,
+  width: `calc(100% - ${platformParamFormViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: modalVisible.value ? 'auto' : 'none',
+}))
+const platformParamFormWrapProps = computed(() => ({
+  style: {
+    left: `${platformParamFormViewportInset.value}px`,
+    width: `calc(100% - ${platformParamFormViewportInset.value}px)`,
+    pointerEvents: modalVisible.value ? 'auto' : 'none',
+  },
+}))
+let platformParamFormViewportObserver: ResizeObserver | null = null
+
+function readPlatformParamFormViewportInset() {
+  if (typeof document === 'undefined') {
+    return 0
+  }
+
+  const appLayout = document.querySelector('.app-layout')
+  if (appLayout) {
+    const rawWidth = window.getComputedStyle(appLayout).getPropertyValue('--layout-sider-width').trim()
+    const parsedWidth = Number.parseFloat(rawWidth)
+    if (Number.isFinite(parsedWidth) && parsedWidth >= 0) {
+      return parsedWidth
+    }
+  }
+
+  const sider = document.querySelector('.app-sider')
+  if (!sider) {
+    return 0
+  }
+
+  return Math.max(sider.getBoundingClientRect().width, 0)
+}
+
+function syncPlatformParamFormViewportInset() {
+  platformParamFormViewportInset.value = readPlatformParamFormViewportInset()
+}
+
+function observePlatformParamFormViewportInset() {
+  if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') {
+    return
+  }
+
+  const appLayout = document.querySelector('.app-layout')
+  const sider = document.querySelector('.app-sider')
+  if (!appLayout && !sider) {
+    return
+  }
+
+  platformParamFormViewportObserver?.disconnect()
+  platformParamFormViewportObserver = new ResizeObserver(() => {
+    syncPlatformParamFormViewportInset()
+  })
+
+  if (appLayout) {
+    platformParamFormViewportObserver.observe(appLayout)
+  }
+  if (sider) {
+    platformParamFormViewportObserver.observe(sider)
+  }
+}
+
+function stopObservingPlatformParamFormViewportInset() {
+  platformParamFormViewportObserver?.disconnect()
+  platformParamFormViewportObserver = null
+}
 function formatTime(value: string) {
   if (!value) {
     return '-'
@@ -180,16 +255,6 @@ function handleSearch() {
   void loadPlatformParams()
 }
 
-function handleReset() {
-  filters.param_key = ''
-  filters.name = ''
-  filters.status = ''
-  filters.page = 1
-  filters.pageSize = 20
-  void loadPlatformParams()
-}
-
-
 function handlePageChange(page: number, pageSize: number) {
   filters.page = page
   filters.pageSize = pageSize
@@ -198,6 +263,7 @@ function handlePageChange(page: number, pageSize: number) {
 
 function openCreateModal() {
   modalMode.value = 'create'
+  submitting.value = false
   resetFormState()
   modalVisible.value = true
 }
@@ -225,7 +291,12 @@ async function openEditModal(record: PlatformParamDict) {
 
 function closeModal() {
   modalVisible.value = false
+}
+
+function handleFormAfterClose() {
   resetFormState()
+  formRef.value?.clearValidate()
+  submitting.value = false
 }
 
 async function submitForm() {
@@ -292,61 +363,62 @@ function handleParamKeyInput(value: string) {
 }
 
 onMounted(() => {
+  syncPlatformParamFormViewportInset()
+  observePlatformParamFormViewportInset()
   void loadPlatformParams()
+})
+
+onBeforeUnmount(() => {
+  stopObservingPlatformParamFormViewportInset()
 })
 </script>
 
 <template>
   <div class="page-wrapper">
-    <div class="page-header-card page-header">
+    <div class="page-header-card page-header platform-param-page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">平台字段中心</h2>
-        <p class="page-subtitle">沉淀发布链路中的标准字段，让 CI 映射、GitOps 定位与 CD 填值始终使用同一套语言</p>
+        <h2 class="page-title">字段</h2>
       </div>
-      <a-button type="primary" @click="openCreateModal">
-        <template #icon>
-          <PlusOutlined />
-        </template>
-        新增标准字段
-      </a-button>
+      <div class="page-header-actions platform-param-header-actions">
+        <a-input
+          v-model:value="filters.param_key"
+          class="platform-param-toolbar-search"
+          allow-clear
+          placeholder="标准 Key"
+          @press-enter="handleSearch"
+        />
+        <a-input
+          v-model:value="filters.name"
+          class="platform-param-toolbar-search"
+          allow-clear
+          placeholder="字段名称"
+          @press-enter="handleSearch"
+        />
+        <a-select
+          v-model:value="filters.status"
+          class="platform-param-toolbar-select"
+          placeholder="状态"
+          :options="statusFilterOptions"
+        />
+        <a-button class="platform-param-toolbar-query-btn" @click="handleSearch">查询</a-button>
+        <a-button class="application-toolbar-action-btn platform-param-create-btn" @click="openCreateModal">
+          <template #icon>
+            <PlusOutlined />
+          </template>
+          新增标准字段
+        </a-button>
+      </div>
     </div>
 
-    <a-card class="filter-card" :bordered="true">
-      <div class="advanced-search-panel">
-        <a-form layout="inline" class="filter-form">
-          <a-form-item label="标准 Key">
-            <a-input v-model:value="filters.param_key" allow-clear placeholder="按 param_key 查询" />
-          </a-form-item>
-          <a-form-item label="字段名称">
-            <a-input v-model:value="filters.name" allow-clear placeholder="按字段名称查询" />
-          </a-form-item>
-          <a-form-item label="状态">
-            <a-select
-              v-model:value="filters.status"
-              class="filter-select"
-              allow-clear
-              placeholder="全部"
-              :options="statusOptions"
-            />
-          </a-form-item>
-          <a-form-item class="filter-form-actions">
-            <a-space>
-              <a-button type="primary" @click="handleSearch">查询</a-button>
-              <a-button @click="handleReset">重置</a-button>
-            </a-space>
-          </a-form-item>
-        </a-form>
-      </div>
-    </a-card>
-
-    <a-card class="table-card" :bordered="true">
+    <div class="platform-param-table-section">
       <a-table
+        class="platform-param-table"
         row-key="id"
         :columns="columns"
         :data-source="dataSource"
         :loading="loading"
         :pagination="false"
-        :scroll="{ x: 1540 }"
+        :scroll="{ x: 1360 }"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'param_key'">
@@ -381,11 +453,8 @@ onMounted(() => {
           <template v-else-if="column.key === 'status'">
             <a-tag :color="statusColor(record.status)">{{ statusText(record.status) }}</a-tag>
           </template>
-          <template v-else-if="column.key === 'updated_at'">
-            {{ formatTime(record.updated_at) }}
-          </template>
           <template v-else-if="column.key === 'actions'">
-            <a-space>
+            <a-space size="small">
               <a-button type="link" size="small" class="table-action-button" @click="openDetailDrawer(record)">查看</a-button>
               <template v-if="!record.builtin">
                 <a-button type="link" size="small" class="table-action-button" @click="openEditModal(record)">编辑</a-button>
@@ -416,92 +485,126 @@ onMounted(() => {
           show-quick-jumper
           :show-total="(count: number) => `共 ${count} 条`"
           @change="handlePageChange"
-        />
-      </div>
-    </a-card>
+            />
+          </div>
+    </div>
 
     <a-modal
       :open="modalVisible"
-      :confirm-loading="submitting"
-      :title="modalTitle"
       :width="760"
-      ok-text="保存"
-      cancel-text="取消"
-      @ok="submitForm"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="handleFormAfterClose"
+      :mask-style="platformParamFormMaskStyle"
+      :wrap-props="platformParamFormWrapProps"
+      wrap-class-name="platform-param-form-modal-wrap"
       @cancel="closeModal"
     >
-      <a-form ref="formRef" :model="formState" layout="vertical">
-        <a-alert
-          v-if="modalMode === 'create'"
-          type="info"
-          show-icon
-          class="modal-alert"
-          message="平台手动新增的标准字段默认都是非内置字段。"
-        />
+      <template #title>
+        <div class="platform-param-form-modal-titlebar">
+          <span class="platform-param-form-modal-title">{{ modalTitle }}</span>
+          <a-button class="application-toolbar-action-btn platform-param-form-modal-save-btn" :loading="submitting" @click="submitForm">
+            保存
+          </a-button>
+        </div>
+      </template>
 
-        <a-form-item
-          label="标准 Key"
-          name="param_key"
-          :rules="[
-            { required: true, message: '请输入标准 Key' },
-            {
-              pattern: /^[a-z][a-z0-9_]*$/,
-              message: 'param_key 必须为小写字母、数字或下划线，且以字母开头',
-            },
-          ]"
-        >
-          <a-input
-            :value="formState.param_key"
-            allow-clear
-            placeholder="例如：branch_name"
-            @update:value="handleParamKeyInput"
-          />
-        </a-form-item>
+      <a-form ref="formRef" :model="formState" layout="vertical" :required-mark="false" class="platform-param-form">
+        <div v-if="modalMode === 'create'" class="platform-param-form-note">
+          平台手动新增的标准字段默认都是非内置字段
+        </div>
 
-        <a-form-item label="字段名称" name="name" :rules="[{ required: true, message: '请输入字段名称' }]">
-          <a-input v-model:value="formState.name" allow-clear placeholder="请输入字段名称" />
-        </a-form-item>
+        <div class="platform-param-form-panel">
+          <div class="platform-param-form-panel-title">基础信息</div>
 
-        <a-form-item label="字段说明" name="description">
-          <a-textarea
-            v-model:value="formState.description"
-            :rows="3"
-            allow-clear
-            placeholder="请输入字段说明"
-          />
-        </a-form-item>
+          <a-form-item
+            name="param_key"
+            :rules="[
+              { required: true, message: '请输入标准 Key' },
+              {
+                pattern: /^[a-z][a-z0-9_]*$/,
+                message: 'param_key 必须为小写字母、数字或下划线，且以字母开头',
+              },
+            ]"
+          >
+            <template #label>
+              <span class="platform-param-form-label">
+                标准 Key
+                <a-tag class="platform-param-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input
+              :value="formState.param_key"
+              allow-clear
+              placeholder="例如：branch_name"
+              @update:value="handleParamKeyInput"
+            />
+          </a-form-item>
 
-        <a-form-item
-          label="字段类型"
-          name="param_type"
-          :rules="[{ required: true, message: '请选择字段类型' }]"
-        >
-          <a-select v-model:value="formState.param_type" :options="typeOptions" />
-        </a-form-item>
+          <a-form-item name="name" :rules="[{ required: true, message: '请输入字段名称' }]">
+            <template #label>
+              <span class="platform-param-form-label">
+                字段名称
+                <a-tag class="platform-param-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="formState.name" allow-clear placeholder="请输入字段名称" />
+          </a-form-item>
 
-        <a-form-item label="默认必填" name="required">
-          <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
-        </a-form-item>
+          <a-form-item label="字段说明" name="description">
+            <a-textarea
+              v-model:value="formState.description"
+              :rows="3"
+              allow-clear
+              placeholder="请输入字段说明"
+            />
+          </a-form-item>
 
-        <a-form-item label="GitOps 定位字段" name="gitops_locator">
-          <a-switch
-            v-model:checked="formState.gitops_locator"
-            checked-children="是"
-            un-checked-children="否"
-          />
-        </a-form-item>
+          <a-form-item name="param_type" :rules="[{ required: true, message: '请选择字段类型' }]">
+            <template #label>
+              <span class="platform-param-form-label">
+                字段类型
+                <a-tag class="platform-param-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-select v-model:value="formState.param_type" :options="typeOptions" />
+          </a-form-item>
+        </div>
 
-        <a-form-item label="CD 自填字段" name="cd_self_fill">
-          <a-switch
-            v-model:checked="formState.cd_self_fill"
-            checked-children="是"
-            un-checked-children="否"
-          />
-        </a-form-item>
+        <div class="platform-param-form-panel">
+          <div class="platform-param-form-panel-title">字段能力</div>
 
-        <a-form-item label="状态" name="status" :rules="[{ required: true, message: '请选择状态' }]">
-          <a-select v-model:value="formState.status" :options="statusOptions" />
-        </a-form-item>
+          <a-form-item label="默认必填" name="required">
+            <a-switch v-model:checked="formState.required" checked-children="是" un-checked-children="否" />
+          </a-form-item>
+
+          <a-form-item label="GitOps 定位字段" name="gitops_locator">
+            <a-switch
+              v-model:checked="formState.gitops_locator"
+              checked-children="是"
+              un-checked-children="否"
+            />
+          </a-form-item>
+
+          <a-form-item label="CD 自填字段" name="cd_self_fill">
+            <a-switch
+              v-model:checked="formState.cd_self_fill"
+              checked-children="是"
+              un-checked-children="否"
+            />
+          </a-form-item>
+
+          <a-form-item name="status" :rules="[{ required: true, message: '请选择状态' }]">
+            <template #label>
+              <span class="platform-param-form-label">
+                状态
+                <a-tag class="platform-param-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-select v-model:value="formState.status" :options="statusOptions" />
+          </a-form-item>
+        </div>
       </a-form>
     </a-modal>
 
@@ -509,27 +612,43 @@ onMounted(() => {
       <a-skeleton v-if="detailLoading" active :paragraph="{ rows: 8 }" />
       <template v-else-if="detailData">
         <div class="detail-hero">
-          <div class="detail-hero-label">平台字段</div>
-          <div class="detail-hero-title-row">
-            <div class="detail-hero-title">{{ detailData.name }}</div>
+          <div class="detail-hero-topline">
+            <div class="detail-hero-label">平台字段</div>
             <a-tag :color="statusColor(detailData.status)">{{ statusText(detailData.status) }}</a-tag>
           </div>
-          <div class="detail-hero-key">
-            <span>{{ detailData.param_key }}</span>
-            <a-tooltip v-if="detailData.builtin" title="系统内置字段">
-              <SafetyCertificateOutlined class="builtin-icon" />
-            </a-tooltip>
-          </div>
-          <div class="detail-hero-description">{{ detailData.description || '暂无字段说明' }}</div>
-          <div class="ability-tags">
-            <a-tag
-              v-for="tag in abilityTags(detailData)"
-              :key="tag.key"
-              class="ability-tag"
-              :class="`ability-tag--${tag.kind}`"
-            >
-              {{ tag.label }}
-            </a-tag>
+          <div class="detail-hero-title">{{ detailData.name }}</div>
+          <div v-if="detailData.description" class="detail-hero-description">{{ detailData.description }}</div>
+          <div class="detail-hero-facts">
+            <div class="detail-hero-fact detail-hero-fact--key">
+              <div class="detail-hero-fact-label">
+                标准 Key
+                <a-tooltip v-if="detailData.builtin" title="系统内置字段">
+                  <SafetyCertificateOutlined class="builtin-icon" />
+                </a-tooltip>
+              </div>
+              <div class="detail-hero-fact-value detail-hero-fact-value--code">
+                {{ detailData.param_key }}
+              </div>
+            </div>
+
+            <div class="detail-hero-fact">
+              <div class="detail-hero-fact-label">字段类型</div>
+              <div class="detail-hero-fact-value">{{ detailData.param_type }}</div>
+            </div>
+
+            <div class="detail-hero-fact">
+              <div class="detail-hero-fact-label">字段能力</div>
+              <div class="ability-tags detail-hero-ability-tags">
+                <a-tag
+                  v-for="tag in abilityTags(detailData)"
+                  :key="tag.key"
+                  class="ability-tag"
+                  :class="`ability-tag--${tag.kind}`"
+                >
+                  {{ tag.label }}
+                </a-tag>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -548,79 +667,190 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.page-header {
+.platform-param-page-header {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 20px;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
-.filter-card,
-.table-card {
-  border-radius: var(--radius-xl);
-}
-
-.filter-card {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-}
-
-.filter-card :deep(.ant-card-body) {
-  padding: 0;
-  background: transparent;
-}
-
-.table-card {
-  background: transparent;
-  border: none;
-  box-shadow: none;
-}
-
-.table-card :deep(.ant-card-body) {
-  padding: 0;
-  background: transparent;
-}
-
-.filter-form {
+.platform-param-header-actions {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: 12px;
+  min-width: 0;
 }
 
-.filter-select {
-  width: 140px;
+:deep(.platform-param-toolbar-search.ant-input-affix-wrapper) {
+  flex: none;
+  width: 176px;
+  min-width: 176px;
+  height: 42px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #1e3a8a;
+  font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
 }
 
-.page-header :deep(.ant-btn-primary),
-.filter-card :deep(.ant-btn-primary) {
-  background: var(--color-dashboard-900);
-  border-color: var(--color-dashboard-900);
-  color: var(--color-dashboard-text);
-  box-shadow: 0 8px 18px rgba(30, 41, 59, 0.16);
+:deep(.platform-param-toolbar-search.ant-input) {
+  min-width: 180px;
+  height: 42px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #1e3a8a;
+  font-weight: 650;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
 }
 
-.page-header :deep(.ant-btn-primary:hover),
-.filter-card :deep(.ant-btn-primary:hover),
-.page-header :deep(.ant-btn-primary:focus),
-.filter-card :deep(.ant-btn-primary:focus) {
-  background: var(--color-dashboard-800);
-  border-color: var(--color-dashboard-800);
-  color: var(--color-dashboard-text);
+:deep(.platform-param-toolbar-search.ant-input-affix-wrapper .ant-input) {
+  background: transparent !important;
+  color: #1e3a8a;
+  font-weight: 650;
 }
 
-.page-header :deep(.ant-btn-default),
-.filter-card :deep(.ant-btn-default) {
-  background: var(--color-bg-card);
-  border-color: rgba(148, 163, 184, 0.28);
-  color: var(--color-dashboard-800);
+:deep(.platform-param-toolbar-search.ant-input::placeholder) {
+  color: rgba(30, 58, 138, 0.38);
+  font-weight: 600;
 }
 
-.page-header :deep(.ant-btn-default:hover),
-.filter-card :deep(.ant-btn-default:hover),
-.page-header :deep(.ant-btn-default:focus),
-.filter-card :deep(.ant-btn-default:focus) {
-  border-color: var(--color-dashboard-800);
-  color: var(--color-dashboard-900);
+:deep(.platform-param-toolbar-select.ant-select) {
+  flex: none;
+  width: 144px;
+  min-width: 144px;
+}
+
+:deep(.platform-param-toolbar-select .ant-select-selector) {
+  display: flex;
+  align-items: center;
+  height: 42px !important;
+  border-radius: 16px !important;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+  padding: 0 14px !important;
+}
+
+:deep(.platform-param-toolbar-select .ant-select-selection-item),
+:deep(.platform-param-toolbar-select .ant-select-arrow) {
+  color: #1e3a8a;
+  font-weight: 650;
+}
+
+:deep(.platform-param-toolbar-select .ant-select-selection-placeholder) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  color: rgba(30, 58, 138, 0.38) !important;
+}
+
+:deep(.platform-param-toolbar-select .ant-select-selection-search) {
+  inset-inline-start: 14px !important;
+  inset-inline-end: 14px !important;
+  inset-block-start: 0 !important;
+  inset-block-end: 0 !important;
+}
+
+:deep(.platform-param-toolbar-select .ant-select-selection-search-input) {
+  height: 100% !important;
+  color: #1e3a8a;
+  font-weight: 650;
+  line-height: 42px !important;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn),
+:deep(.platform-param-toolbar-query-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  height: 42px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #0f172a !important;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-action-btn.ant-btn:focus-visible),
+:deep(.platform-param-toolbar-query-btn.ant-btn:hover),
+:deep(.platform-param-toolbar-query-btn.ant-btn:focus),
+:deep(.platform-param-toolbar-query-btn.ant-btn:focus-visible) {
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  background: rgba(239, 246, 255, 0.78) !important;
+  color: #0f172a !important;
+}
+
+.platform-param-table-section {
+  margin-top: 24px;
+}
+
+.platform-param-table :deep(.ant-table) {
+  background: transparent;
+}
+
+.platform-param-table :deep(.ant-table-container) {
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.platform-param-table :deep(.ant-table-thead > tr > th) {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.18);
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.platform-param-table :deep(.ant-table-thead > tr > th::before) {
+  display: none;
+}
+
+.platform-param-table :deep(.ant-table-tbody > tr > td) {
+  border-bottom: 1px solid rgba(226, 232, 240, 0.72);
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--color-text-main);
+}
+
+.platform-param-table :deep(.ant-table-tbody > tr:hover > td) {
+  background: rgba(248, 250, 252, 0.92) !important;
+}
+
+.platform-param-table :deep(.ant-table-cell-fix-right) {
+  background: rgba(255, 255, 255, 0.96) !important;
+  box-shadow: -12px 0 24px rgba(15, 23, 42, 0.04);
+}
+
+.platform-param-table :deep(.ant-table-thead .ant-table-cell-fix-right) {
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  box-shadow: none;
 }
 
 .danger-icon {
@@ -693,8 +923,169 @@ onMounted(() => {
   color: var(--color-danger);
 }
 
-.modal-alert {
-  margin-bottom: var(--space-4);
+.platform-param-form-modal-wrap :deep(.ant-modal-content) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow:
+    0 32px 90px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+}
+
+.platform-param-form-modal-wrap :deep(.ant-modal-content)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.platform-param-form-modal-wrap :deep(.ant-modal-header) {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
+.platform-param-form-modal-wrap :deep(.ant-modal-title) {
+  color: #0f172a;
+}
+
+.platform-param-form-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.platform-param-form-modal-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.platform-param-form-modal-save-btn.ant-btn {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+.platform-param-form-modal-wrap :deep(.ant-modal-body) {
+  position: relative;
+  z-index: 1;
+  padding-top: 10px;
+}
+
+.platform-param-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.platform-param-form-note {
+  position: relative;
+  padding: 0 0 0 14px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.platform-param-form-note::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.42), rgba(251, 191, 36, 0.16));
+}
+
+.platform-param-form-panel {
+  padding: 0;
+}
+
+.platform-param-form-panel + .platform-param-form-panel,
+.platform-param-form-note + .platform-param-form-panel {
+  padding-top: 18px;
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.platform-param-form-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.platform-param-form-panel-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(203, 213, 225, 0.78), rgba(226, 232, 240, 0));
+  transform: translateY(1px);
+}
+
+.platform-param-form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #0f172a;
+}
+
+.platform-param-form-required-tag {
+  margin-inline-end: 0;
+  border: 1px solid rgba(191, 219, 254, 0.72);
+  background: rgba(239, 246, 255, 0.96);
+  color: #2563eb;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.platform-param-form :deep(.ant-input),
+.platform-param-form :deep(.ant-select-selector) {
+  background: transparent !important;
+  border-color: rgba(203, 213, 225, 0.88) !important;
+  box-shadow: none !important;
+}
+
+.platform-param-form :deep(.ant-input:hover),
+.platform-param-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector) {
+  border-color: rgba(96, 165, 250, 0.48) !important;
+}
+
+.platform-param-form :deep(.ant-input:focus),
+.platform-param-form :deep(.ant-input-focused),
+.platform-param-form :deep(.ant-select-focused .ant-select-selector) {
+  background: transparent !important;
+  border-color: rgba(59, 130, 246, 0.56) !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12) !important;
+}
+
+.platform-param-form :deep(.ant-select-selection-placeholder),
+.platform-param-form :deep(.ant-input::placeholder) {
+  color: #94a3b8;
 }
 
 .detail-hero {
@@ -714,36 +1105,69 @@ onMounted(() => {
   color: var(--color-text-soft);
 }
 
-.detail-hero-title-row {
-  margin-top: 8px;
+.detail-hero-topline {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
 .detail-hero-title {
+  margin-top: 10px;
   color: var(--color-text-main);
   font-size: 24px;
   font-weight: 800;
   line-height: 1.2;
 }
 
-.detail-hero-key {
-  margin-top: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-dashboard-800);
-  font-size: 14px;
-  font-weight: 700;
-  word-break: break-all;
-}
-
 .detail-hero-description {
   margin-top: 12px;
   color: var(--color-text-secondary);
   line-height: 1.7;
+}
+
+.detail-hero-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.detail-hero-fact {
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(203, 213, 225, 0.78);
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 10px 20px rgba(15, 23, 42, 0.04);
+}
+
+.detail-hero-fact-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-soft);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.detail-hero-fact-value {
+  margin-top: 10px;
+  color: var(--color-text-main);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.detail-hero-fact-value--code {
+  font-family: 'SFMono-Regular', 'Roboto Mono', 'Source Code Pro', monospace;
+  word-break: break-all;
+}
+
+.detail-hero-ability-tags {
+  margin-top: 10px;
 }
 
 .detail-descriptions {
@@ -756,17 +1180,33 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
-.table-card :deep(.ant-table-thead > tr > th) {
-  background: var(--color-dashboard-900);
-  color: var(--color-dashboard-text);
-  font-weight: 700;
-  border-bottom: 1px solid rgba(59, 130, 246, 0.24);
+@media (max-width: 1120px) {
+  .platform-param-page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .platform-param-header-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 768px) {
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
+  .platform-param-header-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .detail-hero-facts {
+    grid-template-columns: 1fr;
+  }
+
+  :deep(.platform-param-toolbar-search.ant-input-affix-wrapper),
+  :deep(.platform-param-toolbar-search.ant-input),
+  :deep(.platform-param-toolbar-select.ant-select) {
+    width: 100%;
+    min-width: 0;
   }
 }
 </style>

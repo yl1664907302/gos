@@ -78,10 +78,15 @@ type ListReleaseOrderInput struct {
 	VisibleToUserID             string
 	ApprovalApproverUserID      string
 	CreatorUserID               string
+	Keyword                     string
+	TriggeredBy                 string
 	BindingID                   string
 	EnvCode                     string
+	OperationType               domain.OperationType
 	Status                      domain.OrderStatus
 	TriggerType                 domain.TriggerType
+	CreatedAtFrom               *time.Time
+	CreatedAtTo                 *time.Time
 	Page                        int
 	PageSize                    int
 }
@@ -617,7 +622,7 @@ func (uc *ReleaseOrderManager) CreateRollbackByApplication(
 	_ = applicationID
 	_ = creatorUserID
 	_ = triggeredBy
-	return domain.ReleaseOrder{}, fmt.Errorf("%w: 按应用自动回滚已废弃，请基于指定成功发布单发起恢复", ErrInvalidInput)
+	return domain.ReleaseOrder{}, fmt.Errorf("%w: 按应用自动恢复已废弃，请基于指定发布单发起重放", ErrInvalidInput)
 }
 
 func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
@@ -643,14 +648,10 @@ func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
 		return domain.ReleaseOrder{}, err
 	}
 	if !isArgoCDExecution(sourceCDExecution) {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前成功单不支持标准回滚", ErrInvalidInput)
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前发布单不支持 Argo 重放", ErrInvalidInput)
 	}
-	snapshot, err := uc.ensureRollbackDeploySnapshot(ctx, sourceOrder, sourceExecutions)
-	if err != nil {
-		return domain.ReleaseOrder{}, err
-	}
-	if normalizeTemplateGitOpsType(snapshot.GitOpsType, true) != domain.GitOpsTypeHelm {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前成功单仅支持 Helm 标准回滚", ErrInvalidInput)
+	if !canCreateArgoReplayFromStatus(sourceOrder.Status) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前发布单状态不支持发起 Argo 重放", ErrInvalidInput)
 	}
 	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
 	if err != nil {
@@ -666,7 +667,7 @@ func (uc *ReleaseOrderManager) CreateStandardRollbackByOrder(
 		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板未配置可用的 CD 执行器", ErrInvalidInput)
 	}
 	if !strings.EqualFold(strings.TrimSpace(cdBinding.Provider), string(pipelinedomain.ProviderArgoCD)) {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板的 CD 方式不是 ArgoCD，无法执行标准回滚", ErrInvalidInput)
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 当前模板的 CD 方式不是 ArgoCD，无法执行 Argo 重放", ErrInvalidInput)
 	}
 	order, err := uc.createRecoveryOrder(
 		ctx,
@@ -716,12 +717,15 @@ func (uc *ReleaseOrderManager) CreatePipelineReplayByOrder(
 		)
 		return domain.ReleaseOrder{}, err
 	}
+	if !canCreatePipelineReplayFromStatus(sourceOrder.Status) {
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 仅支持从成功或失败发布单发起一键重发", ErrInvalidInput)
+	}
 	sourceReplayExecution, err := resolveReplayExecution(sourceExecutions)
 	if err != nil {
 		return domain.ReleaseOrder{}, err
 	}
 	if isArgoCDExecution(sourceReplayExecution) {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: ArgoCD 成功单请使用标准回滚，不支持参数重放", ErrInvalidInput)
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: ArgoCD 发布单请使用 Argo 重放，不支持标准重放", ErrInvalidInput)
 	}
 
 	sourceParams, err := uc.repo.ListParams(ctx, sourceOrder.ID)
@@ -738,7 +742,7 @@ func (uc *ReleaseOrderManager) CreatePipelineReplayByOrder(
 		}
 	}
 	if len(replayParamsFromSource) == 0 {
-		return domain.ReleaseOrder{}, fmt.Errorf("%w: 来源成功单缺少可重放参数快照，无法执行参数重放", ErrInvalidInput)
+		return domain.ReleaseOrder{}, fmt.Errorf("%w: 来源发布单缺少可重放参数快照，无法执行参数重放", ErrInvalidInput)
 	}
 
 	template, templateBindings, templateParams, _, templateHooks, err := uc.repo.GetTemplateByID(ctx, strings.TrimSpace(sourceOrder.TemplateID))
@@ -1157,9 +1161,9 @@ func firstNonEmpty(values ...string) string {
 func buildRollbackRemark(source domain.ReleaseOrder) string {
 	orderNo := strings.TrimSpace(source.OrderNo)
 	if orderNo == "" {
-		return "回滚创建"
+		return "重发创建"
 	}
-	return fmt.Sprintf("回滚自发布单 %s", orderNo)
+	return fmt.Sprintf("重发自发布单 %s", orderNo)
 }
 
 func buildReplayRemark(source domain.ReleaseOrder, scope domain.PipelineScope) string {
@@ -1185,14 +1189,36 @@ func (uc *ReleaseOrderManager) loadRecoverySourceOrder(
 	if err != nil {
 		return domain.ReleaseOrder{}, nil, err
 	}
-	if sourceOrder.Status != domain.OrderStatusSuccess {
-		return domain.ReleaseOrder{}, nil, fmt.Errorf("%w: 仅支持从成功发布单发起恢复", ErrInvalidInput)
-	}
 	sourceExecutions, err := uc.repo.ListExecutions(ctx, sourceOrder.ID)
 	if err != nil {
 		return domain.ReleaseOrder{}, nil, err
 	}
 	return sourceOrder, sourceExecutions, nil
+}
+
+func canCreateArgoReplayFromStatus(status domain.OrderStatus) bool {
+	switch status {
+	case domain.OrderStatusPending,
+		domain.OrderStatusDraft,
+		domain.OrderStatusPendingApproval,
+		domain.OrderStatusApproving,
+		domain.OrderStatusApproved:
+		return false
+	default:
+		return true
+	}
+}
+
+func canCreatePipelineReplayFromStatus(status domain.OrderStatus) bool {
+	switch status {
+	case domain.OrderStatusSuccess,
+		domain.OrderStatusDeploySuccess,
+		domain.OrderStatusFailed,
+		domain.OrderStatusDeployFailed:
+		return true
+	default:
+		return false
+	}
 }
 
 func (uc *ReleaseOrderManager) ensureRollbackDeploySnapshot(
@@ -1512,7 +1538,7 @@ func resolveReplayExecution(items []domain.ReleaseOrderExecution) (domain.Releas
 			return item, nil
 		}
 	}
-	return domain.ReleaseOrderExecution{}, fmt.Errorf("%w: 来源成功单缺少可重放执行单元", ErrInvalidInput)
+	return domain.ReleaseOrderExecution{}, fmt.Errorf("%w: 来源发布单缺少可重放执行单元", ErrInvalidInput)
 }
 
 func ensureReplayParamsMatchTemplate(
@@ -1569,12 +1595,20 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 	)
 
 	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.Keyword = strings.TrimSpace(input.Keyword)
+	input.TriggeredBy = strings.TrimSpace(input.TriggeredBy)
 	input.BindingID = strings.TrimSpace(input.BindingID)
 	input.EnvCode = strings.TrimSpace(input.EnvCode)
+	if input.OperationType != "" && !input.OperationType.Valid() {
+		return nil, 0, ErrInvalidInput
+	}
 	if input.Status != "" && !input.Status.Valid() {
 		return nil, 0, ErrInvalidStatus
 	}
 	if input.TriggerType != "" && !input.TriggerType.Valid() {
+		return nil, 0, ErrInvalidInput
+	}
+	if input.CreatedAtFrom != nil && input.CreatedAtTo != nil && input.CreatedAtTo.Before(*input.CreatedAtFrom) {
 		return nil, 0, ErrInvalidInput
 	}
 	if input.Page <= 0 {
@@ -1594,10 +1628,15 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 		VisibleToUserID:             strings.TrimSpace(input.VisibleToUserID),
 		ApprovalApproverUserID:      strings.TrimSpace(input.ApprovalApproverUserID),
 		CreatorUserID:               strings.TrimSpace(input.CreatorUserID),
+		Keyword:                     input.Keyword,
+		TriggeredBy:                 input.TriggeredBy,
 		BindingID:                   input.BindingID,
 		EnvCode:                     input.EnvCode,
+		OperationType:               input.OperationType,
 		Status:                      input.Status,
 		TriggerType:                 input.TriggerType,
+		CreatedAtFrom:               input.CreatedAtFrom,
+		CreatedAtTo:                 input.CreatedAtTo,
 		Page:                        input.Page,
 		PageSize:                    input.PageSize,
 	})
@@ -1609,6 +1648,43 @@ func (uc *ReleaseOrderManager) List(ctx context.Context, input ListReleaseOrderI
 		return nil, 0, err
 	}
 	return items, total, nil
+}
+
+func (uc *ReleaseOrderManager) ListStats(ctx context.Context, input ListReleaseOrderInput) (domain.ReleaseOrderStats, error) {
+	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.Keyword = strings.TrimSpace(input.Keyword)
+	input.TriggeredBy = strings.TrimSpace(input.TriggeredBy)
+	input.BindingID = strings.TrimSpace(input.BindingID)
+	input.EnvCode = strings.TrimSpace(input.EnvCode)
+	if input.OperationType != "" && !input.OperationType.Valid() {
+		return domain.ReleaseOrderStats{}, ErrInvalidInput
+	}
+	if input.Status != "" && !input.Status.Valid() {
+		return domain.ReleaseOrderStats{}, ErrInvalidStatus
+	}
+	if input.TriggerType != "" && !input.TriggerType.Valid() {
+		return domain.ReleaseOrderStats{}, ErrInvalidInput
+	}
+	if input.CreatedAtFrom != nil && input.CreatedAtTo != nil && input.CreatedAtTo.Before(*input.CreatedAtFrom) {
+		return domain.ReleaseOrderStats{}, ErrInvalidInput
+	}
+	return uc.repo.ListStats(ctx, domain.ListFilter{
+		ApplicationID:               input.ApplicationID,
+		ApplicationIDs:              normalizeReleaseApplicationIDs(input.ApplicationIDs),
+		VisibleApplicationEnvScopes: normalizeReleaseApplicationEnvScopes(input.VisibleApplicationEnvScopes),
+		VisibleToUserID:             strings.TrimSpace(input.VisibleToUserID),
+		ApprovalApproverUserID:      strings.TrimSpace(input.ApprovalApproverUserID),
+		CreatorUserID:               strings.TrimSpace(input.CreatorUserID),
+		Keyword:                     input.Keyword,
+		TriggeredBy:                 input.TriggeredBy,
+		BindingID:                   input.BindingID,
+		EnvCode:                     input.EnvCode,
+		OperationType:               input.OperationType,
+		Status:                      input.Status,
+		TriggerType:                 input.TriggerType,
+		CreatedAtFrom:               input.CreatedAtFrom,
+		CreatedAtTo:                 input.CreatedAtTo,
+	})
 }
 
 func normalizeReleaseApplicationIDs(values []string) []string {
@@ -1734,6 +1810,15 @@ func (uc *ReleaseOrderManager) reconcileOrderSnapshot(
 	}
 	if _, err := uc.reconcileTerminalSteps(ctx, order, steps); err != nil {
 		return domain.ReleaseOrder{}, err
+	}
+	if order.Status == domain.OrderStatusSuccess || order.Status == domain.OrderStatusDeploySuccess {
+		if stateErr := uc.RecordAppReleaseState(ctx, order.ID); stateErr != nil {
+			logx.Error("release_order", "reconcile_order_snapshot_record_state_failed", stateErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("status", order.Status),
+			)
+		}
 	}
 
 	if updated {
@@ -3214,6 +3299,16 @@ func (uc *ReleaseOrderManager) StartStep(
 		order, err = uc.repo.GetByID(ctx, orderID)
 		if err != nil {
 			return domain.ReleaseOrderStep{}, domain.ReleaseOrder{}, err
+		}
+	}
+	if order.Status == domain.OrderStatusSuccess || order.Status == domain.OrderStatusDeploySuccess {
+		if stateErr := uc.RecordAppReleaseState(ctx, order.ID); stateErr != nil {
+			logx.Error("release_order", "finish_step_record_app_release_state_failed", stateErr,
+				logx.F("order_id", order.ID),
+				logx.F("order_no", order.OrderNo),
+				logx.F("step_code", stepCode),
+				logx.F("status", order.Status),
+			)
 		}
 	}
 

@@ -14,7 +14,7 @@ function resolveDefaultAPIBaseURL() {
   const hostname = window.location.hostname || 'localhost'
   const port = window.location.port || ''
 
-  // 本地开发默认前端 5174、后端 8081；生产环境默认走同源。
+  // 本地开发默认前端 5174、后端 8081；生产环境默认走同源
   if (port === '5174') {
     return `${protocol}//${hostname}:8081`
   }

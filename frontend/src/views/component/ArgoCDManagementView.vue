@@ -1,18 +1,14 @@
 <script setup lang="ts">
-import { ExportOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons-vue'
+import { LeftOutlined, PlusOutlined, QuestionCircleOutlined, RightOutlined } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import type { TableColumnsType } from 'ant-design-vue'
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   checkArgoCDInstance,
   createArgoCDInstance,
-  getArgoCDApplicationByID,
-  getArgoCDApplicationOriginalLink,
-  listArgoCDApplications,
   listArgoCDEnvBindings,
   listArgoCDInstances,
-  syncArgoCDApplications,
   updateArgoCDEnvBindings,
   updateArgoCDInstance,
 } from '../../api/argocd'
@@ -20,7 +16,6 @@ import { listGitOpsInstances } from '../../api/gitops'
 import { getReleaseSettings } from '../../api/system'
 import { useAuthStore } from '../../stores/auth'
 import type {
-  ArgoCDApplication,
   ArgoCDEnvBinding,
   ArgoCDInstance,
   ArgoCDRecordStatus,
@@ -30,43 +25,24 @@ import type { GitOpsInstance } from '../../types/gitops'
 import { extractHTTPErrorMessage } from '../../utils/http-error'
 
 const authStore = useAuthStore()
+const router = useRouter()
 
-const activeTab = ref('instances')
-const loadingApps = ref(false)
-const syncingApps = ref(false)
 const loadingInstances = ref(false)
 const loadingBindings = ref(false)
 const savingBindings = ref(false)
 const savingInstance = ref(false)
 const checkingInstanceID = ref('')
-const detailLoading = ref(false)
-const detailVisible = ref(false)
-const openingOriginalID = ref('')
 const instanceModalVisible = ref(false)
 const editingInstanceID = ref('')
-const appTotal = ref(0)
+const instanceModalViewportInset = ref(0)
+let instanceModalViewportObserver: ResizeObserver | null = null
 const instanceTotal = ref(0)
-const appDataSource = ref<ArgoCDApplication[]>([])
 const instanceDataSource = ref<ArgoCDInstance[]>([])
 const gitopsInstanceOptions = ref<GitOpsInstance[]>([])
 const envOptions = ref<string[]>([])
 const envBindingMap = ref<Record<string, ArgoCDEnvBinding>>({})
-const detail = ref<ArgoCDApplication | null>(null)
-
-const appFilters = reactive({
-  argocd_instance_id: '',
-  app_name: '',
-  project: '',
-  sync_status: '',
-  health_status: '',
-  status: '' as ArgoCDRecordStatus | '',
-  page: 1,
-  pageSize: 20,
-})
 
 const instanceFilters = reactive({
-  keyword: '',
-  status: '' as ArgoCDRecordStatus | '',
   page: 1,
   pageSize: 20,
 })
@@ -95,14 +71,7 @@ const canViewArgoCD = computed(() =>
     'component.argocd.instance.manage',
     'component.argocd.binding.view',
     'component.argocd.binding.manage',
-  ].some((code) => authStore.hasPermission(code)),
-)
-const canViewApplications = computed(
-  () =>
-    authStore.hasPermission('component.argocd.view') ||
-    authStore.hasPermission('component.argocd.manage') ||
-    authStore.hasPermission('component.argocd.instance.view') ||
-    authStore.hasPermission('component.argocd.instance.manage'),
+    ].some((code) => authStore.hasPermission(code)),
 )
 const canViewInstances = computed(
   () =>
@@ -122,7 +91,6 @@ const canViewBindings = computed(
     authStore.hasPermission('component.argocd.view') ||
     authStore.hasPermission('component.argocd.manage'),
 )
-const canManageArgoCD = computed(() => authStore.hasPermission('component.argocd.manage'))
 const canManageInstances = computed(
   () => authStore.hasPermission('component.argocd.instance.manage') || authStore.hasPermission('component.argocd.manage'),
 )
@@ -133,33 +101,6 @@ const canManageBindings = computed(
     authStore.hasPermission('component.argocd.manage'),
 )
 
-const appColumns: TableColumnsType<ArgoCDApplication> = [
-  { title: '实例', dataIndex: 'instance_name', key: 'instance_name', width: 180 },
-  { title: '集群', dataIndex: 'cluster_name', key: 'cluster_name', width: 160 },
-  { title: '应用名称', dataIndex: 'app_name', key: 'app_name', width: 220 },
-  { title: 'Project', dataIndex: 'project', key: 'project', width: 140 },
-  { title: 'Repo地址', dataIndex: 'repo_url', key: 'repo_url', width: 280 },
-  { title: 'Source Path', dataIndex: 'source_path', key: 'source_path', width: 220 },
-  { title: '目标Namespace', dataIndex: 'dest_namespace', key: 'dest_namespace', width: 160 },
-  { title: '同步状态', dataIndex: 'sync_status', key: 'sync_status', width: 120 },
-  { title: '健康状态', dataIndex: 'health_status', key: 'health_status', width: 120 },
-  { title: '最后同步时间', dataIndex: 'last_synced_at', key: 'last_synced_at', width: 180 },
-  { title: '操作', key: 'actions', width: 160, fixed: 'right' },
-]
-
-const instanceColumns: TableColumnsType<ArgoCDInstance> = [
-  { title: '实例编码', dataIndex: 'instance_code', key: 'instance_code', width: 140 },
-  { title: '实例名称', dataIndex: 'name', key: 'name', width: 180 },
-  { title: 'GitOps实例', dataIndex: 'gitops_instance_name', key: 'gitops_instance_name', width: 180 },
-  { title: 'Base URL', dataIndex: 'base_url', key: 'base_url', width: 260 },
-  { title: '集群', dataIndex: 'cluster_name', key: 'cluster_name', width: 160 },
-  { title: '认证方式', dataIndex: 'auth_mode', key: 'auth_mode', width: 120 },
-  { title: '健康状态', dataIndex: 'health_status', key: 'health_status', width: 120 },
-  { title: '记录状态', dataIndex: 'status', key: 'status', width: 120 },
-  { title: '最近检查', dataIndex: 'last_check_at', key: 'last_check_at', width: 180 },
-  { title: '操作', key: 'actions', width: 220, fixed: 'right' },
-]
-
 const bindingRows = computed(() =>
   envOptions.value.map((envCode) => ({
     env_code: envCode,
@@ -167,34 +108,34 @@ const bindingRows = computed(() =>
   })),
 )
 
-const detailRawMeta = computed(() => {
-  const text = String(detail.value?.raw_meta || '').trim()
-  if (!text) {
-    return '-'
-  }
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2)
-  } catch {
-    return text
-  }
-})
+const activeInstanceOptions = computed(() => instanceDataSource.value.filter((item) => item.status === 'active'))
 
-function resolveDefaultTab() {
-  if (canViewInstances.value) {
-    return 'instances'
-  }
-  if (canViewBindings.value) {
-    return 'bindings'
-  }
-  if (canViewApplications.value) {
-    return 'applications'
-  }
-  return 'instances'
+const instanceTotalPages = computed(() => Math.max(1, Math.ceil(instanceTotal.value / Math.max(instanceFilters.pageSize, 1))))
+
+const instanceModalMaskStyle = computed(() => ({
+  left: `${instanceModalViewportInset.value}px`,
+  width: `calc(100% - ${instanceModalViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: instanceModalVisible.value ? 'auto' : 'none',
+}))
+
+const instanceModalWrapProps = computed(() => ({
+  style: {
+    left: `${instanceModalViewportInset.value}px`,
+    width: `calc(100% - ${instanceModalViewportInset.value}px)`,
+    pointerEvents: instanceModalVisible.value ? 'auto' : 'none',
+  },
+}))
+
+function openTutorial() {
+  void router.push('/help/gitops')
 }
 
 async function refreshVisibleData() {
   const tasks: Array<Promise<unknown>> = []
-  if (canViewInstances.value || canViewBindings.value || canViewApplications.value) {
+  if (canViewInstances.value || canViewBindings.value) {
     tasks.push(loadInstances())
   }
   if (canManageInstances.value) {
@@ -203,10 +144,11 @@ async function refreshVisibleData() {
   if (canViewBindings.value) {
     tasks.push(loadEnvOptions(), loadBindings())
   }
-  if (canViewApplications.value) {
-    tasks.push(loadApplications())
-  }
   await Promise.all(tasks)
+}
+
+async function refreshBindings() {
+  await Promise.all([loadEnvOptions(), loadBindings()])
 }
 
 function formatTime(value?: string | null) {
@@ -246,6 +188,50 @@ function resetInstanceForm() {
   instanceForm.default_namespace = ''
   instanceForm.status = 'active'
   instanceForm.remark = ''
+}
+
+function readInstanceModalViewportInset() {
+  if (typeof document === 'undefined') {
+    return 0
+  }
+  const appLayout = document.querySelector('.app-layout')
+  if (appLayout) {
+    const rawWidth = window.getComputedStyle(appLayout).getPropertyValue('--layout-sider-width').trim()
+    const parsedWidth = Number.parseFloat(rawWidth)
+    if (Number.isFinite(parsedWidth) && parsedWidth >= 0) {
+      return parsedWidth
+    }
+  }
+  const sider = document.querySelector('.app-sider')
+  return sider ? Math.max(sider.getBoundingClientRect().width, 0) : 0
+}
+
+function syncInstanceModalViewportInset() {
+  instanceModalViewportInset.value = readInstanceModalViewportInset()
+}
+
+function observeInstanceModalViewportInset() {
+  if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') {
+    return
+  }
+  const appLayout = document.querySelector('.app-layout')
+  const sider = document.querySelector('.app-sider')
+  if (!appLayout && !sider) {
+    return
+  }
+  instanceModalViewportObserver?.disconnect()
+  instanceModalViewportObserver = new ResizeObserver(syncInstanceModalViewportInset)
+  if (appLayout) {
+    instanceModalViewportObserver.observe(appLayout)
+  }
+  if (sider) {
+    instanceModalViewportObserver.observe(sider)
+  }
+}
+
+function stopObservingInstanceModalViewportInset() {
+  instanceModalViewportObserver?.disconnect()
+  instanceModalViewportObserver = null
 }
 
 function openCreateInstance() {
@@ -289,8 +275,6 @@ async function loadInstances() {
   loadingInstances.value = true
   try {
     const response = await listArgoCDInstances({
-      keyword: instanceFilters.keyword.trim() || undefined,
-      status: instanceFilters.status || undefined,
       page: instanceFilters.page,
       page_size: instanceFilters.pageSize,
     })
@@ -318,30 +302,6 @@ async function loadGitOpsInstances() {
   }
 }
 
-async function loadApplications() {
-  loadingApps.value = true
-  try {
-    const response = await listArgoCDApplications({
-      argocd_instance_id: appFilters.argocd_instance_id || undefined,
-      app_name: appFilters.app_name.trim() || undefined,
-      project: appFilters.project.trim() || undefined,
-      sync_status: appFilters.sync_status || undefined,
-      health_status: appFilters.health_status || undefined,
-      status: appFilters.status || undefined,
-      page: appFilters.page,
-      page_size: appFilters.pageSize,
-    })
-    appDataSource.value = response.data
-    appTotal.value = response.total
-    appFilters.page = response.page
-    appFilters.pageSize = response.page_size
-  } catch (error) {
-    message.error(extractHTTPErrorMessage(error, 'ArgoCD 应用列表加载失败'))
-  } finally {
-    loadingApps.value = false
-  }
-}
-
 async function loadBindings() {
   loadingBindings.value = true
   try {
@@ -358,19 +318,6 @@ async function loadBindings() {
   }
 }
 
-async function handleSyncApplications() {
-  syncingApps.value = true
-  try {
-    const response = await syncArgoCDApplications()
-    message.success(`同步完成：共 ${response.data.total} 条（新增 ${response.data.created} / 更新 ${response.data.updated} / 失效 ${response.data.inactivated}）`)
-    await Promise.all([loadApplications(), loadInstances()])
-  } catch (error) {
-    message.error(extractHTTPErrorMessage(error, 'ArgoCD 手动同步失败'))
-  } finally {
-    syncingApps.value = false
-  }
-}
-
 async function handleSaveInstance() {
   savingInstance.value = true
   try {
@@ -382,7 +329,7 @@ async function handleSaveInstance() {
       message.success('ArgoCD 实例已创建')
     }
     closeInstanceModal()
-    await Promise.all([loadInstances(), loadApplications()])
+    await loadInstances()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, editingInstanceID.value ? 'ArgoCD 实例更新失败' : 'ArgoCD 实例创建失败'))
   } finally {
@@ -395,7 +342,7 @@ async function handleCheckInstance(record: ArgoCDInstance) {
   try {
     await checkArgoCDInstance(record.id)
     message.success(`实例 ${record.name} 连接检查成功`)
-    await Promise.all([loadInstances(), loadApplications()])
+    await loadInstances()
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, `实例 ${record.name} 连接检查失败`))
   } finally {
@@ -450,292 +397,211 @@ async function saveBindings() {
   }
 }
 
-async function openDetail(record: ArgoCDApplication) {
-  detailVisible.value = true
-  detailLoading.value = true
-  detail.value = record
-  try {
-    const response = await getArgoCDApplicationByID(record.id)
-    detail.value = response.data
-  } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '加载 ArgoCD 应用详情失败'))
-  } finally {
-    detailLoading.value = false
+function changeInstancePage(page: number) {
+  const nextPage = Math.min(Math.max(page, 1), instanceTotalPages.value)
+  if (nextPage === instanceFilters.page) {
+    return
   }
-}
-
-function closeDetail() {
-  detailVisible.value = false
-  detailLoading.value = false
-  detail.value = null
-}
-
-async function openOriginalLink(record: ArgoCDApplication) {
-  openingOriginalID.value = record.id
-  try {
-    const response = await getArgoCDApplicationOriginalLink(record.id)
-    const target = String(response.data.original_link || '').trim()
-    if (!target) {
-      message.warning('当前应用缺少 ArgoCD 原始链接')
-      return
-    }
-    window.open(target, '_blank', 'noopener,noreferrer')
-  } catch (error) {
-    message.error(extractHTTPErrorMessage(error, '打开 ArgoCD 原始链接失败'))
-  } finally {
-    openingOriginalID.value = ''
-  }
+  instanceFilters.page = nextPage
+  void loadInstances()
 }
 
 onMounted(() => {
   if (!canViewArgoCD.value) {
     return
   }
-  activeTab.value = resolveDefaultTab()
+  syncInstanceModalViewportInset()
+  observeInstanceModalViewportInset()
   void refreshVisibleData()
+})
+
+onUnmounted(() => {
+  stopObservingInstanceModalViewportInset()
 })
 </script>
 
 <template>
   <div class="page-wrap">
-    <a-card :bordered="false" class="toolbar-card">
-      <div class="toolbar">
-        <div class="page-header-copy">
-          <div class="page-title">ArgoCD 管理</div>
-          <div class="page-subtitle">统一维护多个 ArgoCD 实例、环境绑定和平台同步到本地的 Application 快照</div>
-        </div>
-        <a-space>
-          <a-button @click="refreshVisibleData">
-            <template #icon><ReloadOutlined /></template>
-            刷新全部
-          </a-button>
-        </a-space>
+    <div class="page-header">
+      <div class="page-header-copy">
+        <div class="page-title">编排</div>
       </div>
-    </a-card>
+      <div class="page-header-actions">
+        <a-button class="application-toolbar-icon-btn" title="使用教程" @click="openTutorial">
+          <template #icon><QuestionCircleOutlined /></template>
+        </a-button>
+        <a-button v-if="canManageInstances" class="application-toolbar-action-btn" @click="openCreateInstance">
+          <template #icon><PlusOutlined /></template>
+          新增实例
+        </a-button>
+        <a-button v-if="canViewBindings" class="component-toolbar-ghost-btn" @click="refreshBindings">刷新绑定</a-button>
+        <a-button v-if="canViewBindings" class="application-toolbar-action-btn" :loading="savingBindings" :disabled="!canManageBindings" @click="saveBindings">
+          保存绑定
+        </a-button>
+      </div>
+    </div>
 
-    <a-tabs v-model:activeKey="activeTab">
-      <a-tab-pane v-if="canViewInstances" key="instances" tab="实例管理">
-        <a-card :bordered="false">
-          <div class="section-toolbar">
-            <a-form layout="inline">
-              <a-form-item label="关键字">
-                <a-input v-model:value="instanceFilters.keyword" allow-clear placeholder="实例编码 / 名称 / 集群" @pressEnter="loadInstances" />
-              </a-form-item>
-              <a-form-item label="状态">
-                <a-select v-model:value="instanceFilters.status" allow-clear placeholder="全部" style="width: 140px">
-                  <a-select-option value="active">active</a-select-option>
-                  <a-select-option value="inactive">inactive</a-select-option>
-                </a-select>
-              </a-form-item>
-              <a-form-item>
-                <a-space>
-                  <a-button type="primary" @click="() => { instanceFilters.page = 1; void loadInstances() }">查询</a-button>
-                  <a-button @click="() => { instanceFilters.keyword = ''; instanceFilters.status = ''; instanceFilters.page = 1; instanceFilters.pageSize = 20; void loadInstances() }">重置</a-button>
-                </a-space>
-              </a-form-item>
-            </a-form>
-            <a-space>
-              <a-button v-if="canManageInstances" type="primary" @click="openCreateInstance">
-                <template #icon><PlusOutlined /></template>
-                新增实例
-              </a-button>
-            </a-space>
+    <div class="argocd-unified-layout">
+      <section v-if="canViewInstances" class="argocd-module argocd-module--instances">
+        <div class="argocd-module-header">
+          <div>
+            <div class="argocd-module-kicker">01 · 实例管理</div>
+            <h3 class="argocd-module-title">ArgoCD 实例</h3>
           </div>
+          <div class="argocd-module-meta">共 {{ instanceTotal }} 个实例</div>
+        </div>
+        <a-card :bordered="false" class="table-card">
+          <a-spin :spinning="loadingInstances">
+            <div class="argocd-resource-list argocd-instance-list">
+              <article v-for="record in instanceDataSource" :key="record.id" class="argocd-resource-card">
+                <div class="argocd-resource-card-head">
+                  <div class="argocd-resource-identity">
+                    <div class="argocd-resource-title-row">
+                      <span class="argocd-resource-title">{{ record.name || '-' }}</span>
+                      <a-tag :color="record.status === 'active' ? 'green' : 'default'">{{ record.status }}</a-tag>
+                      <a-tag :color="record.health_status === 'healthy' ? 'green' : record.health_status === 'unreachable' ? 'red' : 'default'">
+                        {{ record.health_status || 'unknown' }}
+                      </a-tag>
+                    </div>
+                    <div class="argocd-resource-subtitle">{{ record.instance_code || '-' }}</div>
+                  </div>
+                  <div v-if="canManageInstances" class="argocd-resource-actions">
+                    <a-button class="component-row-action-btn" size="small" @click="openEditInstance(record)">编辑</a-button>
+                    <a-button
+                      class="component-row-action-btn"
+                      size="small"
+                      :loading="checkingInstanceID === record.id"
+                      @click="handleCheckInstance(record)"
+                    >
+                      连接检查
+                    </a-button>
+                  </div>
+                </div>
+                <div class="argocd-resource-grid">
+                  <div class="argocd-resource-field">
+                    <span>GitOps 实例</span>
+                    <strong>{{ record.gitops_instance_name || '-' }}</strong>
+                  </div>
+                  <div class="argocd-resource-field">
+                    <span>Base URL</span>
+                    <strong class="truncate-text" :title="record.base_url">{{ record.base_url || '-' }}</strong>
+                  </div>
+                  <div class="argocd-resource-field">
+                    <span>集群</span>
+                    <strong>{{ record.cluster_name || '-' }}</strong>
+                  </div>
+                  <div class="argocd-resource-field">
+                    <span>认证方式</span>
+                    <strong>{{ record.auth_mode || '-' }}</strong>
+                  </div>
+                  <div class="argocd-resource-field">
+                    <span>最近检查</span>
+                    <strong>{{ formatTime(record.last_check_at) }}</strong>
+                  </div>
+                </div>
+              </article>
+              <a-empty v-if="!loadingInstances && instanceDataSource.length === 0" class="argocd-empty" description="暂无 ArgoCD 实例" />
+            </div>
+          </a-spin>
 
-          <a-table row-key="id" :columns="instanceColumns" :data-source="instanceDataSource" :loading="loadingInstances" :pagination="false" :scroll="{ x: 1500 }">
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'base_url'">
-                <span class="truncate-text" :title="record.base_url">{{ record.base_url || '-' }}</span>
-              </template>
-              <template v-else-if="column.key === 'health_status'">
-                <a-tag :color="record.health_status === 'healthy' ? 'green' : record.health_status === 'unreachable' ? 'red' : 'default'">
-                  {{ record.health_status || 'unknown' }}
-                </a-tag>
-              </template>
-              <template v-else-if="column.key === 'status'">
-                <a-tag :color="record.status === 'active' ? 'green' : 'default'">{{ record.status }}</a-tag>
-              </template>
-              <template v-else-if="column.key === 'last_check_at'">
-                {{ formatTime(record.last_check_at) }}
-              </template>
-              <template v-else-if="column.key === 'actions'">
-                <a-space>
-                  <a-button v-if="canManageInstances" size="small" @click="openEditInstance(record)">编辑</a-button>
-                  <a-button
-                    v-if="canManageInstances"
-                    size="small"
-                    :loading="checkingInstanceID === record.id"
-                    @click="handleCheckInstance(record)"
-                  >
-                    连接检查
-                  </a-button>
-                </a-space>
-              </template>
-            </template>
-          </a-table>
-
-          <div class="pagination-wrap">
-            <a-pagination
-              :current="instanceFilters.page"
-              :page-size="instanceFilters.pageSize"
-              :total="instanceTotal"
-              show-size-changer
-              :page-size-options="['10', '20', '50', '100']"
-              @change="(page, pageSize) => { instanceFilters.page = page; instanceFilters.pageSize = pageSize; void loadInstances() }"
-            />
+          <div v-if="instanceTotal > instanceFilters.pageSize" class="argocd-compact-pager">
+            <span class="argocd-page-summary">第 {{ instanceFilters.page }} / {{ instanceTotalPages }} 页</span>
+            <a-button class="argocd-pager-btn" :disabled="instanceFilters.page <= 1" @click="changeInstancePage(instanceFilters.page - 1)">
+              <template #icon><LeftOutlined /></template>
+            </a-button>
+            <a-button class="argocd-pager-btn" :disabled="instanceFilters.page >= instanceTotalPages" @click="changeInstancePage(instanceFilters.page + 1)">
+              <template #icon><RightOutlined /></template>
+            </a-button>
           </div>
         </a-card>
-      </a-tab-pane>
+      </section>
 
-      <a-tab-pane v-if="canViewBindings" key="bindings" tab="环境绑定">
-        <a-card :bordered="false" :loading="loadingBindings">
-          <a-alert
-            type="info"
-            show-icon
-            class="section-alert"
-            message="发布模板走 ArgoCD 时，平台会根据发布单的 env 自动命中这里绑定的 ArgoCD 实例。"
-            description="建议先在系统设置里维护环境列表，再为每个环境选择默认 ArgoCD 实例。只有一个 ArgoCD 实例时，可暂时不绑，后端会自动回退到唯一实例。"
-          />
-
-          <a-table :pagination="false" :data-source="bindingRows" row-key="env_code" size="middle">
-            <a-table-column title="环境" data-index="env_code" key="env_code" width="180" />
-            <a-table-column title="默认 ArgoCD 实例" key="argocd_instance_id">
-              <template #default="{ record }">
+      <section v-if="canViewBindings" class="argocd-module argocd-module--bindings">
+        <div class="argocd-module-header">
+          <div>
+            <div class="argocd-module-kicker">02 · 环境绑定</div>
+            <h3 class="argocd-module-title">发布环境默认实例</h3>
+          </div>
+          <div class="argocd-module-meta">共 {{ bindingRows.length }} 个环境</div>
+        </div>
+        <a-card :bordered="false" :loading="loadingBindings" class="table-card">
+          <div class="argocd-binding-list">
+            <article v-for="record in bindingRows" :key="record.env_code" class="argocd-binding-row">
+              <div class="argocd-binding-env">
+                <span>环境</span>
+                <strong>{{ record.env_code }}</strong>
+              </div>
+              <div class="argocd-binding-control">
+                <span>默认 ArgoCD 实例</span>
                 <a-select
                   :value="record.binding?.argocd_instance_id || undefined"
                   allow-clear
                   placeholder="请选择 ArgoCD 实例"
-                  style="width: 100%"
                   :disabled="!canManageBindings"
                   @change="(value) => updateBindingValue(record.env_code, value)"
                 >
-                  <a-select-option v-for="item in instanceDataSource.filter((x) => x.status === 'active')" :key="item.id" :value="item.id">
+                  <a-select-option v-for="item in activeInstanceOptions" :key="item.id" :value="item.id">
                     {{ item.name }}<span v-if="item.cluster_name">（{{ item.cluster_name }}）</span>
                   </a-select-option>
                 </a-select>
-              </template>
-            </a-table-column>
-            <a-table-column title="当前绑定" key="bound_instance" width="260">
-              <template #default="{ record }">
+              </div>
+              <div class="argocd-binding-current">
+                <span>当前绑定</span>
                 <span v-if="record.binding">{{ record.binding.argocd_instance_name || '-' }}<span v-if="record.binding.cluster_name"> / {{ record.binding.cluster_name }}</span></span>
                 <span v-else>-</span>
-              </template>
-            </a-table-column>
-          </a-table>
+              </div>
+            </article>
+            <a-empty v-if="bindingRows.length === 0" class="argocd-empty" description="暂无发布环境" />
+          </div>
 
-          <div class="section-toolbar bottom-actions">
+          <div class="bottom-actions">
             <span class="muted-text">共 {{ bindingRows.length }} 个环境</span>
-            <a-space>
-              <a-button @click="() => Promise.all([loadEnvOptions(), loadBindings()])">重置</a-button>
-              <a-button type="primary" :loading="savingBindings" :disabled="!canManageBindings" @click="saveBindings">保存绑定</a-button>
-            </a-space>
           </div>
         </a-card>
-      </a-tab-pane>
-
-      <a-tab-pane v-if="canViewApplications" key="applications" tab="应用列表">
-        <a-card :bordered="false">
-          <div class="section-toolbar">
-            <a-form layout="inline">
-              <a-form-item label="实例">
-                <a-select v-model:value="appFilters.argocd_instance_id" allow-clear placeholder="全部" style="width: 200px">
-                  <a-select-option v-for="item in instanceDataSource" :key="item.id" :value="item.id">{{ item.name }}</a-select-option>
-                </a-select>
-              </a-form-item>
-              <a-form-item label="应用名称">
-                <a-input v-model:value="appFilters.app_name" allow-clear placeholder="请输入应用名称" @pressEnter="loadApplications" />
-              </a-form-item>
-              <a-form-item label="Project">
-                <a-input v-model:value="appFilters.project" allow-clear placeholder="请输入 Project" @pressEnter="loadApplications" />
-              </a-form-item>
-              <a-form-item>
-                <a-space>
-                  <a-button type="primary" @click="() => { appFilters.page = 1; void loadApplications() }">查询</a-button>
-                  <a-button @click="() => { appFilters.argocd_instance_id = ''; appFilters.app_name = ''; appFilters.project = ''; appFilters.sync_status = ''; appFilters.health_status = ''; appFilters.status = ''; appFilters.page = 1; appFilters.pageSize = 20; void loadApplications() }">重置</a-button>
-                </a-space>
-              </a-form-item>
-            </a-form>
-            <a-space>
-              <a-button v-if="canManageArgoCD || canManageInstances" type="primary" :loading="syncingApps" @click="handleSyncApplications">
-                <template #icon><ReloadOutlined /></template>
-                手动同步
-              </a-button>
-            </a-space>
-          </div>
-
-          <a-table row-key="id" :columns="appColumns" :data-source="appDataSource" :loading="loadingApps" :pagination="false" :scroll="{ x: 1900 }">
-            <template #bodyCell="{ column, record }">
-              <template v-if="column.key === 'repo_url' || column.key === 'source_path'">
-                <span class="truncate-text" :title="String(record[column.dataIndex as keyof ArgoCDApplication] || '-')">
-                  {{ record[column.dataIndex as keyof ArgoCDApplication] || '-' }}
-                </span>
-              </template>
-              <template v-else-if="column.key === 'sync_status'">
-                <a-tag :color="String(record.sync_status || '').toLowerCase() === 'synced' ? 'green' : String(record.sync_status || '').toLowerCase() === 'outofsync' ? 'orange' : 'default'">
-                  {{ record.sync_status || 'Unknown' }}
-                </a-tag>
-              </template>
-              <template v-else-if="column.key === 'health_status'">
-                <a-tag :color="String(record.health_status || '').toLowerCase() === 'healthy' ? 'green' : String(record.health_status || '').toLowerCase() === 'degraded' ? 'red' : String(record.health_status || '').toLowerCase() === 'progressing' ? 'blue' : 'default'">
-                  {{ record.health_status || 'Unknown' }}
-                </a-tag>
-              </template>
-              <template v-else-if="column.key === 'last_synced_at'">
-                {{ formatTime(record.last_synced_at) }}
-              </template>
-              <template v-else-if="column.key === 'actions'">
-                <a-space>
-                  <a-button size="small" @click="openDetail(record)">详情</a-button>
-                  <a-button size="small" :loading="openingOriginalID === record.id" @click="openOriginalLink(record)">
-                    <template #icon><ExportOutlined /></template>
-                    原始链接
-                  </a-button>
-                </a-space>
-              </template>
-            </template>
-          </a-table>
-
-          <div class="pagination-wrap">
-            <a-pagination
-              :current="appFilters.page"
-              :page-size="appFilters.pageSize"
-              :total="appTotal"
-              show-size-changer
-              :page-size-options="['10', '20', '50', '100']"
-              @change="(page, pageSize) => { appFilters.page = page; appFilters.pageSize = pageSize; void loadApplications() }"
-            />
-          </div>
-        </a-card>
-      </a-tab-pane>
-    </a-tabs>
+      </section>
+    </div>
 
     <a-modal
-      v-model:open="instanceModalVisible"
-      :title="editingInstanceID ? '编辑 ArgoCD 实例' : '新增 ArgoCD 实例'"
-      :confirm-loading="savingInstance"
-      width="720px"
-      @ok="handleSaveInstance"
+      :open="instanceModalVisible"
+      :width="760"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :mask-style="instanceModalMaskStyle"
+      :wrap-props="instanceModalWrapProps"
+      wrap-class-name="component-instance-modal-wrap argocd-instance-modal-wrap"
       @cancel="closeInstanceModal"
     >
-      <a-form layout="vertical">
+      <template #title>
+        <div class="component-instance-modal-titlebar">
+          <span class="component-instance-modal-title">{{ editingInstanceID ? '编辑 ArgoCD 实例' : '新增 ArgoCD 实例' }}</span>
+          <a-button class="application-toolbar-action-btn component-instance-modal-save-btn" :loading="savingInstance" @click="handleSaveInstance">
+            保存
+          </a-button>
+        </div>
+      </template>
+      <a-form layout="vertical" :required-mark="false" class="component-instance-form">
+        <div class="component-instance-form-note">
+          实例编码用于系统识别，编辑态保持只读；凭据留空时沿用原值
+        </div>
         <a-row :gutter="16">
           <a-col :span="12">
-            <a-form-item label="实例编码" required>
+            <a-form-item label="实例编码">
               <a-input v-model:value="instanceForm.instance_code" :disabled="Boolean(editingInstanceID)" placeholder="例如 prod-cn" />
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item label="实例名称" required>
+            <a-form-item label="实例名称">
               <a-input v-model:value="instanceForm.name" placeholder="例如 生产华东集群" />
             </a-form-item>
           </a-col>
         </a-row>
-        <a-form-item label="Base URL" required>
+        <a-form-item label="Base URL">
           <a-input v-model:value="instanceForm.base_url" placeholder="例如 https://argocd.example.com" />
         </a-form-item>
         <a-row :gutter="16">
           <a-col :span="12">
-            <a-form-item label="认证方式" required>
+            <a-form-item label="认证方式">
               <a-select v-model:value="instanceForm.auth_mode">
                 <a-select-option value="token">token</a-select-option>
                 <a-select-option value="password">password</a-select-option>
@@ -780,17 +646,17 @@ onMounted(() => {
             </a-select-option>
           </a-select>
         </a-form-item>
-        <a-form-item v-if="instanceForm.auth_mode === 'token'" label="Token" required>
+        <a-form-item v-if="instanceForm.auth_mode === 'token'" label="Token">
           <a-input-password v-model:value="instanceForm.token" placeholder="留空则更新时沿用原值" />
         </a-form-item>
         <a-row v-else :gutter="16">
           <a-col :span="12">
-            <a-form-item label="用户名" required>
+            <a-form-item label="用户名">
               <a-input v-model:value="instanceForm.username" />
             </a-form-item>
           </a-col>
           <a-col :span="12">
-            <a-form-item :label="editingInstanceID ? '密码（留空沿用）' : '密码'" required>
+            <a-form-item :label="editingInstanceID ? '密码（留空沿用）' : '密码'">
               <a-input-password v-model:value="instanceForm.password" />
             </a-form-item>
           </a-col>
@@ -804,49 +670,320 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-drawer :open="detailVisible" width="720" title="ArgoCD 应用详情" @close="closeDetail">
-      <a-spin :spinning="detailLoading">
-        <a-descriptions :column="1" bordered size="small">
-          <a-descriptions-item label="实例">{{ detail?.instance_name || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="集群">{{ detail?.cluster_name || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="应用名称">{{ detail?.app_name || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="Project">{{ detail?.project || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="Repo地址">{{ detail?.repo_url || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="Source Path">{{ detail?.source_path || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="Target Revision">{{ detail?.target_revision || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="目标集群">{{ detail?.dest_server || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="目标Namespace">{{ detail?.dest_namespace || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="同步状态">{{ detail?.sync_status || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="健康状态">{{ detail?.health_status || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="操作阶段">{{ detail?.operation_phase || '-' }}</a-descriptions-item>
-          <a-descriptions-item label="最后同步时间">{{ formatTime(detail?.last_synced_at) }}</a-descriptions-item>
-          <a-descriptions-item label="原始Meta">
-            <pre class="raw-meta">{{ detailRawMeta }}</pre>
-          </a-descriptions-item>
-        </a-descriptions>
-      </a-spin>
-    </a-drawer>
   </div>
 </template>
 
 <style scoped>
-.toolbar,
-.section-toolbar {
+.page-header {
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.page-header {
+  gap: 20px;
+  margin-bottom: var(--space-6);
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+.argocd-unified-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.argocd-module {
+  padding: 18px;
+  border-radius: 24px;
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  background:
+    radial-gradient(circle at right top, rgba(96, 165, 250, 0.09), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.58), rgba(248, 250, 252, 0.36));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 18px 42px rgba(15, 23, 42, 0.05);
+}
+
+.argocd-module-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.argocd-module-kicker {
+  color: #2563eb;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.argocd-module-title {
+  margin: 4px 0 0;
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 850;
+  line-height: 1.3;
+}
+
+.argocd-module-meta {
+  flex: none;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  background: rgba(255, 255, 255, 0.54);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.table-card {
+  overflow: visible;
+  border-radius: 20px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.table-card :deep(.ant-card-body) {
+  padding: 0;
+}
+
+.argocd-resource-list,
+.argocd-binding-list {
+  display: grid;
+  gap: 12px;
+}
+
+.argocd-resource-card,
+.argocd-binding-row {
+  position: relative;
+  overflow: visible;
+  border-radius: 18px;
+  border: 1px solid rgba(203, 213, 225, 0.74);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.78), rgba(248, 250, 252, 0.5)),
+    radial-gradient(circle at 0 0, rgba(34, 197, 94, 0.08), transparent 32%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 14px 28px rgba(15, 23, 42, 0.05);
+}
+
+.argocd-resource-card {
+  padding: 16px;
+}
+
+.argocd-resource-card-head {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.argocd-resource-identity {
+  min-width: 0;
+}
+
+.argocd-resource-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.argocd-resource-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 15px;
+  font-weight: 850;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.argocd-resource-subtitle {
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.argocd-resource-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
+}
+
+.argocd-resource-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.05fr 1.6fr 1fr 0.8fr 1fr;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.argocd-resource-field {
+  min-width: 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(226, 232, 240, 0.76);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.argocd-resource-field span,
+.argocd-binding-env span,
+.argocd-binding-control > span,
+.argocd-binding-current > span:first-child {
+  display: block;
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.argocd-resource-field strong,
+.argocd-binding-env strong,
+.argocd-binding-current > span:last-child {
+  display: block;
+  min-width: 0;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 750;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.argocd-binding-row {
+  display: grid;
+  grid-template-columns: 0.55fr minmax(260px, 1.4fr) minmax(180px, 0.85fr);
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+}
+
+.argocd-binding-control,
+.argocd-binding-current {
+  min-width: 0;
+}
+
+.argocd-binding-control :deep(.ant-select) {
+  width: 100%;
+}
+
+.argocd-empty {
+  padding: 24px 0;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn),
+:deep(.component-toolbar-ghost-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  padding-inline: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-action-btn.ant-btn:focus-visible),
+:deep(.component-toolbar-ghost-btn.ant-btn:hover),
+:deep(.component-toolbar-ghost-btn.ant-btn:focus),
+:deep(.component-toolbar-ghost-btn.ant-btn:focus-visible) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+:deep(.component-row-action-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 28px;
+  padding-inline: 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.82) !important;
+  background: rgba(255, 255, 255, 0.72) !important;
+  color: #334155 !important;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.04);
 }
 
 .muted-text {
   color: var(--ant-color-text-description, #8c8c8c);
 }
 
-.pagination-wrap {
+.argocd-compact-pager {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
-  margin-top: 16px;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.argocd-page-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(203, 213, 225, 0.72);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.56);
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+:deep(.argocd-pager-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.78) !important;
+  background: rgba(255, 255, 255, 0.64) !important;
+  color: #334155 !important;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.04);
+}
+
+:deep(.argocd-pager-btn.ant-btn:hover:not(:disabled)),
+:deep(.argocd-pager-btn.ant-btn:focus-visible:not(:disabled)) {
+  border-color: rgba(37, 99, 235, 0.36) !important;
+  color: #1d4ed8 !important;
+  box-shadow: 0 10px 20px rgba(37, 99, 235, 0.1);
 }
 
 .truncate-text {
@@ -857,25 +994,122 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.section-alert {
-  margin-bottom: 16px;
-}
-
 .bottom-actions {
   margin-top: 16px;
 }
 
-.raw-meta {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
+.component-instance-modal-wrap :deep(.ant-modal) {
+  padding-bottom: 32px;
+}
+
+.component-instance-modal-wrap :deep(.ant-modal-content) {
+  overflow: hidden;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(circle at top right, rgba(134, 239, 172, 0.18), transparent 34%),
+    radial-gradient(circle at left bottom, rgba(96, 165, 250, 0.16), transparent 40%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.92));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 32px 90px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(18px) saturate(180%);
+}
+
+.component-instance-modal-wrap :deep(.ant-modal-header) {
+  padding: 24px 28px 0;
+  margin-bottom: 0;
+  background: transparent;
+  border-bottom: none;
+}
+
+.component-instance-modal-wrap :deep(.ant-modal-body) {
+  padding: 20px 28px 28px;
+}
+
+.component-instance-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.component-instance-modal-title {
+  color: #0f172a;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+:deep(.component-instance-modal-save-btn.ant-btn) {
+  flex: none;
+  height: 42px;
+  padding-inline: 18px;
+  border-radius: 16px;
+  color: #0f172a !important;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.component-instance-form-note {
+  position: relative;
+  margin-bottom: 18px;
+  color: rgba(51, 65, 85, 0.88);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.component-instance-form :deep(.ant-form-item-label > label) {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.component-instance-form :deep(.ant-input),
+.component-instance-form :deep(.ant-input-affix-wrapper),
+.component-instance-form :deep(.ant-select-selector),
+.component-instance-form :deep(.ant-input-textarea textarea) {
+  border-color: rgba(203, 213, 225, 0.78);
+  background: rgba(255, 255, 255, 0.5);
 }
 
 @media (max-width: 768px) {
-  .toolbar,
-  .section-toolbar {
+  .page-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .page-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .argocd-module {
+    padding: 14px;
+  }
+
+  .argocd-module-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .argocd-resource-card-head {
+    flex-direction: column;
+  }
+
+  .argocd-resource-actions {
+    justify-content: flex-start;
+  }
+
+  .argocd-resource-grid,
+  .argocd-binding-row {
+    grid-template-columns: 1fr;
+  }
+
+  .component-instance-modal-titlebar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

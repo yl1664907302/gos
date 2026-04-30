@@ -45,6 +45,7 @@ export interface ApplicationPayload {
 }
 
 export interface ApplicationListParams {
+  keyword?: string
   key?: string
   name?: string
   project_id?: string

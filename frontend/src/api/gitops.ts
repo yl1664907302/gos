@@ -55,3 +55,18 @@ export async function listGitOpsValuesCandidates(applicationID: string) {
   })
   return response.data
 }
+
+export interface GitOpsScanPathStatus {
+  path_template: string
+  exists: boolean
+}
+
+export async function checkGitOpsScanPath(
+  applicationID: string,
+  gitopsType: string,
+): Promise<GitOpsScanPathStatus> {
+  const response = await http.get<{ data: GitOpsScanPathStatus }>('/gitops/scan-path-status', {
+    params: { application_id: applicationID, gitops_type: gitopsType },
+  })
+  return response.data.data
+}

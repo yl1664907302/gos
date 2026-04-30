@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ExclamationCircleOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { ExclamationCircleOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
 import { message, Modal } from 'ant-design-vue'
 import type { FormInstance, TableColumnsType } from 'ant-design-vue'
 import type { Rule } from 'ant-design-vue/es/form'
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   createNotificationHook,
   createNotificationMarkdownTemplate,
@@ -67,6 +67,12 @@ interface HookFormState {
   markdown_template_id: string
   enabled: boolean
   remark: string
+}
+
+interface NotificationSearchSuggestion {
+  id: string
+  title: string
+  subtitle: string
 }
 
 const activeTab = ref<TabKey>('sources')
@@ -173,10 +179,19 @@ const hookFilters = reactive({
   pageSize: 10,
 })
 
+const notificationSearchVisible = ref(false)
+const notificationSearchInputRef = ref<HTMLInputElement | null>(null)
+const notificationSearchDraft = reactive({ keyword: '' })
+const notificationSearchSuggestions = ref<NotificationSearchSuggestion[]>([])
+const notificationSearchSuggestionsLoading = ref(false)
+let notificationSearchTimer: ReturnType<typeof window.setTimeout> | null = null
+let notificationSearchRequestSeq = 0
+
 const sourceModalVisible = ref(false)
 const sourceSubmitting = ref(false)
 const editingSourceID = ref('')
 const editingSourceHasVerificationParam = ref(false)
+const isEditSource = computed(() => Boolean(editingSourceID.value))
 const sourceFormRef = ref<FormInstance>()
 const sourceForm = reactive<SourceFormState>({
   name: '',
@@ -187,9 +202,103 @@ const sourceForm = reactive<SourceFormState>({
   remark: '',
 })
 
+// ---- source modal masking ----
+const sourceFormViewportInset = ref(0)
+
+const sourceFormMaskStyle = computed(() => ({
+  left: `${sourceFormViewportInset.value}px`,
+  width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: sourceModalVisible.value ? 'auto' : 'none',
+}))
+
+const sourceFormWrapProps = computed(() => ({
+  style: {
+    left: `${sourceFormViewportInset.value}px`,
+    width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+    pointerEvents: sourceModalVisible.value ? 'auto' : 'none',
+  },
+}))
+
+let sourceFormViewportObserver: ResizeObserver | null = null
+
+function readSourceFormViewportInset() {
+  if (typeof document === 'undefined') return 0
+  const appLayout = document.querySelector('.app-layout')
+  if (appLayout) {
+    const rawWidth = window.getComputedStyle(appLayout).getPropertyValue('--layout-sider-width').trim()
+    const parsedWidth = Number.parseFloat(rawWidth)
+    if (Number.isFinite(parsedWidth) && parsedWidth >= 0) return parsedWidth
+  }
+  const sider = document.querySelector('.app-sider')
+  if (!sider) return 0
+  return Math.max(sider.getBoundingClientRect().width, 0)
+}
+
+function syncSourceFormViewportInset() {
+  sourceFormViewportInset.value = readSourceFormViewportInset()
+}
+
+function observeSourceFormViewportInset() {
+  if (typeof window === 'undefined' || typeof ResizeObserver === 'undefined') return
+  const appLayout = document.querySelector('.app-layout')
+  const sider = document.querySelector('.app-sider')
+  if (!appLayout && !sider) return
+  sourceFormViewportObserver?.disconnect()
+  sourceFormViewportObserver = new ResizeObserver(() => {
+    syncSourceFormViewportInset()
+  })
+  if (appLayout) sourceFormViewportObserver.observe(appLayout)
+  if (sider) sourceFormViewportObserver.observe(sider)
+}
+
+function stopObservingSourceFormViewportInset() {
+  sourceFormViewportObserver?.disconnect()
+  sourceFormViewportObserver = null
+}
+
+// ---- template modal masking ----
+const templateFormMaskStyle = computed(() => ({
+  left: `${sourceFormViewportInset.value}px`,
+  width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: templateModalVisible.value ? 'auto' : 'none',
+}))
+
+const templateFormWrapProps = computed(() => ({
+  style: {
+    left: `${sourceFormViewportInset.value}px`,
+    width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+    pointerEvents: templateModalVisible.value ? 'auto' : 'none',
+  },
+}))
+
+// ---- hook modal masking ----
+const hookFormMaskStyle = computed(() => ({
+  left: `${sourceFormViewportInset.value}px`,
+  width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+  background: 'rgba(15, 23, 42, 0.08)',
+  backdropFilter: 'blur(10px)',
+  WebkitBackdropFilter: 'blur(10px)',
+  pointerEvents: hookModalVisible.value ? 'auto' : 'none',
+}))
+
+const hookFormWrapProps = computed(() => ({
+  style: {
+    left: `${sourceFormViewportInset.value}px`,
+    width: `calc(100% - ${sourceFormViewportInset.value}px)`,
+    pointerEvents: hookModalVisible.value ? 'auto' : 'none',
+  },
+}))
+
 const templateModalVisible = ref(false)
 const templateSubmitting = ref(false)
 const editingTemplateID = ref('')
+const isEditTemplate = computed(() => Boolean(editingTemplateID.value))
 const templateFormRef = ref<FormInstance>()
 const templateForm = reactive<TemplateFormState>({
   name: '',
@@ -203,6 +312,7 @@ const templateForm = reactive<TemplateFormState>({
 const hookModalVisible = ref(false)
 const hookSubmitting = ref(false)
 const editingHookID = ref('')
+const isEditHook = computed(() => Boolean(editingHookID.value))
 const hookFormRef = ref<FormInstance>()
 const hookForm = reactive<HookFormState>({
   name: '',
@@ -239,6 +349,51 @@ const enabledOptions = [
   { label: '启用', value: 'true' },
   { label: '停用', value: 'false' },
 ] as const
+
+const activeCreateLabel = computed(() => {
+  if (activeTab.value === 'templates') return '新增 Markdown 模板'
+  if (activeTab.value === 'hooks') return '新增通知 Hook'
+  return '新增通知源'
+})
+
+const activeSearchPlaceholder = computed(() => {
+  if (activeTab.value === 'templates') return '搜索 Markdown 模板'
+  if (activeTab.value === 'hooks') return '搜索通知 Hook'
+  return '搜索通知源'
+})
+
+const activeEnabledFilter = computed<string | undefined>({
+  get() {
+    const value =
+      activeTab.value === 'templates'
+        ? templateFilters.enabled
+        : activeTab.value === 'hooks'
+          ? hookFilters.enabled
+          : sourceFilters.enabled
+    return value || undefined
+  },
+  set(value) {
+    const next = (value || '') as '' | 'true' | 'false'
+    if (activeTab.value === 'templates') {
+      templateFilters.enabled = next
+      return
+    }
+    if (activeTab.value === 'hooks') {
+      hookFilters.enabled = next
+      return
+    }
+    sourceFilters.enabled = next
+  },
+})
+
+const activeSourceTypeFilter = computed<NotificationSourceType | undefined>({
+  get() {
+    return sourceFilters.source_type || undefined
+  },
+  set(value) {
+    sourceFilters.source_type = (value || '') as NotificationSourceType | ''
+  },
+})
 
 const sourceOptions = computed(() =>
   sourceCatalog.value.map((item) => ({ label: `${item.name} · ${item.source_type === 'dingtalk' ? '钉钉' : '企业微信'}`, value: item.id })),
@@ -296,7 +451,7 @@ const defaultNotificationTemplatePreset = {
     '- **执行人**：{executor_name}',
     '',
     '---',
-    '请前往 **GOS Release** 查看执行日志、审批记录与 Hook 详情。',
+    '请前往 **GOS Release** 查看执行日志、审批记录与 Hook 详情',
   ].join('\n'),
   remark: '推荐用于构建完成通知与发布完成通知的通用模板，已内置彩色进度语义标签',
 } as const
@@ -726,6 +881,7 @@ function openCreateSourceModal() {
   resetSourceForm()
   editingSourceHasVerificationParam.value = false
   sourceForm.source_type = 'dingtalk'
+  syncSourceFormViewportInset()
   sourceModalVisible.value = true
 }
 
@@ -738,13 +894,18 @@ function openEditSourceModal(item: NotificationSource) {
   sourceForm.enabled = item.enabled
   sourceForm.remark = item.remark || ''
   editingSourceHasVerificationParam.value = item.has_verification_param
+  syncSourceFormViewportInset()
   sourceModalVisible.value = true
 }
 
 function closeSourceModal() {
   sourceModalVisible.value = false
+}
+
+function handleSourceFormAfterClose() {
   editingSourceHasVerificationParam.value = false
   resetSourceForm()
+  sourceSubmitting.value = false
   void sourceFormRef.value?.clearValidate()
 }
 
@@ -782,9 +943,9 @@ async function submitSource() {
 
 function confirmDeleteSource(item: NotificationSource) {
   Modal.confirm({
-    title: `删除通知源“${item.name}”`,
+    title: `删除通知源"${item.name}"`,
     icon: h(ExclamationCircleOutlined),
-    content: '删除后将无法继续被通知 Hook 引用，请确认是否继续。',
+    content: '删除后将无法继续被通知 Hook 引用，请确认是否继续',
     async onOk() {
       try {
         await deleteNotificationSource(item.id)
@@ -800,6 +961,7 @@ function confirmDeleteSource(item: NotificationSource) {
 function openCreateTemplateModal() {
   resetTemplateForm()
   applyDefaultNotificationTemplatePreset()
+  syncSourceFormViewportInset()
   templateModalVisible.value = true
 }
 
@@ -811,12 +973,17 @@ function openEditTemplateModal(item: NotificationMarkdownTemplate) {
   templateForm.conditions = (item.conditions || []).map((cond) => buildConditionItem(cond))
   templateForm.enabled = item.enabled
   templateForm.remark = item.remark || ''
+  syncSourceFormViewportInset()
   templateModalVisible.value = true
 }
 
 function closeTemplateModal() {
   templateModalVisible.value = false
+}
+
+function handleTemplateFormAfterClose() {
   resetTemplateForm()
+  templateSubmitting.value = false
   void templateFormRef.value?.clearValidate()
 }
 
@@ -867,9 +1034,9 @@ async function submitTemplate() {
 
 function confirmDeleteTemplate(item: NotificationMarkdownTemplate) {
   Modal.confirm({
-    title: `删除 Markdown 模板“${item.name}”`,
+    title: `删除 Markdown 模板"${item.name}"`,
     icon: h(ExclamationCircleOutlined),
-    content: '删除后引用该模板的通知 Hook 将无法继续发送，请确认是否继续。',
+    content: '删除后引用该模板的通知 Hook 将无法继续发送，请确认是否继续',
     async onOk() {
       try {
         await deleteNotificationMarkdownTemplate(item.id)
@@ -884,6 +1051,7 @@ function confirmDeleteTemplate(item: NotificationMarkdownTemplate) {
 
 function openCreateHookModal() {
   resetHookForm()
+  syncSourceFormViewportInset()
   hookModalVisible.value = true
 }
 
@@ -894,12 +1062,17 @@ function openEditHookModal(item: NotificationHook) {
   hookForm.markdown_template_id = item.markdown_template_id
   hookForm.enabled = item.enabled
   hookForm.remark = item.remark || ''
+  syncSourceFormViewportInset()
   hookModalVisible.value = true
 }
 
 function closeHookModal() {
   hookModalVisible.value = false
+}
+
+function handleHookFormAfterClose() {
   resetHookForm()
+  hookSubmitting.value = false
   void hookFormRef.value?.clearValidate()
 }
 
@@ -936,9 +1109,9 @@ async function submitHook() {
 
 function confirmDeleteHook(item: NotificationHook) {
   Modal.confirm({
-    title: `删除通知 Hook“${item.name}”`,
+    title: `删除通知 Hook"${item.name}"`,
     icon: h(ExclamationCircleOutlined),
-    content: '删除后发布模板将无法继续引用该通知 Hook，请确认是否继续。',
+    content: '删除后发布模板将无法继续引用该通知 Hook，请确认是否继续',
     async onOk() {
       try {
         await deleteNotificationHook(item.id)
@@ -966,6 +1139,161 @@ function handleHookSearch() {
   void loadHooks()
 }
 
+function getActiveKeyword() {
+  if (activeTab.value === 'templates') return templateFilters.keyword
+  if (activeTab.value === 'hooks') return hookFilters.keyword
+  return sourceFilters.keyword
+}
+
+function setActiveKeyword(value: string) {
+  const next = value.trim()
+  if (activeTab.value === 'templates') {
+    templateFilters.keyword = next
+    return
+  }
+  if (activeTab.value === 'hooks') {
+    hookFilters.keyword = next
+    return
+  }
+  sourceFilters.keyword = next
+}
+
+function handleActiveSearch() {
+  if (activeTab.value === 'templates') {
+    handleTemplateSearch()
+    return
+  }
+  if (activeTab.value === 'hooks') {
+    handleHookSearch()
+    return
+  }
+  handleSourceSearch()
+}
+
+function openCreateForActiveTab() {
+  if (activeTab.value === 'templates') {
+    openCreateTemplateModal()
+    return
+  }
+  if (activeTab.value === 'hooks') {
+    openCreateHookModal()
+    return
+  }
+  openCreateSourceModal()
+}
+
+function openNotificationSearchDialog() {
+  notificationSearchDraft.keyword = getActiveKeyword()
+  notificationSearchVisible.value = true
+  window.setTimeout(() => {
+    notificationSearchInputRef.value?.focus()
+  }, 0)
+  void fetchNotificationSearchSuggestions(notificationSearchDraft.keyword)
+}
+
+function closeNotificationSearchDialog() {
+  notificationSearchVisible.value = false
+  if (notificationSearchTimer) {
+    clearTimeout(notificationSearchTimer)
+    notificationSearchTimer = null
+  }
+  notificationSearchRequestSeq += 1
+  notificationSearchSuggestions.value = []
+  notificationSearchSuggestionsLoading.value = false
+}
+
+async function fetchNotificationSearchSuggestions(keyword: string) {
+  const currentKeyword = keyword.trim()
+  if (!currentKeyword) {
+    notificationSearchSuggestions.value = []
+    notificationSearchSuggestionsLoading.value = false
+    return
+  }
+  const requestSeq = ++notificationSearchRequestSeq
+  const requestTab = activeTab.value
+  notificationSearchSuggestionsLoading.value = true
+  try {
+    if (requestTab === 'templates') {
+      const response = await listNotificationMarkdownTemplates({
+        keyword: currentKeyword,
+        enabled: normalizeEnabledFilter(templateFilters.enabled),
+        page: 1,
+        page_size: 6,
+      })
+      if (requestSeq !== notificationSearchRequestSeq || requestTab !== activeTab.value) return
+      notificationSearchSuggestions.value = response.data.map((item) => ({
+        id: item.id,
+        title: item.name,
+        subtitle: `${item.conditions.length} 条条件分支`,
+      }))
+      return
+    }
+    if (requestTab === 'hooks') {
+      const response = await listNotificationHooks({
+        keyword: currentKeyword,
+        enabled: normalizeEnabledFilter(hookFilters.enabled),
+        page: 1,
+        page_size: 6,
+      })
+      if (requestSeq !== notificationSearchRequestSeq || requestTab !== activeTab.value) return
+      notificationSearchSuggestions.value = response.data.map((item) => ({
+        id: item.id,
+        title: item.name,
+        subtitle: `${item.source_name || '-'} / ${item.markdown_template_name || '-'}`,
+      }))
+      return
+    }
+    const response = await listNotificationSources({
+      keyword: currentKeyword,
+      source_type: sourceFilters.source_type || undefined,
+      enabled: normalizeEnabledFilter(sourceFilters.enabled),
+      page: 1,
+      page_size: 6,
+    })
+    if (requestSeq !== notificationSearchRequestSeq || requestTab !== activeTab.value) return
+    notificationSearchSuggestions.value = response.data.map((item) => ({
+      id: item.id,
+      title: item.name,
+      subtitle: item.source_type === 'dingtalk' ? '钉钉' : '企业微信',
+    }))
+  } catch {
+    if (requestSeq === notificationSearchRequestSeq) {
+      notificationSearchSuggestions.value = []
+    }
+  } finally {
+    if (requestSeq === notificationSearchRequestSeq) {
+      notificationSearchSuggestionsLoading.value = false
+    }
+  }
+}
+
+function handleNotificationSearchInput() {
+  const keyword = notificationSearchDraft.keyword.trim()
+  if (notificationSearchTimer) clearTimeout(notificationSearchTimer)
+  if (!keyword) {
+    notificationSearchSuggestions.value = []
+    notificationSearchSuggestionsLoading.value = false
+    return
+  }
+  notificationSearchTimer = setTimeout(() => {
+    notificationSearchTimer = null
+    void fetchNotificationSearchSuggestions(keyword)
+  }, 220)
+}
+
+function handleNotificationSearchSubmit() {
+  setActiveKeyword(notificationSearchDraft.keyword)
+  handleActiveSearch()
+  closeNotificationSearchDialog()
+}
+
+function handleNotificationSearchSuggestionSelect(item: NotificationSearchSuggestion) {
+  notificationSearchDraft.keyword = item.title
+  setActiveKeyword(item.title)
+  handleActiveSearch()
+  closeNotificationSearchDialog()
+}
+
 function handleSourcePageChange(page: number, pageSize: number) {
   sourceFilters.page = page
   sourceFilters.pageSize = pageSize
@@ -988,6 +1316,8 @@ const selectedSource = computed(() => sourceCatalog.value.find((item) => item.id
 const selectedMarkdownTemplate = computed(() => templateCatalog.value.find((item) => item.id === hookForm.markdown_template_id) || null)
 
 onMounted(async () => {
+  syncSourceFormViewportInset()
+  observeSourceFormViewportInset()
   await Promise.all([
     loadPlatformParams(),
     loadSources(),
@@ -997,55 +1327,99 @@ onMounted(async () => {
     loadHooks(),
   ])
 })
+
+onBeforeUnmount(() => {
+  stopObservingSourceFormViewportInset()
+  if (notificationSearchTimer) {
+    clearTimeout(notificationSearchTimer)
+    notificationSearchTimer = null
+  }
+  notificationSearchRequestSeq += 1
+})
 </script>
 
 <template>
   <div class="page-wrapper">
-    <div class="page-header-card page-header">
+    <div class="page-header-card page-header notification-page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">通知模块</h2>
-        <p class="page-subtitle">统一管理通知源、Markdown 模板与通知 Hook，并在发布模板中以 Hook 方式复用发布过程数据</p>
+        <h2 class="page-title">通知</h2>
+      </div>
+      <div class="page-header-actions notification-header-actions">
+        <a-button class="application-toolbar-icon-btn notification-search-trigger" @click="openNotificationSearchDialog">
+          <template #icon>
+            <SearchOutlined />
+          </template>
+        </a-button>
+        <a-select
+          v-if="activeTab === 'sources'"
+          v-model:value="activeSourceTypeFilter"
+          allow-clear
+          class="notification-toolbar-select"
+          :options="sourceTypeFilterOptions"
+          placeholder="类型 · 全部"
+        />
+        <a-select
+          v-model:value="activeEnabledFilter"
+          allow-clear
+          class="notification-toolbar-select"
+          :options="enabledOptions"
+          placeholder="状态 · 全部"
+        />
+        <a-button class="notification-toolbar-query-btn" @click="handleActiveSearch">查询</a-button>
+        <a-button class="application-toolbar-action-btn notification-create-btn" @click="openCreateForActiveTab">
+          <template #icon><PlusOutlined /></template>
+          {{ activeCreateLabel }}
+        </a-button>
       </div>
     </div>
 
-    <a-alert
-      class="page-alert"
-      type="info"
-      show-icon
-      message="通知 Hook = 通知源 + Markdown 模板"
-      description="Markdown 模板支持标准平台 Key 和内置字段变量，也支持根据标准平台 Key 的值追加条件 Markdown 语句。"
-    />
-
-    <a-card :bordered="true">
-      <a-tabs v-model:activeKey="activeTab">
-        <a-tab-pane key="sources" tab="通知源">
-          <div class="toolbar-row">
-            <a-form layout="vertical" class="filter-form filter-form-vertical">
-              <a-form-item label="关键字">
-                <a-input v-model:value="sourceFilters.keyword" allow-clear placeholder="按名称搜索" @pressEnter="handleSourceSearch" />
-              </a-form-item>
-              <a-form-item label="类型">
-                <a-select v-model:value="sourceFilters.source_type" allow-clear style="width: 140px" :options="sourceTypeFilterOptions" />
-              </a-form-item>
-              <a-form-item label="状态">
-                <a-select v-model:value="sourceFilters.enabled" allow-clear style="width: 120px" :options="enabledOptions" />
-              </a-form-item>
-            </a-form>
-            <a-space class="toolbar-actions">
-              <a-button @click="handleSourceSearch">查询</a-button>
-              <a-button type="primary" @click="openCreateSourceModal">
-                <template #icon><PlusOutlined /></template>
-                新增通知源
-              </a-button>
-            </a-space>
+    <transition name="notification-search-fade">
+      <div v-if="notificationSearchVisible" class="notification-search-overlay" @click.self="closeNotificationSearchDialog">
+        <div class="notification-search-floating-panel">
+          <div class="notification-search-floating-input">
+            <SearchOutlined class="notification-search-floating-icon" />
+            <input
+              ref="notificationSearchInputRef"
+              v-model="notificationSearchDraft.keyword"
+              class="notification-search-floating-field"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              :placeholder="activeSearchPlaceholder"
+              @input="handleNotificationSearchInput"
+              @keydown.enter="handleNotificationSearchSubmit"
+              @keydown.esc="closeNotificationSearchDialog"
+            />
           </div>
+          <div v-if="notificationSearchSuggestionsLoading || notificationSearchSuggestions.length > 0" class="notification-search-suggestions">
+            <div v-if="notificationSearchSuggestionsLoading" class="notification-search-suggestion-loading">正在查询</div>
+            <template v-else>
+              <button
+                v-for="item in notificationSearchSuggestions"
+                :key="item.id"
+                type="button"
+                class="notification-search-suggestion"
+                @click="handleNotificationSearchSuggestionSelect(item)"
+              >
+                <span class="notification-search-suggestion-title">{{ item.title }}</span>
+                <span class="notification-search-suggestion-subtitle">{{ item.subtitle }}</span>
+              </button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </transition>
 
+    <a-card :bordered="false" class="table-card notification-table-card">
+      <a-tabs v-model:activeKey="activeTab" class="notification-tabs">
+        <a-tab-pane key="sources" tab="通知源">
           <a-table
+            class="notification-table"
             row-key="id"
             :loading="sourceLoading"
             :columns="sourceColumns"
             :data-source="sourceRows"
-            :pagination="{ current: sourceFilters.page, pageSize: sourceFilters.pageSize, total: sourceTotal, onChange: handleSourcePageChange, showSizeChanger: true }"
+            :pagination="false"
             :scroll="{ x: 980 }"
           >
             <template #bodyCell="{ column, record }">
@@ -1068,41 +1442,27 @@ onMounted(async () => {
               </template>
             </template>
           </a-table>
+          <div class="pagination-area">
+            <a-pagination
+              :current="sourceFilters.page"
+              :page-size="sourceFilters.pageSize"
+              :total="sourceTotal"
+              show-size-changer
+              show-quick-jumper
+              :show-total="(total: number) => `共 ${total} 条`"
+              @change="handleSourcePageChange"
+            />
+          </div>
         </a-tab-pane>
 
         <a-tab-pane key="templates" tab="Markdown 模板">
-          <div class="toolbar-row">
-            <a-form layout="vertical" class="filter-form filter-form-vertical">
-              <a-form-item label="关键字">
-                <a-input v-model:value="templateFilters.keyword" allow-clear placeholder="按模板名搜索" @pressEnter="handleTemplateSearch" />
-              </a-form-item>
-              <a-form-item label="状态">
-                <a-select v-model:value="templateFilters.enabled" allow-clear style="width: 120px" :options="enabledOptions" />
-              </a-form-item>
-            </a-form>
-            <a-space class="toolbar-actions">
-              <a-button @click="handleTemplateSearch">查询</a-button>
-              <a-button type="primary" @click="openCreateTemplateModal">
-                <template #icon><PlusOutlined /></template>
-                新增 Markdown 模板
-              </a-button>
-            </a-space>
-          </div>
-
-          <a-alert
-            class="section-alert"
-            type="info"
-            show-icon
-            message="变量占位符格式：{app_key}"
-            description="基础正文先渲染，条件分支会按顺序附加在正文后面；条件判断支持等于、不等于、包含和空值判断。"
-          />
-
           <a-table
+            class="notification-table"
             row-key="id"
             :loading="templateLoading"
             :columns="templateColumns"
             :data-source="templateRows"
-            :pagination="{ current: templateFilters.page, pageSize: templateFilters.pageSize, total: templateTotal, onChange: handleTemplatePageChange, showSizeChanger: true }"
+            :pagination="false"
             :scroll="{ x: 900 }"
           >
             <template #bodyCell="{ column, record }">
@@ -1120,33 +1480,27 @@ onMounted(async () => {
               </template>
             </template>
           </a-table>
+          <div class="pagination-area">
+            <a-pagination
+              :current="templateFilters.page"
+              :page-size="templateFilters.pageSize"
+              :total="templateTotal"
+              show-size-changer
+              show-quick-jumper
+              :show-total="(total: number) => `共 ${total} 条`"
+              @change="handleTemplatePageChange"
+            />
+          </div>
         </a-tab-pane>
 
         <a-tab-pane key="hooks" tab="通知 Hook">
-          <div class="toolbar-row">
-            <a-form layout="vertical" class="filter-form filter-form-vertical">
-              <a-form-item label="关键字">
-                <a-input v-model:value="hookFilters.keyword" allow-clear placeholder="按 Hook 名称搜索" @pressEnter="handleHookSearch" />
-              </a-form-item>
-              <a-form-item label="状态">
-                <a-select v-model:value="hookFilters.enabled" allow-clear style="width: 120px" :options="enabledOptions" />
-              </a-form-item>
-            </a-form>
-            <a-space class="toolbar-actions">
-              <a-button @click="handleHookSearch">查询</a-button>
-              <a-button type="primary" @click="openCreateHookModal">
-                <template #icon><PlusOutlined /></template>
-                新增通知 Hook
-              </a-button>
-            </a-space>
-          </div>
-
           <a-table
+            class="notification-table"
             row-key="id"
             :loading="hookLoading"
             :columns="hookColumns"
             :data-source="hookRows"
-            :pagination="{ current: hookFilters.page, pageSize: hookFilters.pageSize, total: hookTotal, onChange: handleHookPageChange, showSizeChanger: true }"
+            :pagination="false"
             :scroll="{ x: 980 }"
           >
             <template #bodyCell="{ column, record }">
@@ -1161,78 +1515,193 @@ onMounted(async () => {
               </template>
             </template>
           </a-table>
+          <div class="pagination-area">
+            <a-pagination
+              :current="hookFilters.page"
+              :page-size="hookFilters.pageSize"
+              :total="hookTotal"
+              show-size-changer
+              show-quick-jumper
+              :show-total="(total: number) => `共 ${total} 条`"
+              @change="handleHookPageChange"
+            />
+          </div>
         </a-tab-pane>
       </a-tabs>
     </a-card>
 
     <a-modal
       :open="sourceModalVisible"
-      :title="editingSourceID ? '编辑通知源' : '新增通知源'"
       :width="560"
-      wrap-class-name="notification-source-modal-wrap"
-      ok-text="保存"
-      cancel-text="取消"
-      :confirm-loading="sourceSubmitting"
-      @ok="submitSource"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="handleSourceFormAfterClose"
+      :mask-style="sourceFormMaskStyle"
+      :wrap-props="sourceFormWrapProps"
+      wrap-class-name="source-form-modal-wrap"
       @cancel="closeSourceModal"
     >
-      <a-form ref="sourceFormRef" layout="vertical" :model="sourceForm" :rules="sourceRules" class="notification-modal-form">
-        <a-form-item label="通知源名称" name="name">
-          <a-input v-model:value="sourceForm.name" allow-clear placeholder="例如：生产发布钉钉群" />
-        </a-form-item>
-        <a-form-item label="通知源类型" name="source_type">
-          <a-select v-if="sourceForm.source_type !== 'wecom'" v-model:value="sourceForm.source_type" :options="sourceTypeFormOptions" />
-          <a-input v-else value="企业微信（暂不支持新增）" disabled />
-          <div class="form-help-text">当前仅开放钉钉通知源创建，企业微信入口暂时保留为只读展示。</div>
-        </a-form-item>
-        <a-form-item label="Webhook 地址" name="webhook_url">
-          <a-input v-model:value="sourceForm.webhook_url" allow-clear placeholder="请输入钉钉机器人的 Webhook 地址" />
-        </a-form-item>
-        <a-form-item v-if="sourceForm.source_type === 'dingtalk'" label="验证参数（Secret）">
-          <a-input-password
-            v-model:value="sourceForm.verification_param"
-            allow-clear
-            :placeholder="editingSourceHasVerificationParam ? '留空则沿用当前 Secret，输入新值则覆盖' : '选填，钉钉机器人的加签 Secret'"
-          />
-          <div v-if="editingSourceHasVerificationParam" class="form-help-text">当前已配置 Secret，留空可继续沿用</div>
-        </a-form-item>
-        <a-form-item label="备注">
-          <a-textarea v-model:value="sourceForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：生产发版群、回滚通知群" />
-        </a-form-item>
-        <a-form-item label="启用状态">
-          <a-switch v-model:checked="sourceForm.enabled" />
-        </a-form-item>
+      <template #title>
+        <div class="source-form-modal-titlebar">
+          <span class="source-form-modal-title">{{ isEditSource ? '编辑通知源' : '新增通知源' }}</span>
+          <a-button class="application-toolbar-action-btn source-form-modal-save-btn" :loading="sourceSubmitting" @click="submitSource">
+            保存
+          </a-button>
+        </div>
+      </template>
+
+      <a-form ref="sourceFormRef" :model="sourceForm" :rules="sourceRules" layout="vertical" :required-mark="false" class="source-form">
+        <div class="source-form-note">
+          {{ isEditSource ? '编辑态下通知源类型保持只读，如需修改请删除当前通知源后重新创建。' : '创建通知源，用于接收钉钉机器人消息推送。' }}
+        </div>
+
+        <div v-if="isEditSource && sourceForm.source_type !== 'wecom'" class="source-form-panel source-form-panel--context">
+          <div class="source-form-panel-title">当前通知源</div>
+          <div class="source-form-context">
+            <div class="source-form-context-item">
+              <div class="source-form-context-label">通知源名称</div>
+              <div class="source-form-context-value">{{ sourceForm.name }}</div>
+            </div>
+            <div class="source-form-context-item">
+              <div class="source-form-context-label">通知源类型</div>
+              <div class="source-form-context-value">{{ sourceForm.source_type === 'dingtalk' ? '钉钉' : '企业微信' }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="source-form-panel">
+          <div class="source-form-panel-title">{{ isEditSource ? '可编辑配置' : '基础配置' }}</div>
+
+          <a-form-item name="name">
+            <template #label>
+              <span class="source-form-label">
+                通知源名称
+                <a-tag class="source-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="sourceForm.name" allow-clear placeholder="例如：生产发布钉钉群" />
+          </a-form-item>
+
+          <a-form-item name="source_type">
+            <template #label>
+              <span class="source-form-label">
+                通知源类型
+                <a-tag class="source-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-select v-if="sourceForm.source_type !== 'wecom'" v-model:value="sourceForm.source_type" :options="sourceTypeFormOptions" :disabled="isEditSource" />
+            <a-input v-else value="企业微信（暂不支持新增）" disabled />
+            <div class="form-help-text">当前仅开放钉钉通知源创建，企业微信入口暂时保留为只读展示</div>
+          </a-form-item>
+
+          <a-form-item name="webhook_url">
+            <template #label>
+              <span class="source-form-label">
+                Webhook 地址
+                <a-tag class="source-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="sourceForm.webhook_url" allow-clear placeholder="请输入钉钉机器人的 Webhook 地址" />
+          </a-form-item>
+
+          <a-form-item v-if="sourceForm.source_type === 'dingtalk'" name="verification_param">
+            <template #label>
+              <span class="source-form-label">验证参数（Secret）</span>
+            </template>
+            <a-input-password
+              v-model:value="sourceForm.verification_param"
+              allow-clear
+              :placeholder="editingSourceHasVerificationParam ? '留空则沿用当前 Secret，输入新值则覆盖' : '选填，钉钉机器人的加签 Secret'"
+            />
+            <div v-if="editingSourceHasVerificationParam" class="form-help-text">当前已配置 Secret，留空可继续沿用</div>
+          </a-form-item>
+
+          <a-form-item name="remark">
+            <template #label>
+              <span class="source-form-label">备注</span>
+            </template>
+            <a-textarea v-model:value="sourceForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：生产发版群、回滚通知群" />
+          </a-form-item>
+
+          <a-form-item name="enabled">
+            <template #label>
+              <span class="source-form-label">启用状态</span>
+            </template>
+            <a-switch v-model:checked="sourceForm.enabled" />
+          </a-form-item>
+        </div>
       </a-form>
     </a-modal>
 
     <a-modal
       :open="templateModalVisible"
-      :title="editingTemplateID ? '编辑 Markdown 模板' : '新增 Markdown 模板'"
       :width="680"
-      wrap-class-name="notification-template-modal-wrap"
-      ok-text="保存"
-      cancel-text="取消"
-      :confirm-loading="templateSubmitting"
-      @ok="submitTemplate"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="handleTemplateFormAfterClose"
+      :mask-style="templateFormMaskStyle"
+      :wrap-props="templateFormWrapProps"
+      wrap-class-name="template-form-modal-wrap"
       @cancel="closeTemplateModal"
     >
+      <template #title>
+        <div class="template-form-modal-titlebar">
+          <span class="template-form-modal-title">{{ isEditTemplate ? '编辑 Markdown 模板' : '新增 Markdown 模板' }}</span>
+          <a-button class="application-toolbar-action-btn template-form-modal-save-btn" :loading="templateSubmitting" @click="submitTemplate">
+            保存
+          </a-button>
+        </div>
+      </template>
       <a-form
         ref="templateFormRef"
-        layout="vertical"
         :model="templateForm"
         :rules="templateRules"
-        class="notification-modal-form notification-template-form"
+        layout="vertical"
+        :required-mark="false"
+        class="template-form"
       >
-        <a-form-item label="模板名称" name="name">
-          <a-input v-model:value="templateForm.name" allow-clear placeholder="例如：发布结果通知模板" />
-        </a-form-item>
-        <div class="notification-template-preset-bar notification-compact-panel">
+        <div class="template-form-note">
+          {{ isEditTemplate ? '编辑态下可修改模板名称、内容与条件分支，修改后引用的通知 Hook 将使用新内容。' : '创建 Markdown 模板，定义通知标题与正文内容，支持条件分支与变量插值。' }}
+        </div>
+
+        <div v-if="isEditTemplate" class="template-form-panel template-form-panel--context">
+          <div class="template-form-panel-title">当前模板</div>
+          <div class="template-form-context">
+            <div class="template-form-context-item">
+              <div class="template-form-context-label">模板名称</div>
+              <div class="template-form-context-value">{{ templateForm.name }}</div>
+            </div>
+            <div class="template-form-context-item">
+              <div class="template-form-context-label">条件分支数</div>
+              <div class="template-form-context-value">{{ templateForm.conditions.length }} 条</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="template-form-panel">
+          <div class="template-form-panel-title">{{ isEditTemplate ? '可编辑配置' : '基础配置' }}</div>
+
+          <a-form-item name="name">
+            <template #label>
+              <span class="template-form-label">
+                模板名称
+                <a-tag class="template-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-input v-model:value="templateForm.name" allow-clear placeholder="例如：发布结果通知模板" />
+          </a-form-item>
+        </div>
+
+        <div class="notification-template-preset-bar">
           <div>
             <div class="section-title">推荐模板</div>
-            <div class="section-description">这套默认模板已经适配当前的构建完成 / 发布完成两段进度，适合直接作为通用发布通知模板，默认还会用彩色语义标签把构建 / 发布阶段凸显出来。</div>
+            <div class="section-description">这套默认模板已经适配当前的构建完成 / 发布完成两段进度，适合直接作为通用发布通知模板，默认还会用彩色语义标签把构建 / 发布阶段凸显出来</div>
           </div>
           <a-button @click="applyDefaultNotificationTemplatePreset">套用“通用发布通知模板-默认”</a-button>
         </div>
+
         <a-form-item label="标题模板">
           <a-input v-model:value="templateForm.title_template" allow-clear placeholder="例如：[{env}] {app_name} 发布结果" />
         </a-form-item>
@@ -1244,11 +1713,11 @@ onMounted(async () => {
           />
         </a-form-item>
 
-        <div class="notification-preview-card notification-compact-panel notification-preview-warm">
+        <div class="notification-preview-card notification-preview-warm">
           <div class="notification-preview-head">
             <div>
               <div class="section-title">模板预览</div>
-              <div class="section-description">这里会按 Markdown 语法实时渲染预览。标准 Markdown 本身不支持字体颜色，正文里建议直接使用 {release_stage_rich} / {release_status_rich}，让阶段和结果随字段值自动带出彩色语义标签。</div>
+              <div class="section-description">这里会按 Markdown 语法实时渲染预览标准 Markdown 本身不支持字体颜色，正文里建议直接使用 {release_stage_rich} / {release_status_rich}，让阶段和结果随字段值自动带出彩色语义标签</div>
             </div>
             <a-segmented v-model:value="templatePreviewScenario" :options="templatePreviewScenarioOptions" />
           </div>
@@ -1263,9 +1732,9 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="variable-guide-card notification-compact-panel">
+        <div class="variable-guide-card">
           <div class="section-title">可用变量</div>
-          <div class="section-description">推荐优先使用 <code>{release_stage_rich}</code> 与 <code>{release_status_rich}</code>。标准 Markdown 不支持直接改字色，这两个变量会按当前阶段 / 结果自动输出带语义色彩的展示文本。</div>
+          <div class="section-description">推荐优先使用 <code>{release_stage_rich}</code> 与 <code>{release_status_rich}</code>标准 Markdown 不支持直接改字色，这两个变量会按当前阶段 / 结果自动输出带语义色彩的展示文本</div>
           <div class="variable-chip-grid">
             <span v-for="item in markdownVariableOptions" :key="item.value" class="variable-chip">
               {{ item.value }}
@@ -1277,7 +1746,7 @@ onMounted(async () => {
         <div class="condition-section-head notification-template-section-head">
           <div>
             <div class="section-title">条件 Markdown 语句</div>
-            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句。注意：release_status / release_stage 以及它们的彩色语义标签变量都属于运行时字段，已在预览区展示，但不建议作为条件判断字段。</div>
+            <div class="section-description">根据标准平台 Key 的值命中条件后，附加对应 Markdown 语句注意：release_status / release_stage 以及它们的彩色语义标签变量都属于运行时字段，已在预览区展示，但不建议作为条件判断字段</div>
           </div>
           <a-button type="dashed" @click="addCondition">
             <template #icon><PlusOutlined /></template>
@@ -1326,138 +1795,505 @@ onMounted(async () => {
             <div class="condition-preview">
               规则预览：当 <code>{{ condition.param_key || '标准平台 Key' }}</code> {{ conditionOperatorLabel(condition.operator) }}
               <code>{{ condition.operator === 'is_empty' || condition.operator === 'not_empty' ? '空值规则' : condition.expected_value || '...' }}</code>
-              时，追加这一段 Markdown。
+              时，追加这一段 Markdown
             </div>
           </div>
         </div>
 
-        <a-form-item label="备注">
-          <a-textarea v-model:value="templateForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：生产成功通知、审批拒绝通知" />
-        </a-form-item>
-        <a-form-item label="启用状态">
-          <a-switch v-model:checked="templateForm.enabled" />
-        </a-form-item>
+        <div class="template-form-panel">
+          <div class="template-form-panel-title">其他配置</div>
+
+          <a-form-item name="remark">
+            <template #label>
+              <span class="template-form-label">备注</span>
+            </template>
+            <a-textarea v-model:value="templateForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：生产成功通知、审批拒绝通知" />
+          </a-form-item>
+
+          <a-form-item name="enabled">
+            <template #label>
+              <span class="template-form-label">启用状态</span>
+            </template>
+            <a-switch v-model:checked="templateForm.enabled" />
+          </a-form-item>
+        </div>
       </a-form>
     </a-modal>
 
     <a-modal
       :open="hookModalVisible"
-      :title="editingHookID ? '编辑通知 Hook' : '新增通知 Hook'"
       :width="520"
-      wrap-class-name="notification-hook-modal-wrap"
-      ok-text="保存"
-      cancel-text="取消"
-      :confirm-loading="hookSubmitting"
-      @ok="submitHook"
+      :closable="false"
+      :footer="null"
+      :destroy-on-close="true"
+      :after-close="handleHookFormAfterClose"
+      :mask-style="hookFormMaskStyle"
+      :wrap-props="hookFormWrapProps"
+      wrap-class-name="hook-form-modal-wrap"
       @cancel="closeHookModal"
     >
+      <template #title>
+        <div class="hook-form-modal-titlebar">
+          <span class="hook-form-modal-title">{{ isEditHook ? '编辑通知 Hook' : '新增通知 Hook' }}</span>
+          <a-button class="application-toolbar-action-btn hook-form-modal-save-btn" :loading="hookSubmitting" @click="submitHook">
+            保存
+          </a-button>
+        </div>
+      </template>
       <a-form
         ref="hookFormRef"
-        layout="vertical"
         :model="hookForm"
         :rules="hookRules"
-        class="notification-modal-form notification-hook-form"
+        layout="vertical"
+        :required-mark="false"
+        class="hook-form"
       >
-        <a-form-item label="通知 Hook 名称" name="name">
-          <a-input v-model:value="hookForm.name" allow-clear placeholder="例如：生产发布结果通知 Hook" />
-        </a-form-item>
-        <a-form-item label="通知源" name="source_id">
-          <a-select v-model:value="hookForm.source_id" show-search option-filter-prop="label" :options="sourceOptions" placeholder="选择通知源" />
-        </a-form-item>
-        <a-form-item label="Markdown 模板" name="markdown_template_id">
-          <a-select
-            v-model:value="hookForm.markdown_template_id"
-            show-search
-            option-filter-prop="label"
-            :options="markdownTemplateOptions"
-            placeholder="选择 Markdown 模板"
-          />
-        </a-form-item>
+        <div class="hook-form-note">
+          {{ isEditHook ? '编辑态下可修改通知 Hook 名称、关联的通知源与模板，修改后引用的发布模板将使用新配置。' : '创建通知 Hook，将通知源与 Markdown 模板绑定，供发布模板引用。' }}
+        </div>
 
-        <a-alert
-          class="section-alert notification-compact-panel"
-          type="info"
-          show-icon
-          message="发布模板引用该通知 Hook 后，会自动使用发布过程中的标准平台 Key 数据渲染通知内容"
-        />
+        <div v-if="isEditHook" class="hook-form-panel hook-form-panel--context">
+          <div class="hook-form-panel-title">当前 Hook</div>
+          <div class="hook-form-context">
+            <div class="hook-form-context-item">
+              <div class="hook-form-context-label">Hook 名称</div>
+              <div class="hook-form-context-value">{{ hookForm.name }}</div>
+            </div>
+            <div class="hook-form-context-item">
+              <div class="hook-form-context-label">关联通知源</div>
+              <div class="hook-form-context-value">{{ selectedSource ? `${selectedSource.name} · ${selectedSource.source_type === 'dingtalk' ? '钉钉' : '企业微信'}` : '-' }}</div>
+            </div>
+          </div>
+        </div>
 
-        <a-form-item label="已选通知源">
-          <a-input
-            :value="selectedSource ? `${selectedSource.name} · ${selectedSource.source_type === 'dingtalk' ? '钉钉' : '企业微信'}` : '未选择'"
-            readonly
-          />
-        </a-form-item>
-        <a-form-item label="已选 Markdown 模板">
-          <a-input :value="selectedMarkdownTemplate?.name || '未选择'" readonly />
-        </a-form-item>
+        <div class="hook-form-panel">
+          <div class="hook-form-panel-title">{{ isEditHook ? '可编辑配置' : '基础配置' }}</div>
 
-        <a-form-item label="备注" style="margin-top: 16px">
-          <a-textarea v-model:value="hookForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：用于发布成功通知、回滚失败告警" />
-        </a-form-item>
-        <a-form-item label="启用状态">
-          <a-switch v-model:checked="hookForm.enabled" />
-        </a-form-item>
+          <a-form-item name="name">
+            <template #label>
+              <span class="hook-form-label">
+                通知 Hook 名称
+                <a-tag class="hook-form-required-tag">必填</a-tag>
+              </span>
+              <a-popover
+                trigger="click"
+                placement="rightTop"
+                overlay-class-name="release-tip-popover"
+              >
+                <template #content>
+                  <div class="release-tip-content">
+                    发布模板引用该通知 Hook 后，会自动使用发布过程中的标准平台 Key 数据渲染通知内容
+                  </div>
+                </template>
+                <button
+                  class="release-tip-trigger release-tip-trigger-info"
+                  type="button"
+                  aria-label="查看通知 Hook 说明"
+                >
+                  <ExclamationCircleOutlined />
+                </button>
+              </a-popover>
+            </template>
+            <a-input v-model:value="hookForm.name" allow-clear placeholder="例如：生产发布结果通知 Hook" />
+          </a-form-item>
+
+          <a-form-item name="source_id">
+            <template #label>
+              <span class="hook-form-label">
+                通知源
+                <a-tag class="hook-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-select v-model:value="hookForm.source_id" show-search option-filter-prop="label" :options="sourceOptions" placeholder="选择通知源" />
+          </a-form-item>
+
+          <a-form-item name="markdown_template_id">
+            <template #label>
+              <span class="hook-form-label">
+                Markdown 模板
+                <a-tag class="hook-form-required-tag">必填</a-tag>
+              </span>
+            </template>
+            <a-select
+              v-model:value="hookForm.markdown_template_id"
+              show-search
+              option-filter-prop="label"
+              :options="markdownTemplateOptions"
+              placeholder="选择 Markdown 模板"
+            />
+          </a-form-item>
+        </div>
+
+        <div class="hook-form-panel">
+          <div class="hook-form-panel-title">关联预览</div>
+
+          <a-form-item>
+            <template #label>
+              <span class="hook-form-label">已选通知源</span>
+            </template>
+            <a-input
+              :value="selectedSource ? `${selectedSource.name} · ${selectedSource.source_type === 'dingtalk' ? '钉钉' : '企业微信'}` : '未选择'"
+              readonly
+            />
+          </a-form-item>
+          <a-form-item>
+            <template #label>
+              <span class="hook-form-label">已选 Markdown 模板</span>
+            </template>
+            <a-input :value="selectedMarkdownTemplate?.name || '未选择'" readonly />
+          </a-form-item>
+        </div>
+
+        <div class="hook-form-panel">
+          <div class="hook-form-panel-title">其他配置</div>
+
+          <a-form-item name="remark">
+            <template #label>
+              <span class="hook-form-label">备注</span>
+            </template>
+            <a-textarea v-model:value="hookForm.remark" :auto-size="{ minRows: 2, maxRows: 4 }" placeholder="例如：用于发布成功通知、回滚失败告警" />
+          </a-form-item>
+
+          <a-form-item name="enabled">
+            <template #label>
+              <span class="hook-form-label">启用状态</span>
+            </template>
+            <a-switch v-model:checked="hookForm.enabled" />
+          </a-form-item>
+        </div>
       </a-form>
     </a-modal>
   </div>
 </template>
 
 <style scoped>
-.page-alert {
-  margin-bottom: 16px;
-}
-
-.toolbar-row {
+.notification-page-header {
   display: flex;
-  justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
+  justify-content: space-between;
+  flex-wrap: nowrap;
+  gap: 20px;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
-.filter-form {
+.notification-page-header .page-header-copy {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.notification-header-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px 0;
-}
-
-.filter-form-vertical {
-  display: grid;
-  grid-template-columns: minmax(0, 360px);
-  gap: 0;
-  align-items: start;
-  width: min(100%, 360px);
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
   flex: 1 1 auto;
+  gap: 12px;
+  min-width: 0;
 }
 
-.filter-form-vertical :deep(.ant-form-item) {
-  margin-bottom: 12px;
+:deep(.notification-toolbar-select.ant-select) {
+  min-width: 138px;
 }
 
-.toolbar-actions {
-  margin-left: auto;
-  align-self: flex-start;
+:deep(.notification-toolbar-select.ant-select .ant-select-selector) {
+  display: flex;
+  align-items: center;
+  height: 42px !important;
+  min-height: 42px;
+  border-radius: 16px !important;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
 }
 
-.notification-modal-form {
-  width: min(100%, 560px);
-  margin-right: auto;
+:deep(.notification-toolbar-select.ant-select .ant-select-selection-item),
+:deep(.notification-toolbar-select.ant-select .ant-select-arrow) {
+  color: #1e3a8a;
+  font-weight: 650;
 }
 
-.notification-template-form {
-  width: min(100%, 520px);
+:deep(.notification-toolbar-select.ant-select .ant-select-selection-item),
+:deep(.notification-toolbar-select.ant-select .ant-select-selection-placeholder) {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  line-height: 1 !important;
 }
 
-.notification-hook-form {
-  width: min(100%, 420px);
+:deep(.notification-toolbar-select.ant-select .ant-select-selection-placeholder) {
+  color: rgba(30, 58, 138, 0.38) !important;
+  font-weight: 600;
 }
 
-.notification-compact-panel {
+:deep(.application-toolbar-action-btn.ant-btn),
+:deep(.application-toolbar-icon-btn.ant-btn),
+:deep(.notification-toolbar-query-btn.ant-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  border-radius: 16px;
+  border-color: rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #0f172a !important;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+}
+
+:deep(.application-toolbar-icon-btn.ant-btn) {
+  width: 42px;
+  padding: 0;
+}
+
+:deep(.application-toolbar-action-btn.ant-btn:hover),
+:deep(.application-toolbar-action-btn.ant-btn:focus),
+:deep(.application-toolbar-icon-btn.ant-btn:hover),
+:deep(.application-toolbar-icon-btn.ant-btn:focus),
+:deep(.notification-toolbar-query-btn.ant-btn:hover),
+:deep(.notification-toolbar-query-btn.ant-btn:focus) {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.76) !important;
+  color: #0f172a !important;
+}
+
+.notification-search-overlay {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: var(--layout-sider-width, 220px);
+  z-index: 1200;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 84px 24px 24px;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(8px) saturate(112%);
+  -webkit-backdrop-filter: blur(8px) saturate(112%);
+}
+
+.notification-search-floating-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(100%, 480px);
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.notification-search-floating-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.6)),
+    rgba(255, 255, 255, 0.44);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.82),
+    0 16px 32px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px) saturate(125%);
+  -webkit-backdrop-filter: blur(18px) saturate(125%);
+  padding: 0 14px;
+}
+
+.notification-search-floating-icon {
+  color: rgba(148, 163, 184, 0.9);
+  font-size: 14px;
+}
+
+.notification-search-floating-field {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 34px;
+}
+
+.notification-search-floating-field::placeholder {
+  color: rgba(71, 85, 105, 0.72);
+}
+
+.notification-search-floating-input:focus-within {
+  border-color: rgba(255, 255, 255, 0.82);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.66)),
+    rgba(255, 255, 255, 0.5);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 18px 36px rgba(15, 23, 42, 0.1);
+}
+
+.notification-search-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.52), rgba(255, 255, 255, 0.36)),
+    rgba(255, 255, 255, 0.22);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 16px 30px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(18px) saturate(124%);
+  -webkit-backdrop-filter: blur(18px) saturate(124%);
+}
+
+.notification-search-suggestion,
+.notification-search-suggestion-loading {
   width: 100%;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.34);
+  color: rgba(51, 65, 85, 0.76);
+  padding: 10px 12px;
+  text-align: left;
 }
 
-.section-alert {
+.notification-search-suggestion {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  cursor: pointer;
+  transition: background 0.18s ease, transform 0.18s ease;
+}
+
+.notification-search-suggestion:hover {
+  background: rgba(255, 255, 255, 0.54);
+  transform: translateY(-1px);
+}
+
+.notification-search-suggestion-title,
+.notification-search-suggestion-subtitle {
+  display: block;
+}
+
+.notification-search-suggestion-title {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.notification-search-suggestion-subtitle {
+  color: rgba(51, 65, 85, 0.74);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.notification-search-fade-enter-active,
+.notification-search-fade-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.notification-search-fade-enter-from,
+.notification-search-fade-leave-to {
+  opacity: 0;
+}
+
+.notification-search-fade-enter-from .notification-search-floating-panel,
+.notification-search-fade-leave-to .notification-search-floating-panel {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.notification-search-fade-enter-to .notification-search-floating-panel,
+.notification-search-fade-leave-from .notification-search-floating-panel {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.notification-table-card {
+  background: transparent;
+  box-shadow: none;
+}
+
+.notification-table-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
+}
+
+.notification-tabs :deep(.ant-tabs-nav) {
   margin-bottom: 16px;
+}
+
+.notification-table :deep(.ant-table-container) {
+  overflow: hidden;
+  border-radius: 0 !important;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+.notification-table :deep(.ant-table),
+.notification-table :deep(.ant-table-content),
+.notification-table :deep(.ant-table-body) {
+  border-radius: 0 !important;
+}
+
+.notification-table :deep(.ant-table-thead > tr > th) {
+  border-bottom: none;
+  background: linear-gradient(180deg, #243247, #1f2a3d) !important;
+  color: rgba(239, 246, 255, 0.96);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.notification-table :deep(.ant-table-thead > tr > th:first-child) {
+  border-top-left-radius: 0 !important;
+}
+
+.notification-table :deep(.ant-table-thead > tr > th:last-child) {
+  border-top-right-radius: 0 !important;
+}
+
+.notification-table :deep(.ant-table-tbody > tr > td) {
+  border-bottom-color: rgba(226, 232, 240, 0.78);
+  color: #0f172a;
+}
+
+.notification-table :deep(.ant-table-tbody > tr:last-child > td:first-child) {
+  border-bottom-left-radius: 0 !important;
+}
+
+.notification-table :deep(.ant-table-tbody > tr:last-child > td:last-child) {
+  border-bottom-right-radius: 0 !important;
+}
+
+.notification-table :deep(.ant-table-cell-fix-right) {
+  background: #fff !important;
+}
+
+.notification-table :deep(.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right) {
+  background: #f8fafc !important;
+}
+
+.pagination-area {
+  margin-top: var(--space-6);
+  display: flex;
+  justify-content: flex-end;
 }
 
 .notification-template-preset-bar {
@@ -1738,41 +2574,695 @@ onMounted(async () => {
   color: #7b8798;
 }
 
-.notification-source-modal-wrap :deep(.ant-modal) {
-  width: min(560px, calc(100vw - 32px)) !important;
-}
-
-.notification-template-modal-wrap :deep(.ant-modal) {
+/* ---- template form modal shell ---- */
+.template-form-modal-wrap :deep(.ant-modal) {
   width: min(680px, calc(100vw - 32px)) !important;
 }
 
-.notification-hook-modal-wrap :deep(.ant-modal) {
+.template-form-modal-wrap :deep(.ant-modal-content) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(circle at top right, rgba(217, 119, 6, 0.08), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow:
+    0 32px 90px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+}
+
+.template-form-modal-wrap :deep(.ant-modal-content)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.template-form-modal-wrap :deep(.ant-modal-header) {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
+.template-form-modal-wrap :deep(.ant-modal-body) {
+  position: relative;
+  z-index: 1;
+  padding-top: 10px;
+}
+
+/* ---- template form titlebar ---- */
+.template-form-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.template-form-modal-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.template-form-modal-save-btn.ant-btn {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+/* ---- template form layout ---- */
+.template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- template form note ---- */
+.template-form-note {
+  position: relative;
+  padding: 0 0 0 14px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.template-form-note::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(217, 119, 6, 0.42), rgba(245, 158, 11, 0.16));
+}
+
+/* ---- template form panels ---- */
+.template-form-panel {
+  padding: 0;
+}
+
+.template-form-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.template-form-panel-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(203, 213, 225, 0.78), rgba(226, 232, 240, 0));
+  transform: translateY(1px);
+}
+
+.template-form-note + .template-form-panel,
+.template-form-panel + .template-form-panel {
+  padding-top: 18px;
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.template-form-panel--context {
+  padding-bottom: 4px;
+}
+
+/* ---- template form context block ---- */
+.template-form-context {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.template-form-context-item {
+  min-width: 0;
+  padding: 0 0 10px;
+  border-bottom: 1px dashed rgba(226, 232, 240, 0.92);
+}
+
+.template-form-context-label {
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.template-form-context-value {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
+/* ---- template form label ---- */
+.template-form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #0f172a;
+}
+
+.template-form-required-tag {
+  margin-inline-end: 0;
+  border: 1px solid rgba(253, 230, 138, 0.72);
+  background: rgba(255, 251, 235, 0.96);
+  color: #b45309;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+/* ---- template form item spacing & label ---- */
+.template-form :deep(.ant-form-item) {
+  margin-bottom: 14px;
+}
+
+.template-form :deep(.ant-form-item-label > label) {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ---- template form input/select transparent ---- */
+.template-form :deep(.ant-input),
+.template-form :deep(.ant-select-selector),
+.template-form :deep(.ant-input-affix-wrapper) {
+  background: transparent !important;
+  border-color: rgba(203, 213, 225, 0.88) !important;
+  box-shadow: none !important;
+}
+
+.template-form :deep(.ant-input:hover),
+.template-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector),
+.template-form :deep(.ant-input-affix-wrapper:hover) {
+  border-color: rgba(245, 158, 11, 0.48) !important;
+}
+
+.template-form :deep(.ant-input:focus),
+.template-form :deep(.ant-input-focused),
+.template-form :deep(.ant-input-affix-wrapper-focused),
+.template-form :deep(.ant-select-focused .ant-select-selector) {
+  background: transparent !important;
+  border-color: rgba(217, 119, 6, 0.56) !important;
+  box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12) !important;
+}
+
+.template-form :deep(.ant-select-disabled .ant-select-selector),
+.template-form :deep(.ant-input[disabled]) {
+  background: transparent !important;
+  color: #94a3b8 !important;
+}
+
+.template-form :deep(.ant-select-selection-placeholder),
+.template-form :deep(.ant-input::placeholder) {
+  color: #94a3b8;
+}
+
+/* ---- hook form modal shell ---- */
+.hook-form-modal-wrap :deep(.ant-modal) {
   width: min(520px, calc(100vw - 32px)) !important;
 }
 
-.notification-source-modal-wrap :deep(.ant-modal-content),
-.notification-template-modal-wrap :deep(.ant-modal-content),
-.notification-hook-modal-wrap :deep(.ant-modal-content) {
-  border-radius: 18px;
+.hook-form-modal-wrap :deep(.ant-modal-content) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(circle at top right, rgba(16, 185, 129, 0.08), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow:
+    0 32px 90px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
 }
 
-.notification-source-modal-wrap :deep(.ant-modal-body),
-.notification-template-modal-wrap :deep(.ant-modal-body),
-.notification-hook-modal-wrap :deep(.ant-modal-body) {
+.hook-form-modal-wrap :deep(.ant-modal-content)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hook-form-modal-wrap :deep(.ant-modal-header) {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
+.hook-form-modal-wrap :deep(.ant-modal-body) {
+  position: relative;
+  z-index: 1;
+  padding-top: 10px;
+}
+
+/* ---- hook form titlebar ---- */
+.hook-form-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.hook-form-modal-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.hook-form-modal-save-btn.ant-btn {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+/* ---- hook form layout ---- */
+.hook-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- hook form note ---- */
+.hook-form-note {
+  position: relative;
+  padding: 0 0 0 14px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.hook-form-note::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(16, 185, 129, 0.42), rgba(52, 211, 153, 0.16));
+}
+
+/* ---- hook form panels ---- */
+.hook-form-panel {
+  padding: 0;
+}
+
+.hook-form-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.hook-form-panel-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(203, 213, 225, 0.78), rgba(226, 232, 240, 0));
+  transform: translateY(1px);
+}
+
+.hook-form-note + .hook-form-panel,
+.hook-form-panel + .hook-form-panel {
   padding-top: 18px;
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.hook-form-panel--context {
+  padding-bottom: 4px;
+}
+
+/* ---- hook form context block ---- */
+.hook-form-context {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.hook-form-context-item {
+  min-width: 0;
+  padding: 0 0 10px;
+  border-bottom: 1px dashed rgba(226, 232, 240, 0.92);
+}
+
+.hook-form-context-label {
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hook-form-context-value {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
+/* ---- hook form label ---- */
+.hook-form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #0f172a;
+}
+
+.hook-form-required-tag {
+  margin-inline-end: 0;
+  border: 1px solid rgba(167, 243, 208, 0.72);
+  background: rgba(236, 253, 245, 0.96);
+  color: #047857;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+/* ---- hook form item spacing & label ---- */
+.hook-form :deep(.ant-form-item) {
+  margin-bottom: 14px;
+}
+
+.hook-form :deep(.ant-form-item-label > label) {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ---- hook form input/select transparent ---- */
+.hook-form :deep(.ant-input),
+.hook-form :deep(.ant-select-selector),
+.hook-form :deep(.ant-input-affix-wrapper) {
+  background: transparent !important;
+  border-color: rgba(203, 213, 225, 0.88) !important;
+  box-shadow: none !important;
+}
+
+.hook-form :deep(.ant-input:hover),
+.hook-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector),
+.hook-form :deep(.ant-input-affix-wrapper:hover) {
+  border-color: rgba(16, 185, 129, 0.48) !important;
+}
+
+.hook-form :deep(.ant-input:focus),
+.hook-form :deep(.ant-input-focused),
+.hook-form :deep(.ant-input-affix-wrapper-focused),
+.hook-form :deep(.ant-select-focused .ant-select-selector) {
+  background: transparent !important;
+  border-color: rgba(16, 185, 129, 0.56) !important;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12) !important;
+}
+
+.hook-form :deep(.ant-select-disabled .ant-select-selector),
+.hook-form :deep(.ant-input[disabled]) {
+  background: transparent !important;
+  color: #94a3b8 !important;
+}
+
+.hook-form :deep(.ant-select-selection-placeholder),
+.hook-form :deep(.ant-input::placeholder) {
+  color: #94a3b8;
+}
+
+/* ---- source form modal shell ---- */
+.source-form-modal-wrap :deep(.ant-modal) {
+  width: min(560px, calc(100vw - 32px)) !important;
+}
+
+.source-form-modal-wrap :deep(.ant-modal-content) {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  border-radius: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.08), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow:
+    0 32px 90px rgba(15, 23, 42, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(18px) saturate(180%);
+  -webkit-backdrop-filter: blur(18px) saturate(180%);
+}
+
+.source-form-modal-wrap :deep(.ant-modal-content)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.02) 58%),
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.34), transparent 32%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.source-form-modal-wrap :deep(.ant-modal-header) {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(226, 232, 240, 0.92);
+  background: transparent;
+}
+
+.source-form-modal-wrap :deep(.ant-modal-body) {
+  position: relative;
+  z-index: 1;
+  padding-top: 10px;
+}
+
+/* ---- source form titlebar ---- */
+.source-form-modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.source-form-modal-title {
+  min-width: 0;
+  color: #0f172a;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.source-form-modal-save-btn.ant-btn {
+  flex: none;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+/* ---- source form layout ---- */
+.source-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ---- source form note ---- */
+.source-form-note {
+  position: relative;
+  padding: 0 0 0 14px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.source-form-note::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 3px;
+  bottom: 3px;
+  width: 4px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.42), rgba(96, 165, 250, 0.16));
+}
+
+/* ---- source form panels ---- */
+.source-form-panel {
+  padding: 0;
+}
+
+.source-form-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.source-form-panel-title::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(203, 213, 225, 0.78), rgba(226, 232, 240, 0));
+  transform: translateY(1px);
+}
+
+.source-form-note + .source-form-panel,
+.source-form-panel + .source-form-panel {
+  padding-top: 18px;
+  border-top: 1px solid rgba(226, 232, 240, 0.92);
+}
+
+.source-form-panel--context {
+  padding-bottom: 4px;
+}
+
+/* ---- source form context block ---- */
+.source-form-context {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.source-form-context-item {
+  min-width: 0;
+  padding: 0 0 10px;
+  border-bottom: 1px dashed rgba(226, 232, 240, 0.92);
+}
+
+.source-form-context-label {
+  margin-bottom: 4px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.source-form-context-value {
+  color: #0f172a;
+  font-size: 14px;
+  line-height: 1.6;
+  font-weight: 600;
+}
+
+/* ---- source form label ---- */
+.source-form-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #0f172a;
+}
+
+.source-form-required-tag {
+  margin-inline-end: 0;
+  border: 1px solid rgba(191, 219, 254, 0.72);
+  background: rgba(239, 246, 255, 0.96);
+  color: #2563eb;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+/* ---- source form item spacing & label ---- */
+.source-form :deep(.ant-form-item) {
+  margin-bottom: 14px;
+}
+
+.source-form :deep(.ant-form-item-label > label) {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ---- source form input/select transparent ---- */
+.source-form :deep(.ant-input),
+.source-form :deep(.ant-select-selector),
+.source-form :deep(.ant-input-affix-wrapper) {
+  background: transparent !important;
+  border-color: rgba(203, 213, 225, 0.88) !important;
+  box-shadow: none !important;
+}
+
+.source-form :deep(.ant-input:hover),
+.source-form :deep(.ant-select:not(.ant-select-disabled):hover .ant-select-selector),
+.source-form :deep(.ant-input-affix-wrapper:hover) {
+  border-color: rgba(96, 165, 250, 0.48) !important;
+}
+
+.source-form :deep(.ant-input:focus),
+.source-form :deep(.ant-input-focused),
+.source-form :deep(.ant-input-affix-wrapper-focused),
+.source-form :deep(.ant-select-focused .ant-select-selector) {
+  background: transparent !important;
+  border-color: rgba(59, 130, 246, 0.56) !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12) !important;
+}
+
+.source-form :deep(.ant-select-disabled .ant-select-selector),
+.source-form :deep(.ant-input[disabled]) {
+  background: transparent !important;
+  color: #94a3b8 !important;
+}
+
+.source-form :deep(.ant-select-selection-placeholder),
+.source-form :deep(.ant-input::placeholder) {
+  color: #94a3b8;
 }
 
 @media (max-width: 900px) {
-  .toolbar-row,
+  .notification-page-header {
+    flex-wrap: wrap;
+  }
+
+  .notification-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  :deep(.notification-toolbar-select.ant-select) {
+    flex: 1 1 140px;
+  }
+
   .condition-section-head,
   .notification-preview-head,
   .notification-template-preset-bar {
     flex-direction: column;
     align-items: flex-start;
-  }
-
-  .toolbar-actions {
-    margin-left: 0;
   }
 }
 </style>

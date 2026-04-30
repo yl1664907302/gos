@@ -8,13 +8,15 @@ import {
   UserOutlined,
 } from '@ant-design/icons-vue'
 import { message } from 'ant-design-vue'
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
+const siderCollapsed = ref(false)
+const viewportWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1440)
 
 const activeMenuKey = computed(() => {
   if (route.path.startsWith('/system/users')) {
@@ -43,6 +45,9 @@ const activeMenuKey = computed(() => {
   }
   if (route.path.startsWith('/components/jenkins')) {
     return ['jenkins-pipeline-list']
+  }
+  if (route.path.startsWith('/components/argocd/applications')) {
+    return ['argocd-application-management']
   }
   if (route.path.startsWith('/components/argocd')) {
     return ['argocd-management']
@@ -109,6 +114,7 @@ const openMenuKeys = computed(() => {
   }
   return []
 })
+const visibleOpenMenuKeys = computed(() => (siderCollapsed.value ? [] : openMenuKeys.value))
 
 const displayName = computed(() => {
   const name = String(authStore.profile?.display_name || '').trim()
@@ -159,6 +165,16 @@ const showComponentMenu = computed(
 )
 const showReleaseMenu = computed(() => true)
 const showSystemMenu = computed(() => canManageUser.value || canManagePermission.value || canManageNotification.value)
+const siderExpandedWidth = computed(() => {
+  if (viewportWidth.value <= 768) {
+    return 180
+  }
+  if (viewportWidth.value <= 1024) {
+    return 200
+  }
+  return 220
+})
+const currentSiderWidth = computed(() => (siderCollapsed.value ? 0 : siderExpandedWidth.value))
 
 function goToApplications() {
   void router.push('/applications')
@@ -197,6 +213,10 @@ function goToExecutorParamManagement() {
 
 function goToArgoCDManagement() {
   void router.push('/components/argocd')
+}
+
+function goToArgoCDApplications() {
+  void router.push('/components/argocd/applications')
 }
 
 function goToGitOpsManagement() {
@@ -246,25 +266,49 @@ function goToSystemSettings() {
 async function handleLogout() {
   await authStore.logout()
   message.success('已退出登录')
-  void router.replace('/login')
+  await router.replace('/login')
 }
+
+function handleResize() {
+  viewportWidth.value = window.innerWidth
+}
+
+function toggleSider() {
+  siderCollapsed.value = !siderCollapsed.value
+}
+
+onMounted(() => {
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+})
 </script>
 
 <template>
-  <a-layout class="app-layout">
-    <a-layout-sider class="app-sider" theme="dark" :width="220">
+  <a-layout class="app-layout" :style="{ '--layout-sider-width': `${currentSiderWidth}px` }">
+    <a-layout-sider
+      v-model:collapsed="siderCollapsed"
+      class="app-sider"
+      :class="{ 'app-sider-collapsed': siderCollapsed }"
+      theme="dark"
+      :width="siderExpandedWidth"
+      :collapsed-width="0"
+      :trigger="null"
+      collapsible
+    >
       <div class="sider-brand" @click="goToApplications">
         <div class="brand-mark">G</div>
         <div class="brand-copy">
           <div class="brand-title">GOS Release</div>
-          <div class="brand-subtitle">发布工作台</div>
         </div>
       </div>
       <a-menu
         mode="inline"
         theme="dark"
         :selected-keys="activeMenuKey"
-        :open-keys="openMenuKeys"
+        :open-keys="visibleOpenMenuKeys"
         class="sider-menu"
       >
         <a-sub-menu v-if="showApplicationMenu" key="application-management">
@@ -284,6 +328,21 @@ async function handleLogout() {
           </a-menu-item>
           <a-menu-item v-if="canManagePlatformParam" key="platform-param-dicts" @click="goToPlatformParamDicts">
             标准字库
+          </a-menu-item>
+        </a-sub-menu>
+
+        <a-sub-menu v-if="showReleaseMenu" key="release-management">
+          <template #icon>
+            <RocketOutlined />
+          </template>
+          <template #title>发布管理</template>
+
+          <a-menu-item key="release-orders" @click="goToReleaseOrders">发布单</a-menu-item>
+          <a-menu-item key="release-approval-workbench" @click="goToReleaseApprovalWorkbench">
+            审批工作台
+          </a-menu-item>
+          <a-menu-item v-if="canManageReleaseTemplate" key="release-templates" @click="goToReleaseTemplates">
+            发布模板
           </a-menu-item>
         </a-sub-menu>
 
@@ -307,6 +366,9 @@ async function handleLogout() {
           <a-menu-item v-if="canViewArgoCD" key="argocd-management" @click="goToArgoCDManagement">
             ArgoCD管理
           </a-menu-item>
+          <a-menu-item v-if="canViewArgoCD" key="argocd-application-management" @click="goToArgoCDApplications">
+            ArgoCD应用
+          </a-menu-item>
           <a-menu-item v-if="canViewGitOps" key="gitops-management" @click="goToGitOpsManagement">
             GitOps管理
           </a-menu-item>
@@ -323,21 +385,6 @@ async function handleLogout() {
               任务管理
             </a-menu-item>
           </a-sub-menu>
-        </a-sub-menu>
-
-        <a-sub-menu v-if="showReleaseMenu" key="release-management">
-          <template #icon>
-            <RocketOutlined />
-          </template>
-          <template #title>发布管理</template>
-
-          <a-menu-item key="release-orders" @click="goToReleaseOrders">发布单</a-menu-item>
-          <a-menu-item key="release-approval-workbench" @click="goToReleaseApprovalWorkbench">
-            审批工作台
-          </a-menu-item>
-          <a-menu-item v-if="canManageReleaseTemplate" key="release-templates" @click="goToReleaseTemplates">
-            发布模板
-          </a-menu-item>
         </a-sub-menu>
 
         <a-sub-menu v-if="showSystemMenu" key="system-management">
@@ -370,7 +417,12 @@ async function handleLogout() {
               </svg>
             </a>
           </div>
-          <div class="sider-footer-role">{{ roleText }}</div>
+          <div class="sider-footer-role-group">
+            <div class="sider-footer-role">{{ roleText }}</div>
+            <button class="sider-footer-toggle" type="button" @click="toggleSider" aria-label="折叠菜单">
+              ‹
+            </button>
+          </div>
         </div>
         <div class="sider-footer-user">
           <UserOutlined />
@@ -384,10 +436,17 @@ async function handleLogout() {
         </a-button>
       </div>
     </a-layout-sider>
+    <button v-if="siderCollapsed" class="layout-sider-restore" type="button" @click="toggleSider" aria-label="展开菜单">
+      ›
+    </button>
 
     <a-layout>
       <a-layout-content class="app-content">
-        <router-view />
+        <router-view v-slot="{ Component, route }">
+          <Transition name="layout-route-switch" mode="out-in">
+            <component :is="Component" :key="route.fullPath" class="layout-route-view" />
+          </Transition>
+        </router-view>
       </a-layout-content>
     </a-layout>
   </a-layout>
@@ -397,9 +456,9 @@ async function handleLogout() {
 .app-layout {
   min-height: 100vh;
   background:
-    radial-gradient(circle at top left, rgba(59, 130, 246, 0.12), transparent 24%),
-    radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 22%),
-    linear-gradient(180deg, #eaf0f8 0%, #edf2f8 18%, #f3f6fb 100%);
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.055), transparent 30%),
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.035), transparent 26%),
+    linear-gradient(180deg, #fbfdff 0%, #f8fbff 46%, #fbfcff 100%);
 }
 
 .app-sider {
@@ -409,11 +468,22 @@ async function handleLogout() {
   height: 100vh;
   min-height: 100vh;
   overflow: hidden;
+  z-index: 20;
+  isolation: isolate;
   background:
-    radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.2), transparent 30%),
-    linear-gradient(180deg, #0d1728 0%, #101b2d 52%, #0b1424 100%) !important;
-  border-inline-end: 1px solid rgba(96, 165, 250, 0.1);
-  box-shadow: 18px 0 44px rgba(15, 23, 42, 0.14);
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.12), transparent 24%),
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.18), transparent 30%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.99), rgba(15, 23, 42, 0.99) 42%, rgba(19, 30, 53, 0.99)) !important;
+  border-inline-end: none;
+  box-shadow:
+    inset -1px 0 0 rgba(255, 255, 255, 0.04),
+    18px 0 44px rgba(2, 6, 23, 0.28);
+  transition:
+    width 0.22s ease,
+    min-width 0.22s ease,
+    max-width 0.22s ease,
+    flex-basis 0.22s ease,
+    opacity 0.18s ease;
 }
 
 .sider-brand {
@@ -423,8 +493,9 @@ async function handleLogout() {
   min-height: 88px;
   padding: 20px 22px 18px;
   color: #fff;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+  border-bottom: 1px solid rgba(71, 85, 105, 0.34);
   cursor: pointer;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.28), rgba(15, 23, 42, 0));
 }
 
 .brand-mark {
@@ -434,14 +505,17 @@ async function handleLogout() {
   width: 38px;
   height: 38px;
   border-radius: 14px;
-  border: 1px solid rgba(96, 165, 250, 0.24);
+  border: 1px solid rgba(56, 189, 248, 0.22);
   background:
-    linear-gradient(180deg, rgba(37, 99, 235, 0.3), rgba(15, 23, 42, 0.18)),
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.16), transparent 42%),
+    linear-gradient(180deg, rgba(37, 99, 235, 0.24), rgba(15, 23, 42, 0.42)),
     rgba(59, 130, 246, 0.08);
   color: #eff6ff;
   font-size: 18px;
   font-weight: 800;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 10px 22px rgba(2, 6, 23, 0.18);
 }
 
 .brand-copy {
@@ -455,12 +529,6 @@ async function handleLogout() {
   letter-spacing: 0.02em;
 }
 
-.brand-subtitle {
-  margin-top: 4px;
-  color: rgba(191, 219, 254, 0.72);
-  font-size: 12px;
-  letter-spacing: 0.08em;
-}
 
 .sider-menu {
   flex: 1 1 auto;
@@ -473,10 +541,78 @@ async function handleLogout() {
 
 .app-content {
   width: 100%;
-  max-width: 1520px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   padding: 28px 28px 32px;
   position: relative;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.layout-route-view {
+  min-height: calc(100vh - 60px);
+}
+
+.layout-route-switch-enter-active,
+.layout-route-switch-leave-active {
+  transition: opacity 0.12s ease;
+}
+
+.layout-route-switch-enter-from {
+  opacity: 0;
+}
+
+.layout-route-switch-leave-to {
+  opacity: 0;
+}
+
+.sider-footer-toggle,
+.layout-sider-restore {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgba(191, 219, 254, 0.76);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.18s ease, opacity 0.18s ease, transform 0.18s ease;
+}
+
+.sider-footer-toggle {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+}
+
+.layout-sider-restore {
+  position: fixed;
+  top: 50%;
+  left: 8px;
+  z-index: 36;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+}
+
+.sider-footer-toggle:hover,
+.sider-footer-toggle:focus,
+.sider-footer-toggle:focus-visible,
+.layout-sider-restore:hover,
+.layout-sider-restore:focus,
+.layout-sider-restore:focus-visible {
+  color: #eff6ff;
+  transform: translateY(-1px);
+}
+
+.layout-sider-restore:hover,
+.layout-sider-restore:focus,
+.layout-sider-restore:focus-visible {
+  transform: translateY(calc(-50% - 1px));
 }
 
 .app-content::before {
@@ -489,10 +625,21 @@ async function handleLogout() {
 }
 
 .app-sider :deep(.ant-layout-sider-children) {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
   height: 100%;
   background: transparent;
+}
+
+.app-sider-collapsed {
+  box-shadow: none;
+}
+
+.app-sider-collapsed :deep(.ant-layout-sider-children) {
+  pointer-events: none;
+  visibility: hidden;
 }
 
 .sider-menu :deep(.ant-menu),
@@ -507,13 +654,22 @@ async function handleLogout() {
   margin: 6px 0;
   border-radius: 14px;
   color: rgba(226, 232, 240, 0.82) !important;
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.18) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
   transition: all 0.2s ease;
 }
 
 .sider-menu :deep(.ant-menu-submenu-title:hover),
 .sider-menu :deep(.ant-menu-item:hover) {
   color: #f8fafc !important;
-  background: rgba(51, 65, 85, 0.58) !important;
+  border-color: rgba(71, 85, 105, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 44%),
+    rgba(30, 41, 59, 0.72) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 10px 18px rgba(2, 6, 23, 0.16);
 }
 
 .sider-menu :deep(.ant-menu-submenu-title .ant-menu-title-content),
@@ -528,7 +684,10 @@ async function handleLogout() {
 
 .sider-menu :deep(.ant-menu-submenu-open > .ant-menu-submenu-title) {
   color: #f8fafc !important;
-  background: rgba(30, 41, 59, 0.66) !important;
+  border-color: rgba(71, 85, 105, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.1), transparent 42%),
+    rgba(30, 41, 59, 0.72) !important;
 }
 
 .sider-menu :deep(.ant-menu-submenu-selected > .ant-menu-submenu-title) {
@@ -537,12 +696,13 @@ async function handleLogout() {
 
 .sider-menu :deep(.ant-menu-item-selected) {
   color: #eff6ff !important;
-  border: 1px solid rgba(96, 165, 250, 0.24);
+  border: 1px solid rgba(56, 189, 248, 0.24);
   background:
-    linear-gradient(135deg, rgba(29, 78, 216, 0.62), rgba(37, 99, 235, 0.34)) !important;
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.22), transparent 46%),
+    linear-gradient(135deg, rgba(29, 78, 216, 0.58), rgba(37, 99, 235, 0.28)) !important;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 8px 18px rgba(15, 23, 42, 0.16);
+    0 10px 20px rgba(2, 6, 23, 0.18);
 }
 
 .sider-menu :deep(.ant-menu-item-selected .anticon),
@@ -562,6 +722,7 @@ async function handleLogout() {
   padding-inline-start: 16px !important;
   color: rgba(203, 213, 225, 0.84) !important;
   border-radius: 12px;
+  background: rgba(2, 6, 23, 0.16) !important;
 }
 
 .sider-menu :deep(.ant-menu-sub.ant-menu-inline .ant-menu-item::before) {
@@ -576,15 +737,22 @@ async function handleLogout() {
   margin-top: auto;
   flex: 0 0 auto;
   padding: 16px 14px 18px;
-  border-top: 1px solid rgba(148, 163, 184, 0.12);
-  background: linear-gradient(180deg, rgba(9, 14, 24, 0), rgba(9, 14, 24, 0.34));
+  border-top: 1px solid rgba(71, 85, 105, 0.26);
+  background: transparent;
 }
 
 .sider-footer-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.sider-footer-role-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .sider-footer-version {
@@ -593,7 +761,7 @@ async function handleLogout() {
   gap: 6px;
   padding: 2px 8px;
   border-radius: 6px;
-  background: rgba(148, 163, 184, 0.1);
+  background: rgba(15, 23, 42, 0.42);
   color: rgba(191, 219, 254, 0.6);
   font-size: 11px;
   font-weight: 500;
@@ -621,8 +789,8 @@ async function handleLogout() {
   align-items: center;
   padding: 4px 10px;
   border-radius: 999px;
-  border: 1px solid rgba(96, 165, 250, 0.18);
-  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.16);
+  background: rgba(37, 99, 235, 0.16);
   color: #dbeafe;
   font-size: 12px;
   font-weight: 600;
@@ -644,7 +812,7 @@ async function handleLogout() {
 
 .sider-menu::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(148, 163, 184, 0.24);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.7), rgba(34, 197, 94, 0.6));
 }
 
 .sider-menu::-webkit-scrollbar-track {
@@ -657,35 +825,26 @@ async function handleLogout() {
   justify-content: flex-start;
   border-radius: 12px;
   color: rgba(226, 232, 240, 0.82);
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.18);
 }
 
 .sider-footer-logout:hover,
 .sider-footer-logout:focus {
   color: #eff6ff;
-  background: rgba(51, 65, 85, 0.72);
+  border-color: rgba(71, 85, 105, 0.34);
+  background:
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 44%),
+    rgba(30, 41, 59, 0.72);
 }
 
 @media (max-width: 1024px) {
-  .app-sider {
-    width: 200px !important;
-    min-width: 200px !important;
-    max-width: 200px !important;
-    flex: 0 0 200px !important;
-  }
-
   .app-content {
     padding: 20px;
   }
 }
 
 @media (max-width: 768px) {
-  .app-sider {
-    width: 180px !important;
-    min-width: 180px !important;
-    max-width: 180px !important;
-    flex: 0 0 180px !important;
-  }
-
   .sider-brand {
     padding: 0 12px;
     min-height: 76px;
@@ -698,6 +857,13 @@ async function handleLogout() {
 
   .app-content {
     padding: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .layout-route-switch-enter-active,
+  .layout-route-switch-leave-active {
+    transition: none;
   }
 }
 </style>

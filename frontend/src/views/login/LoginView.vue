@@ -51,7 +51,6 @@ async function handleSubmit() {
     <div class="login-shell">
       <a-card class="login-card" :bordered="false">
         <div class="login-card-head">
-          <div class="login-card-eyebrow">GOS Release</div>
           <h2 class="login-title">GOS Release</h2>
         </div>
 
@@ -60,6 +59,7 @@ async function handleSubmit() {
           layout="vertical"
           :model="formState"
           :rules="rules"
+          :required-mark="false"
           autocomplete="off"
           class="login-form"
           @keyup.enter="handleSubmit"
@@ -83,7 +83,7 @@ async function handleSubmit() {
           <a-button type="primary" block size="large" :loading="submitting" @click="handleSubmit">登录系统</a-button>
         </a-form>
 
-        <div class="login-footnote">内部部署平台 · 用户与权限统一入口</div>
+        <div class="login-footnote">标准化应用发布平台</div>
       </a-card>
     </div>
   </div>
@@ -142,16 +142,8 @@ async function handleSubmit() {
   text-align: left;
 }
 
-.login-card-eyebrow {
-  color: #64748b;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
 .login-title {
-  margin: 10px 0 0;
+  margin: 0;
   color: #0f172a;
   font-size: 38px;
   font-weight: 800;

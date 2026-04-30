@@ -23,6 +23,13 @@ type Repository interface {
 	) error
 	CreateDeploySnapshot(ctx context.Context, snapshot DeploySnapshot) error
 	GetDeploySnapshotByOrderID(ctx context.Context, releaseOrderID string) (DeploySnapshot, error)
+	UpsertAppReleaseState(ctx context.Context, state AppReleaseState) error
+	GetAppReleaseStateByOrderID(ctx context.Context, releaseOrderID string) (AppReleaseState, error)
+	GetAppReleaseStateByID(ctx context.Context, id string) (AppReleaseState, error)
+	GetCurrentAppReleaseState(ctx context.Context, applicationID string, envCode string) (AppReleaseState, error)
+	IsLatestOrderByApplicationEnv(ctx context.Context, applicationID string, envCode string, releaseOrderID string) (bool, error)
+	ConfirmAppReleaseState(ctx context.Context, releaseOrderID string, confirmedBy string, confirmedAt time.Time) (AppReleaseState, error)
+	ListCurrentAppReleaseStateSummaries(ctx context.Context, applicationIDs []string) ([]AppReleaseStateSummary, error)
 	UpdateConcurrentBatch(ctx context.Context, orderIDs []string, batchNo string, isConcurrent bool) error
 	ListByConcurrentBatchNo(ctx context.Context, batchNo string) ([]ReleaseOrder, error)
 	FindActiveOrderByApplicationEnv(ctx context.Context, applicationID string, envCode string, excludeReleaseOrderID string) (ReleaseOrder, error)
@@ -33,6 +40,7 @@ type Repository interface {
 	ReleaseExecutionLocksByOrderID(ctx context.Context, releaseOrderID string, status ExecutionLockStatus, releasedAt time.Time) error
 	GetByID(ctx context.Context, id string) (ReleaseOrder, error)
 	List(ctx context.Context, filter ListFilter) ([]ReleaseOrder, int64, error)
+	ListStats(ctx context.Context, filter ListFilter) (ReleaseOrderStats, error)
 	ListTrackableOrders(ctx context.Context, page int, pageSize int) ([]ReleaseOrder, int64, error)
 	UpdateStatus(
 		ctx context.Context,
@@ -115,6 +123,15 @@ type Repository interface {
 	ListApprovalRecordSummaries(ctx context.Context, filter ApprovalRecordListFilter) ([]ReleaseOrderApprovalRecordSummary, int64, error)
 }
 
+type ReleaseOrderStats struct {
+	Total     int64
+	Pending   int64
+	Running   int64
+	Success   int64
+	Failed    int64
+	Cancelled int64
+}
+
 type ListFilter struct {
 	ApplicationID               string
 	ApplicationIDs              []string
@@ -122,10 +139,15 @@ type ListFilter struct {
 	VisibleToUserID             string
 	ApprovalApproverUserID      string
 	CreatorUserID               string
+	Keyword                     string
+	TriggeredBy                 string
 	BindingID                   string
 	EnvCode                     string
+	OperationType               OperationType
 	Status                      OrderStatus
 	TriggerType                 TriggerType
+	CreatedAtFrom               *time.Time
+	CreatedAtTo                 *time.Time
 	Page                        int
 	PageSize                    int
 }

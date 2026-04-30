@@ -140,7 +140,7 @@ func (r *PlatformParamRepository) ensureBuiltinParams(ctx context.Context) error
 			ID:            "ppd-app-key",
 			ParamKey:      "app_key",
 			Name:          "应用标识",
-			Description:   "平台内置；默认取应用 Key，用于审计、GitOps 提交信息与跨环境识别。",
+			Description:   "",
 			ParamType:     domain.ParamTypeString,
 			Required:      false,
 			GitOpsLocator: false,

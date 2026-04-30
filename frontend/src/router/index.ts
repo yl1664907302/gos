@@ -4,14 +4,15 @@ import { useAuthStore } from '../stores/auth'
 
 const AppLayout = () => import('../layouts/AppLayout.vue')
 const ApplicationCreateView = () => import('../views/application/ApplicationCreateView.vue')
-const ApplicationDetailView = () => import('../views/application/ApplicationDetailView.vue')
 const ApplicationEditView = () => import('../views/application/ApplicationEditView.vue')
 const ApplicationListView = () => import('../views/application/ApplicationListView.vue')
 const ApplicationPipelineBindingView = () => import('../views/application/ApplicationPipelineBindingView.vue')
 const ProjectManagementView = () => import('../views/application/ProjectManagementView.vue')
 const PlatformParamDictView = () => import('../views/application/PlatformParamDictView.vue')
 const ArgoCDManagementView = () => import('../views/component/ArgoCDManagementView.vue')
+const ArgoCDApplicationManagementView = () => import('../views/component/ArgoCDApplicationManagementView.vue')
 const GitOpsManagementView = () => import('../views/component/GitOpsManagementView.vue')
+const GitOpsTutorialView = () => import('../views/help/GitOpsTutorialView.vue')
 const JenkinsManagementView = () => import('../views/component/JenkinsManagementView.vue')
 const ExecutorParamManagementView = () => import('../views/component/ExecutorParamManagementView.vue')
 const AgentManagementView = () => import('../views/component/AgentManagementView.vue')
@@ -113,12 +114,6 @@ export const router = createRouter({
           meta: { title: '新增应用', permission: 'application.manage' },
         },
         {
-          path: '/applications/:id',
-          name: 'application-detail',
-          component: ApplicationDetailView,
-          meta: { title: '应用详情', permission: ['application.view', 'application.manage', 'release.create'] },
-        },
-        {
           path: '/applications/:id/edit',
           name: 'application-edit',
           component: ApplicationEditView,
@@ -165,10 +160,30 @@ export const router = createRouter({
           },
         },
         {
+          path: '/components/argocd/applications',
+          name: 'argocd-application-management',
+          component: ArgoCDApplicationManagementView,
+          meta: {
+            title: 'ArgoCD应用',
+            permission: [
+              'component.argocd.view',
+              'component.argocd.manage',
+              'component.argocd.instance.view',
+              'component.argocd.instance.manage',
+            ],
+          },
+        },
+        {
           path: '/components/gitops',
           name: 'gitops-management',
           component: GitOpsManagementView,
           meta: { title: 'GitOps管理', permission: ['component.gitops.view', 'component.gitops.manage'] },
+        },
+        {
+          path: '/help/gitops',
+          name: 'gitops-tutorial',
+          component: GitOpsTutorialView,
+          meta: { title: 'GitOps配置教程' },
         },
         {
           path: '/components/agents',
@@ -228,7 +243,15 @@ export const router = createRouter({
           path: '/release-templates',
           name: 'release-template-list',
           component: ReleaseTemplateView,
-          meta: { title: '发布模板', permission: 'release.template.manage' },
+          meta: { title: '发布模板', permission: ['release.template.manage', 'release.create'] },
+        },
+        {
+          path: '/system',
+          redirect: '/system/settings',
+        },
+        {
+          path: '/system/quick-start',
+          redirect: '/system/settings',
         },
         {
           path: '/system/users',
@@ -265,7 +288,7 @@ router.beforeEach(async (to) => {
   const isPublic = Boolean(to.meta.public)
 
   if (isPublic) {
-    // 登录页始终可访问，方便已登录用户切换账号。
+    // 登录页始终可访问，方便已登录用户切换账号
     return true
   }
 

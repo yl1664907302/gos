@@ -76,6 +76,7 @@ type QueryGitOpsTemplateFields struct {
 type GitOpsFieldCandidateReader interface {
 	ListFieldCandidates(ctx context.Context, appKey string) ([]gitopsdomain.FieldCandidate, error)
 	ListValuesCandidates(ctx context.Context, appKey string) ([]gitopsdomain.ValuesCandidate, error)
+	CheckScanPath(ctx context.Context, appKey string, gitopsType string) (string, bool, error)
 }
 
 type QueryGitOpsFieldCandidateOutput struct {
@@ -130,6 +131,49 @@ func NewQueryGitOpsValuesCandidates(
 	reader GitOpsFieldCandidateReader,
 ) *QueryGitOpsValuesCandidates {
 	return &QueryGitOpsValuesCandidates{appRepo: appRepo, reader: reader}
+}
+
+type QueryGitOpsScanPathStatusOutput struct {
+	PathTemplate string `json:"path_template"`
+	Exists       bool   `json:"exists"`
+}
+
+type QueryGitOpsScanPathStatus struct {
+	appRepo appdomain.Repository
+	reader  GitOpsFieldCandidateReader
+}
+
+func NewQueryGitOpsScanPathStatus(
+	appRepo appdomain.Repository,
+	reader GitOpsFieldCandidateReader,
+) *QueryGitOpsScanPathStatus {
+	return &QueryGitOpsScanPathStatus{appRepo: appRepo, reader: reader}
+}
+
+func (uc *QueryGitOpsScanPathStatus) Execute(ctx context.Context, applicationID string, gitopsType string) (QueryGitOpsScanPathStatusOutput, error) {
+	if uc == nil || uc.appRepo == nil || uc.reader == nil {
+		return QueryGitOpsScanPathStatusOutput{}, fmt.Errorf("%w: gitops manager is not configured", ErrInvalidInput)
+	}
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		return QueryGitOpsScanPathStatusOutput{}, fmt.Errorf("%w: application_id is required", ErrInvalidInput)
+	}
+	app, err := uc.appRepo.GetByID(ctx, applicationID)
+	if err != nil {
+		return QueryGitOpsScanPathStatusOutput{}, err
+	}
+	appKey := strings.TrimSpace(app.Key)
+	if appKey == "" {
+		return QueryGitOpsScanPathStatusOutput{}, fmt.Errorf("%w: application key is required", ErrInvalidInput)
+	}
+	pathTemplate, exists, err := uc.reader.CheckScanPath(ctx, appKey, gitopsType)
+	if err != nil {
+		return QueryGitOpsScanPathStatusOutput{}, err
+	}
+	return QueryGitOpsScanPathStatusOutput{
+		PathTemplate: strings.TrimSpace(pathTemplate),
+		Exists:       exists,
+	}, nil
 }
 
 func (uc *QueryGitOpsStatus) Execute(ctx context.Context) (QueryGitOpsStatusOutput, error) {

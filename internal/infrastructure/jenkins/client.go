@@ -214,7 +214,18 @@ func (c *Client) TriggerBuild(ctx context.Context, fullName string, params map[s
 		if key == "" {
 			continue
 		}
-		form.Set(key, v)
+		// 处理多值参数：如果值包含逗号分隔符，拆分为多个同名参数
+		if strings.Contains(v, ",") {
+			values := strings.Split(v, ",")
+			for _, val := range values {
+				val = strings.TrimSpace(val)
+				if val != "" {
+					form.Add(key, val)
+				}
+			}
+		} else {
+			form.Set(key, v)
+		}
 	}
 	body := form.Encode()
 

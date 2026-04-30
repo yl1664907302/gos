@@ -3,7 +3,6 @@ package usecase
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -98,7 +97,7 @@ func (uc *ReleaseOrderManager) startArgoCDExecution(
 
 	isRollback, rollbackErr := uc.shouldUseArgoCDRollback(ctx, order)
 	if rollbackErr != nil {
-		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "判定回滚模式失败: "+rollbackErr.Error())
+		_ = uc.markStepFinished(ctx, order.ID, updateCode, domain.StepStatusFailed, "判定重放模式失败: "+rollbackErr.Error())
 		return rollbackErr
 	}
 	logx.Info("argocd_cd", "execution_mode_resolved",
@@ -424,21 +423,14 @@ func (uc *ReleaseOrderManager) shouldUseArgoCDRollback(
 	ctx context.Context,
 	order domain.ReleaseOrder,
 ) (bool, error) {
-	if strings.EqualFold(strings.TrimSpace(string(order.OperationType)), string(domain.OperationTypeRollback)) {
-		return true, nil
-	}
-	sourceOrderID := strings.TrimSpace(order.SourceOrderID)
-	if sourceOrderID == "" || uc.repo == nil {
+	_ = ctx
+	if !strings.EqualFold(strings.TrimSpace(string(order.OperationType)), string(domain.OperationTypeRollback)) {
 		return false, nil
 	}
-	_, err := uc.repo.GetDeploySnapshotByOrderID(ctx, sourceOrderID)
-	if err == nil {
-		return true, nil
+	if strings.TrimSpace(order.SourceOrderID) == "" {
+		return false, fmt.Errorf("%w: rollback source order is required", ErrInvalidInput)
 	}
-	if errors.Is(err, domain.ErrDeploySnapshotNotFound) {
-		return false, nil
-	}
-	return false, err
+	return true, nil
 }
 
 func (uc *ReleaseOrderManager) startArgoCDRollbackExecution(
@@ -505,7 +497,7 @@ func (uc *ReleaseOrderManager) startArgoCDRollbackExecution(
 	}
 	commitFields := buildGitOpsCommitMessageFields(order, orderParams, appKey, environment, firstNonEmpty(imageVersion, strings.TrimSpace(order.ImageTag)), snapshot.SourcePath)
 	commitMessage := gitopsService.BuildCommitMessage(commitFields)
-	gitopsBranch := uc.resolveGitOpsBranchByEnv(environment, argocdInstance, strings.TrimSpace(snapshot.Branch))
+	gitopsBranch := uc.resolveGitOpsBranchByApplication(ctx, order.ApplicationID, environment, argocdInstance, strings.TrimSpace(snapshot.Branch))
 
 	_, changedFiles, commitSHA, changed, applyErr := gitopsService.ApplyValuesRules(
 		ctx,

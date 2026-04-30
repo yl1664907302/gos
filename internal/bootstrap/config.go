@@ -93,8 +93,14 @@ type GitOpsConfig struct {
 }
 
 type ReleaseConfig struct {
-	EnvOptions  []string                 `json:"env_options"`
-	Concurrency ReleaseConcurrencyConfig `json:"concurrency"`
+	EnvOptions   []string                 `json:"env_options"`
+	Concurrency  ReleaseConcurrencyConfig `json:"concurrency"`
+	GitOpsConfig ReleaseGitOpsConfig      `json:"gitops_config"`
+}
+
+type ReleaseGitOpsConfig struct {
+	HelmScanPath      string `json:"helm_scan_path"`
+	KustomizeScanPath string `json:"kustomize_scan_path"`
 }
 
 type ReleaseConcurrencyConfig struct {

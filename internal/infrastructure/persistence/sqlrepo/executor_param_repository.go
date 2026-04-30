@@ -9,6 +9,7 @@ import (
 	"time"
 
 	domain "gos/internal/domain/executorparam"
+	pipelinedomain "gos/internal/domain/pipeline"
 )
 
 type ExecutorParamRepository struct {
@@ -632,6 +633,125 @@ ORDER BY sort_no ASC, created_at ASC LIMIT ? OFFSET ?;`
 	return items, total, nil
 }
 
+func (r *ExecutorParamRepository) ListByApplications(
+	ctx context.Context,
+	filter domain.ApplicationListFilter,
+) ([]domain.ExecutorParamDef, int64, error) {
+	where := []string{
+		"pb.provider = ?",
+		"pb.status = ?",
+		"epd.executor_type = ?",
+	}
+	args := []any{
+		string(pipelinedomain.ProviderJenkins),
+		string(pipelinedomain.StatusActive),
+		string(domain.ExecutorTypeJenkins),
+	}
+
+	applicationIDs := make([]string, 0, len(filter.ApplicationIDs))
+	for _, item := range filter.ApplicationIDs {
+		applicationID := strings.TrimSpace(item)
+		if applicationID == "" {
+			continue
+		}
+		applicationIDs = append(applicationIDs, applicationID)
+	}
+	if len(applicationIDs) > 0 {
+		where = append(where, "pb.application_id IN ("+strings.TrimRight(strings.Repeat("?,", len(applicationIDs)), ",")+")")
+		for _, applicationID := range applicationIDs {
+			args = append(args, applicationID)
+		}
+	}
+	if filter.BindingType != "" {
+		where = append(where, "pb.binding_type = ?")
+		args = append(args, string(filter.BindingType))
+	}
+	if filter.Visible != nil {
+		where = append(where, "epd.visible = ?")
+		args = append(args, boolToInt(*filter.Visible))
+	}
+	if filter.Editable != nil {
+		where = append(where, "epd.editable = ?")
+		args = append(args, boolToInt(*filter.Editable))
+	}
+	if filter.Status != "" {
+		where = append(where, "epd.status = ?")
+		args = append(args, string(filter.Status))
+	}
+	if keyword := strings.TrimSpace(filter.Keyword); keyword != "" {
+		pattern := "%" + keyword + "%"
+		where = append(
+			where,
+			`(
+COALESCE(NULLIF(a.name, ''), NULLIF(pb.application_name, ''), pb.application_id) LIKE ?
+OR COALESCE(NULLIF(a.app_key, ''), '') LIKE ?
+OR epd.param_key LIKE ?
+)`,
+		)
+		args = append(args, pattern, pattern, pattern)
+	}
+
+	baseQuery := `
+FROM executor_param_def epd
+INNER JOIN pipeline_bindings pb ON pb.pipeline_id = epd.pipeline_id
+INNER JOIN applications a ON a.id = pb.application_id
+WHERE ` + strings.Join(where, " AND ")
+
+	var total int64
+	if err := r.db.QueryRowContext(ctx, "SELECT COUNT(1) "+baseQuery, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	listQuery := `
+SELECT
+	pb.application_id,
+	COALESCE(NULLIF(a.name, ''), NULLIF(pb.application_name, ''), pb.application_id) AS application_name,
+	COALESCE(NULLIF(a.app_key, ''), '') AS application_key,
+	pb.binding_type,
+	COALESCE(NULLIF(pb.name, ''), NULLIF(pb.pipeline_id, ''), epd.pipeline_id) AS pipeline_name,
+	epd.id,
+	epd.pipeline_id,
+	epd.executor_type,
+	epd.executor_param_name,
+	epd.param_key,
+	epd.param_type,
+	epd.single_select,
+	epd.required,
+	epd.default_value,
+	epd.description,
+	epd.visible,
+	epd.editable,
+	epd.source_from,
+	epd.status,
+	epd.raw_meta,
+	epd.sort_no,
+	epd.created_at,
+	epd.updated_at
+` + baseQuery + `
+ORDER BY application_name ASC, application_key ASC, pb.binding_type ASC, pipeline_name ASC, epd.sort_no ASC, epd.created_at ASC
+LIMIT ? OFFSET ?;`
+
+	offset := (filter.Page - 1) * filter.PageSize
+	rows, err := r.db.QueryContext(ctx, listQuery, append(args, filter.PageSize, offset)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	items := make([]domain.ExecutorParamDef, 0)
+	for rows.Next() {
+		item, scanErr := scanExecutorParamWithApplication(rows)
+		if scanErr != nil {
+			return nil, 0, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return items, total, nil
+}
+
 func (r *ExecutorParamRepository) GetByID(ctx context.Context, id string) (domain.ExecutorParamDef, error) {
 	const q = `
 SELECT id, pipeline_id, executor_type, executor_param_name, param_key, param_type, single_select, required, default_value, description, visible, editable, source_from, status, raw_meta, sort_no, created_at, updated_at
@@ -695,6 +815,67 @@ func scanExecutorParam(s scanner) (domain.ExecutorParamDef, error) {
 	)
 
 	if err := s.Scan(
+		&item.ID,
+		&item.PipelineID,
+		&executorType,
+		&item.ExecutorParamName,
+		&item.ParamKey,
+		&paramType,
+		&singleSelect,
+		&required,
+		&item.DefaultValue,
+		&item.Description,
+		&visible,
+		&editable,
+		&sourceFrom,
+		&status,
+		&rawMeta,
+		&item.SortNo,
+		&createdAt,
+		&updatedAt,
+	); err != nil {
+		return domain.ExecutorParamDef{}, err
+	}
+
+	item.ExecutorType = domain.ExecutorType(executorType)
+	item.ParamType = domain.ParamType(paramType)
+	item.SingleSelect = singleSelect > 0
+	item.Required = required > 0
+	item.Visible = visible > 0
+	item.Editable = editable > 0
+	item.SourceFrom = domain.SourceFrom(sourceFrom)
+	item.Status = domain.Status(status)
+	if item.Status == "" {
+		item.Status = domain.StatusActive
+	}
+	item.RawMeta = rawMeta.String
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, nil
+}
+
+func scanExecutorParamWithApplication(s scanner) (domain.ExecutorParamDef, error) {
+	var (
+		item         domain.ExecutorParamDef
+		executorType string
+		paramType    string
+		singleSelect int
+		required     int
+		visible      int
+		editable     int
+		sourceFrom   string
+		status       string
+		rawMeta      sql.NullString
+		createdAt    int64
+		updatedAt    int64
+	)
+
+	if err := s.Scan(
+		&item.ApplicationID,
+		&item.ApplicationName,
+		&item.ApplicationKey,
+		&item.BindingType,
+		&item.PipelineName,
 		&item.ID,
 		&item.PipelineID,
 		&executorType,

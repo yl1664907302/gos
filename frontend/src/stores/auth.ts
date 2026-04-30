@@ -49,7 +49,11 @@ export const useAuthStore = defineStore('auth', () => {
   async function logout() {
     try {
       if (accessToken.value) {
-        await logoutAPI()
+        try {
+          await logoutAPI()
+        } catch (error) {
+          console.warn('[auth] logout request failed, clearing local auth state anyway', error)
+        }
       }
     } finally {
       clearAuthState()

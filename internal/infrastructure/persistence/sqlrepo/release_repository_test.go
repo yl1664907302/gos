@@ -3,6 +3,7 @@ package sqlrepo
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
@@ -62,6 +63,79 @@ func TestFindActiveOrderByApplicationEnv_PrioritizesDeployingBeforeQueued(t *tes
 	if item.ID != deploying.ID {
 		t.Fatalf("FindActiveOrderByApplicationEnv returned %s, want %s", item.ID, deploying.ID)
 	}
+}
+
+func TestList_StatusFilterSupportsLegacyAndBusinessAlias(t *testing.T) {
+	t.Parallel()
+
+	repo := newTestReleaseRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	successLegacy := newTestReleaseOrder("ro-success-legacy", "RO-SUCCESS-LEGACY", "app-1", "dev", domain.OrderStatusSuccess, now)
+	successBusiness := newTestReleaseOrder("ro-success-biz", "RO-SUCCESS-BIZ", "app-1", "dev", domain.OrderStatusDeploySuccess, now.Add(time.Second))
+	failedLegacy := newTestReleaseOrder("ro-failed-legacy", "RO-FAILED-LEGACY", "app-1", "dev", domain.OrderStatusFailed, now.Add(2*time.Second))
+	failedBusiness := newTestReleaseOrder("ro-failed-biz", "RO-FAILED-BIZ", "app-1", "dev", domain.OrderStatusDeployFailed, now.Add(3*time.Second))
+	runningLegacy := newTestReleaseOrder("ro-running-legacy", "RO-RUNNING-LEGACY", "app-1", "dev", domain.OrderStatusRunning, now.Add(4*time.Second))
+	runningBusiness := newTestReleaseOrder("ro-running-biz", "RO-RUNNING-BIZ", "app-1", "dev", domain.OrderStatusDeploying, now.Add(5*time.Second))
+
+	for _, item := range []domain.ReleaseOrder{
+		successLegacy,
+		successBusiness,
+		failedLegacy,
+		failedBusiness,
+		runningLegacy,
+		runningBusiness,
+	} {
+		if err := repo.Create(ctx, item, nil, nil, nil); err != nil {
+			t.Fatalf("Create(%s) failed: %v", item.OrderNo, err)
+		}
+	}
+
+	assertIDs := func(items []domain.ReleaseOrder, expected ...string) {
+		got := make(map[string]struct{}, len(items))
+		for _, item := range items {
+			got[item.ID] = struct{}{}
+		}
+		if len(got) != len(expected) {
+			t.Fatalf("got %d items, want %d", len(got), len(expected))
+		}
+		for _, id := range expected {
+			if _, ok := got[id]; !ok {
+				t.Fatalf("expected order %s to be returned", id)
+			}
+		}
+	}
+
+	successItems, _, err := repo.List(ctx, domain.ListFilter{
+		Status:   domain.OrderStatusDeploySuccess,
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List by deploy_success failed: %v", err)
+	}
+	assertIDs(successItems, successLegacy.ID, successBusiness.ID)
+
+	failedItems, _, err := repo.List(ctx, domain.ListFilter{
+		Status:   domain.OrderStatusDeployFailed,
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List by deploy_failed failed: %v", err)
+	}
+	assertIDs(failedItems, failedLegacy.ID, failedBusiness.ID)
+
+	runningItems, _, err := repo.List(ctx, domain.ListFilter{
+		Status:   domain.OrderStatusDeploying,
+		Page:     1,
+		PageSize: 20,
+	})
+	if err != nil {
+		t.Fatalf("List by deploying failed: %v", err)
+	}
+	assertIDs(runningItems, runningLegacy.ID, runningBusiness.ID)
 }
 
 func TestList_VisibilityIncludesAppCreatorAndApprover(t *testing.T) {
@@ -225,6 +299,54 @@ func TestCreateTemplate_PersistsHookEnvCodes(t *testing.T) {
 	}
 	if got := storedHooks[0].ExecuteStages; len(got) != 2 || got[0] != domain.TemplateHookExecuteStageBuildComplete || got[1] != domain.TemplateHookExecuteStagePostRelease {
 		t.Fatalf("stored hook execute stages = %#v, want [build_complete post_release]", got)
+	}
+}
+
+func TestConfirmAppReleaseState_RejectsOutdatedOrder(t *testing.T) {
+	t.Parallel()
+
+	repo := newTestReleaseRepository(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	older := newTestReleaseOrder("ro-live-older", "RO-LIVE-OLDER", "app-1", "prod", domain.OrderStatusDeploySuccess, now)
+	newer := newTestReleaseOrder("ro-live-newer", "RO-LIVE-NEWER", "app-1", "prod", domain.OrderStatusDeploySuccess, now.Add(time.Minute))
+
+	for _, item := range []domain.ReleaseOrder{older, newer} {
+		if err := repo.Create(ctx, item, nil, nil, nil); err != nil {
+			t.Fatalf("Create(%s) failed: %v", item.OrderNo, err)
+		}
+		if err := repo.UpsertAppReleaseState(ctx, domain.AppReleaseState{
+			ID:                    "state-" + item.ID,
+			ReleaseOrderID:        item.ID,
+			ReleaseOrderNo:        item.OrderNo,
+			ApplicationID:         item.ApplicationID,
+			ApplicationName:       item.ApplicationName,
+			EnvCode:               item.EnvCode,
+			OperationType:         item.OperationType,
+			StateStatus:           domain.AppReleaseStateStatusPendingConfirm,
+			ParamsSnapshotJSON:    "[]",
+			ExecutionSnapshotJSON: "[]",
+			DeploySnapshotJSON:    "",
+			ResultSnapshotJSON:    "{}",
+			CreatedAt:             item.CreatedAt,
+			UpdatedAt:             item.UpdatedAt,
+		}); err != nil {
+			t.Fatalf("UpsertAppReleaseState(%s) failed: %v", item.OrderNo, err)
+		}
+	}
+
+	ok, err := repo.IsLatestOrderByApplicationEnv(ctx, older.ApplicationID, older.EnvCode, older.ID)
+	if err != nil {
+		t.Fatalf("IsLatestOrderByApplicationEnv failed: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected older order to be non-latest")
+	}
+
+	_, err = repo.ConfirmAppReleaseState(ctx, older.ID, "tester", now.Add(2*time.Minute))
+	if !errors.Is(err, domain.ErrAppReleaseStateNotConfirmable) {
+		t.Fatalf("ConfirmAppReleaseState error = %v, want ErrAppReleaseStateNotConfirmable", err)
 	}
 }
 

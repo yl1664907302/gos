@@ -15,6 +15,7 @@ type Repository interface {
 }
 
 type ListFilter struct {
+	Keyword        string
 	Key            string
 	Name           string
 	ProjectID      string

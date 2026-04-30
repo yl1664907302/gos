@@ -14,6 +14,7 @@ import (
 const (
 	releaseSettingsKeyEnvOptions  = "release_env_options"
 	releaseSettingsKeyConcurrency = "release_concurrency"
+	releaseSettingsKeyGitOpsConfig = "release_gitops_config"
 	settingsUpdatedAtSQLiteLayout = "2006-01-02 15:04:05"
 )
 
@@ -160,6 +161,47 @@ ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, u
 		return fmt.Errorf("save system setting %s failed: %w", key, err)
 	}
 	return nil
+}
+
+func (s *DatabaseReleaseStore) LoadGitOpsConfig(ctx context.Context) (usecase.ReleaseGitOpsConfigOutput, error) {
+	var stored usecase.ReleaseGitOpsConfigOutput
+	ok, err := s.loadJSONSetting(ctx, releaseSettingsKeyGitOpsConfig, &stored)
+	if err != nil {
+		return usecase.ReleaseGitOpsConfigOutput{}, err
+	}
+	if ok {
+		return normalizeDBGitOpsConfig(stored), nil
+	}
+	if s.fallback == nil {
+		return usecase.ReleaseGitOpsConfigOutput{}, nil
+	}
+	return s.fallback.LoadGitOpsConfig(ctx)
+}
+
+func (s *DatabaseReleaseStore) SaveGitOpsConfig(ctx context.Context, input usecase.ReleaseGitOpsConfigInput) error {
+	normalized := normalizeDBGitOpsConfig(usecase.ReleaseGitOpsConfigOutput(input))
+	if err := s.saveJSONSetting(ctx, releaseSettingsKeyGitOpsConfig, normalized); err != nil {
+		return err
+	}
+	if s.fallback != nil {
+		_ = s.fallback.SaveGitOpsConfig(ctx, normalized)
+	}
+	return nil
+}
+
+func normalizeDBGitOpsConfig(input usecase.ReleaseGitOpsConfigOutput) usecase.ReleaseGitOpsConfigOutput {
+	helmPath := strings.TrimSpace(input.HelmScanPath)
+	if helmPath == "" {
+		helmPath = "apps/helm"
+	}
+	kustomizePath := strings.TrimSpace(input.KustomizeScanPath)
+	if kustomizePath == "" {
+		kustomizePath = "apps/{app_key}/overlays/{env}"
+	}
+	return usecase.ReleaseGitOpsConfigOutput{
+		HelmScanPath:      strings.TrimRight(helmPath, "/"),
+		KustomizeScanPath: strings.TrimRight(kustomizePath, "/"),
+	}
 }
 
 func normalizeDBConcurrencySettings(input usecase.ReleaseConcurrencySettingsOutput) usecase.ReleaseConcurrencySettingsOutput {

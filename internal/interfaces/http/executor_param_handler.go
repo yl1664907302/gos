@@ -51,6 +51,7 @@ func NewExecutorParamHandler(
 func (h *ExecutorParamHandler) RegisterRoutes(router gin.IRouter) {
 	router.GET("/applications/:id/executor-param-defs", h.ListByApplication)
 	router.GET("/pipelines/:id/param-defs", h.ListByPipeline)
+	router.GET("/executor-param-defs", h.List)
 	router.GET("/executor-param-defs/:id", h.GetByID)
 	router.PUT("/executor-param-defs/:id", h.Update)
 	router.POST("/jenkins/executor-param-defs/sync", h.Sync)
@@ -62,6 +63,11 @@ type UpdateExecutorParamDefRequest struct {
 
 type ExecutorParamDefResponse struct {
 	ID                string    `json:"id"`
+	ApplicationID     string    `json:"application_id"`
+	ApplicationName   string    `json:"application_name"`
+	ApplicationKey    string    `json:"application_key"`
+	BindingType       string    `json:"binding_type"`
+	PipelineName      string    `json:"pipeline_name"`
 	PipelineID        string    `json:"pipeline_id"`
 	ExecutorType      string    `json:"executor_type"`
 	ExecutorParamName string    `json:"executor_param_name"`
@@ -96,6 +102,174 @@ type ExecutorParamDefListResponse struct {
 
 type SyncExecutorParamDefsResponse struct {
 	Data usecase.SyncExecutorParamDefsOutput `json:"data"`
+}
+
+// List godoc
+// @Summary      List executor param definitions across applications
+// @Tags         executor-param-defs
+// @Produce      json
+// @Param        application_id  query     string  false  "Application ID"
+// @Param        keyword         query     string  false  "Application name, application key, or platform key"
+// @Param        binding_type    query     string  false  "Binding type, default ci"
+// @Param        visible         query     bool    false  "Visible flag"
+// @Param        editable        query     bool    false  "Editable flag"
+// @Param        status          query     string  false  "Status"
+// @Param        page            query     int     false  "Page number"
+// @Param        page_size       query     int     false  "Page size"
+// @Success      200  {object}  ExecutorParamDefListResponse
+// @Failure      400  {object}  ErrorResponse
+// @Failure      500  {object}  ErrorResponse
+// @Router       /executor-param-defs [get]
+func (h *ExecutorParamHandler) List(c *gin.Context) {
+	page, err := parsePositiveInt(c, "page")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	pageSize, err := parsePositiveInt(c, "page_size")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	visible, err := parseOptionalBool(c, "visible")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	editable, err := parseOptionalBool(c, "editable")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	allowAll, visibleApplicationIDs, ok := resolveVisibleApplicationIDsForApplications(c, h.authz)
+	if !ok {
+		return
+	}
+	if !allowAll && len(visibleApplicationIDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"data":      []ExecutorParamDefResponse{},
+			"page":      resolvedPage(page),
+			"page_size": resolvedPageSize(pageSize),
+			"total":     0,
+		})
+		return
+	}
+
+	currentUser, ok := getCurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	manageAll := currentUser.Role == userdomain.RoleAdmin
+	if !manageAll {
+		allowed, authErr := h.authz.HasPermission(c.Request.Context(), currentUser, "pipeline_param.manage", "", "")
+		if authErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		manageAll = allowed
+	}
+
+	items, total, err := h.manager.ListByApplications(c.Request.Context(), domain.ApplicationListFilter{
+		ApplicationIDs: resolveApplicationFilterIDs(strings.TrimSpace(c.Query("application_id")), allowAll, visibleApplicationIDs),
+		Keyword:        c.Query("keyword"),
+		BindingType:    pipelinedomain.BindingType(strings.TrimSpace(c.Query("binding_type"))),
+		Visible:        visible,
+		Editable:       editable,
+		Status:         domain.Status(strings.TrimSpace(c.Query("status"))),
+		Page:           page,
+		PageSize:       pageSize,
+	})
+	if err != nil {
+		writeExecutorParamHTTPError(c, err)
+		return
+	}
+
+	resp := make([]ExecutorParamDefResponse, 0, len(items))
+	if manageAll {
+		for _, item := range items {
+			entry := toExecutorParamResponse(item)
+			entry.CanView = true
+			entry.CanEdit = true
+			resp = append(resp, entry)
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"data":      resp,
+			"page":      resolvedPage(page),
+			"page_size": resolvedPageSize(pageSize),
+			"total":     total,
+		})
+		return
+	}
+
+	releaseCreateCache := make(map[string]bool)
+	type accessGrant struct {
+		canView bool
+		canEdit bool
+	}
+	accessCache := make(map[string]accessGrant)
+	for _, item := range items {
+		entry := toExecutorParamResponse(item)
+		applicationID := strings.TrimSpace(item.ApplicationID)
+		if applicationID == "" {
+			continue
+		}
+
+		hasReleaseCreate, accessErr := h.resolveReleaseCreatePermission(
+			c.Request.Context(),
+			currentUser,
+			applicationID,
+			releaseCreateCache,
+		)
+		if accessErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		if hasReleaseCreate && strings.TrimSpace(item.ParamKey) != "" {
+			entry.CanView = true
+			entry.CanEdit = true
+			resp = append(resp, entry)
+			continue
+		}
+		if h.access == nil {
+			continue
+		}
+
+		cacheKey := applicationID + "\x00" + strings.TrimSpace(item.ParamKey)
+		grant, exists := accessCache[cacheKey]
+		if !exists {
+			canView, canEdit, accessErr := h.access.ResolveParamAccess(
+				c.Request.Context(),
+				currentUser,
+				applicationID,
+				item.ParamKey,
+			)
+			if accessErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+				return
+			}
+			grant = accessGrant{
+				canView: canView,
+				canEdit: canEdit,
+			}
+			accessCache[cacheKey] = grant
+		}
+		if !grant.canView {
+			continue
+		}
+		entry.CanView = grant.canView
+		entry.CanEdit = grant.canEdit
+		resp = append(resp, entry)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data":      resp,
+		"page":      resolvedPage(page),
+		"page_size": resolvedPageSize(pageSize),
+		"total":     total,
+	})
 }
 
 // ListByApplication godoc
@@ -392,6 +566,11 @@ func (h *ExecutorParamHandler) Sync(c *gin.Context) {
 func toExecutorParamResponse(item domain.ExecutorParamDef) ExecutorParamDefResponse {
 	return ExecutorParamDefResponse{
 		ID:                item.ID,
+		ApplicationID:     item.ApplicationID,
+		ApplicationName:   item.ApplicationName,
+		ApplicationKey:    item.ApplicationKey,
+		BindingType:       item.BindingType,
+		PipelineName:      item.PipelineName,
 		PipelineID:        item.PipelineID,
 		ExecutorType:      string(item.ExecutorType),
 		ExecutorParamName: item.ExecutorParamName,
@@ -412,6 +591,27 @@ func toExecutorParamResponse(item domain.ExecutorParamDef) ExecutorParamDefRespo
 		CreatedAt:         item.CreatedAt,
 		UpdatedAt:         item.UpdatedAt,
 	}
+}
+
+func (h *ExecutorParamHandler) resolveReleaseCreatePermission(
+	ctx context.Context,
+	user userdomain.User,
+	applicationID string,
+	cache map[string]bool,
+) (bool, error) {
+	applicationID = strings.TrimSpace(applicationID)
+	if applicationID == "" {
+		return false, nil
+	}
+	if allowed, exists := cache[applicationID]; exists {
+		return allowed, nil
+	}
+	allowed, err := h.authz.HasPermission(ctx, user, "release.create", "application", applicationID)
+	if err != nil {
+		return false, err
+	}
+	cache[applicationID] = allowed
+	return allowed, nil
 }
 
 func writeExecutorParamHTTPError(c *gin.Context, err error) {

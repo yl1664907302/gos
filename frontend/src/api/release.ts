@@ -1,6 +1,9 @@
 import type { AxiosRequestConfig } from "axios";
 import { apiBaseURL, http } from "./http";
 import type {
+  AppReleaseStateSummaryListResponse,
+  ApplicationRollbackCapabilityResponse,
+  ApplicationRollbackPrecheckResponse,
   BatchDeleteReleaseOrdersPayload,
   BatchExecuteReleaseOrdersPayload,
   CreateReleaseOrderPayload,
@@ -14,6 +17,7 @@ import type {
   ReleaseOrderDataResponse,
   ReleaseOrderExecutionListResponse,
   ReleaseOrderListParams,
+  ReleaseOrderStatsResponse,
   ReleaseOrderPrecheckResponse,
   ReleaseOrderPipelineStageListResponse,
   ReleaseOrderPipelineStageLogResponse,
@@ -36,6 +40,17 @@ export async function listReleaseOrders(
   config?: AxiosRequestConfig,
 ): Promise<ReleaseOrderListResponse> {
   const response = await http.get<ReleaseOrderListResponse>("/release-orders", {
+    params,
+    ...config,
+  });
+  return response.data;
+}
+
+export async function getReleaseOrderStats(
+  params: ReleaseOrderListParams,
+  config?: AxiosRequestConfig,
+): Promise<ReleaseOrderStatsResponse> {
+  const response = await http.get<ReleaseOrderStatsResponse>("/release-orders/stats", {
     params,
     ...config,
   });
@@ -91,6 +106,62 @@ export async function rollbackReleaseOrderByID(
 ): Promise<ReleaseOrderDataResponse> {
   const response = await http.post<ReleaseOrderDataResponse>(
     `/release-orders/${encodeURIComponent(String(id || "").trim())}/rollback`,
+  );
+  return response.data;
+}
+
+export async function confirmReleaseOrderLive(
+  id: string,
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/release-orders/${encodeURIComponent(String(id || "").trim())}/confirm-live`,
+  );
+  return response.data;
+}
+
+export async function listAppReleaseStateSummaries(
+  applicationIDs: string[],
+): Promise<AppReleaseStateSummaryListResponse> {
+  const response = await http.get<AppReleaseStateSummaryListResponse>(
+    "/app-release-states/summaries",
+    {
+      params: {
+        application_ids: applicationIDs.join(","),
+      },
+    },
+  );
+  return response.data;
+}
+
+export async function getApplicationRollbackCapability(
+  applicationID: string,
+  payload: { env_code: string },
+): Promise<ApplicationRollbackCapabilityResponse> {
+  const response = await http.post<ApplicationRollbackCapabilityResponse>(
+    `/applications/${encodeURIComponent(String(applicationID || "").trim())}/rollback-capability`,
+    payload,
+  );
+  return response.data;
+}
+
+export async function getApplicationRollbackPrecheck(
+  applicationID: string,
+  payload: { env_code: string; action: "rollback" | "replay" },
+): Promise<ApplicationRollbackPrecheckResponse> {
+  const response = await http.post<ApplicationRollbackPrecheckResponse>(
+    `/applications/${encodeURIComponent(String(applicationID || "").trim())}/rollback-precheck`,
+    payload,
+  );
+  return response.data;
+}
+
+export async function createApplicationRollbackOrder(
+  applicationID: string,
+  payload: { env_code: string; action: "rollback" | "replay" },
+): Promise<ReleaseOrderDataResponse> {
+  const response = await http.post<ReleaseOrderDataResponse>(
+    `/applications/${encodeURIComponent(String(applicationID || "").trim())}/rollback-orders`,
+    payload,
   );
   return response.data;
 }
@@ -298,6 +369,9 @@ export async function getReleaseOrderPipelineStageLog(
 ): Promise<ReleaseOrderPipelineStageLogResponse> {
   const response = await http.get<ReleaseOrderPipelineStageLogResponse>(
     `/release-orders/${releaseOrderID}/pipeline-stages/${stageID}/log`,
+    {
+      timeout: 180_000,
+    },
   );
   return response.data;
 }

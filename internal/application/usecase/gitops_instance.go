@@ -343,6 +343,35 @@ func (uc *GitOpsInstanceManager) ListValuesCandidates(ctx context.Context, appKe
 	return result, nil
 }
 
+func (uc *GitOpsInstanceManager) CheckScanPath(ctx context.Context, appKey string, gitopsType string) (string, bool, error) {
+	if uc == nil || uc.repo == nil || uc.factory == nil {
+		return "", false, fmt.Errorf("%w: gitops instance manager is not configured", ErrInvalidInput)
+	}
+	instances, err := uc.repo.ListActiveInstances(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, item := range instances {
+		service := uc.factory.Build(item)
+		if service == nil {
+			continue
+		}
+		pathTemplate, exists, scanErr := service.CheckScanPath(ctx, appKey, gitopsType)
+		if scanErr != nil {
+			logx.Warn("gitops_instance", "check_scan_path_failed",
+				logx.F("instance_id", item.ID),
+				logx.F("instance_code", item.InstanceCode),
+				logx.F("app_key", appKey),
+				logx.F("gitops_type", gitopsType),
+				logx.F("reason", scanErr.Error()),
+			)
+			continue
+		}
+		return pathTemplate, exists, nil
+	}
+	return "", false, nil
+}
+
 func (uc *GitOpsInstanceManager) normalizeCreateInput(ctx context.Context, input CreateGitOpsInstanceInput) (domain.Instance, error) {
 	code, err := normalizeGitOpsInstanceCode(input.InstanceCode)
 	if err != nil {

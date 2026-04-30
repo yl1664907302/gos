@@ -665,8 +665,18 @@ func (uc *TrackReleaseExecution) finalizeOrder(
 	if err != nil {
 		return false, false, err
 	}
-	if _, err := uc.manager.repo.UpdateStatus(ctx, order.ID, orderStatus, order.StartedAt, &now, now); err != nil {
+	updatedOrder, err := uc.manager.repo.UpdateStatus(ctx, order.ID, orderStatus, order.StartedAt, &now, now)
+	if err != nil {
 		return false, false, err
+	}
+	if orderStatus == domain.OrderStatusSuccess || orderStatus == domain.OrderStatusDeploySuccess {
+		if stateErr := uc.manager.RecordAppReleaseState(ctx, updatedOrder.ID); stateErr != nil {
+			logx.Error("release_order", "record_app_release_state_failed", stateErr,
+				logx.F("order_id", updatedOrder.ID),
+				logx.F("order_no", updatedOrder.OrderNo),
+				logx.F("status", updatedOrder.Status),
+			)
+		}
 	}
 	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
 		return false, false, err
@@ -820,10 +830,20 @@ func (uc *TrackReleaseExecution) syncFailedOrder(
 		}
 		updated = true
 	}
-	if err := uc.manager.releaseExecutionLocks(ctx, order.ID, domain.ExecutionLockStatusReleased); err != nil {
+
+	normalizedOrder, err := uc.manager.repo.GetByID(ctx, order.ID)
+	if err != nil {
 		return false, false, err
 	}
-	return updated, false, nil
+	normalizedExecutions, err := uc.manager.ListExecutions(ctx, order.ID)
+	if err != nil {
+		return false, false, err
+	}
+	finalizeUpdated, skipped, err := uc.finalizeOrder(ctx, normalizedOrder, normalizedExecutions)
+	if err != nil {
+		return false, false, err
+	}
+	return updated || finalizeUpdated, skipped, nil
 }
 
 func (uc *TrackReleaseExecution) finishStep(

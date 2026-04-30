@@ -2,29 +2,39 @@
 import {
   CheckCircleFilled,
   ClockCircleFilled,
+  DeleteOutlined,
+  DownOutlined,
+  EnvironmentOutlined,
   ExclamationCircleOutlined,
+  FilterOutlined,
   CloseCircleFilled,
   LoadingOutlined,
   PlusOutlined,
-  ReloadOutlined,
+  SearchOutlined,
   SyncOutlined,
 } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import type { TableColumnsType } from "ant-design-vue";
 import dayjs from "dayjs";
+import * as echarts from "echarts/core";
+import type { ECharts } from "echarts/core";
+import { BarChart } from "echarts/charts";
+import { GridComponent, LegendComponent, TooltipComponent } from "echarts/components";
+import { CanvasRenderer } from "echarts/renderers";
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { listApplications } from "../../api/application";
-import { listPipelineBindings } from "../../api/pipeline";
 import { getReleaseSettings } from "../../api/system";
 import {
   batchDeleteReleaseOrders,
   batchExecuteReleaseOrders,
   buildReleaseOrder,
   cancelReleaseOrder,
+  confirmReleaseOrderLive,
   deleteReleaseOrder,
   deployReleaseOrder,
   executeReleaseOrder,
+  getReleaseOrderStats,
   getReleaseOrderByID,
   getReleaseOrderPrecheck,
   listReleaseOrderParams,
@@ -34,7 +44,6 @@ import {
 } from "../../api/release";
 import { useResizableColumns } from "../../composables/useResizableColumns";
 import { useAuthStore } from "../../stores/auth";
-import type { PipelineBinding } from "../../types/pipeline";
 import type {
   BatchExecuteStagedDispatchMode,
   BatchExecuteReleaseOrdersPayload,
@@ -48,6 +57,8 @@ import type {
   ReleaseTriggerType,
 } from "../../types/release";
 import { extractHTTPErrorMessage } from "../../utils/http-error";
+
+echarts.use([BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 
 interface SelectOption {
   label: string;
@@ -65,11 +76,9 @@ interface ApprovalFlowNode {
 const route = useRoute();
 const router = useRouter();
 const authStore = useAuthStore();
-const AUTO_REFRESH_INTERVAL_MS = 5000;
 
 const statusOptions: Array<{ label: string; value: ReleaseOrderStatus | "" }> =
   [
-    { label: "全部状态", value: "" },
     { label: "待执行", value: "pending" },
     { label: "待审批", value: "pending_approval" },
     { label: "审批中", value: "approving" },
@@ -94,25 +103,47 @@ const triggerTypeOptions: Array<{
   { label: "定时", value: "schedule" },
 ];
 
+const operationTypeOptions: Array<{
+  label: string;
+  value: ReleaseOperationType | "";
+}> = [
+  { label: "全部类型", value: "" },
+  { label: "普通发布", value: "deploy" },
+  { label: "标准回滚", value: "rollback" },
+  { label: "标准重放", value: "replay" },
+];
+
 const loading = ref(false);
 const querying = ref(false);
+const pendingReloadOptions = ref<{ silent?: boolean } | null>(null);
 const cancellingID = ref("");
 const deletingID = ref("");
+const confirmingLiveID = ref("");
 const executingID = ref("");
 const recoveringID = ref("");
 const batchExecuting = ref(false);
 const batchDeleting = ref(false);
 const dataSource = ref<ReleaseOrder[]>([]);
 const total = ref(0);
-const autoRefreshTimer = ref<number | null>(null);
 const lastLoadedAt = ref("");
 const selectedOrderIDs = ref<string[]>([]);
+const spotlightOrderItems = ref<ReleaseOrder[]>([]);
+const overviewQueryKey = ref("");
+const overviewStatusStats = ref({
+  total: 0,
+  pending: 0,
+  running: 0,
+  success: 0,
+  failed: 0,
+  cancelled: 0,
+});
+
+const overviewChartRef = ref<HTMLElement | null>(null);
+let overviewChart: ECharts | null = null;
 
 const applicationsLoading = ref(false);
-const bindingOptionsLoading = ref(false);
 const envOptionsLoading = ref(false);
 const applicationOptions = ref<SelectOption[]>([]);
-const bindingOptions = ref<SelectOption[]>([]);
 const releaseEnvOptions = ref<SelectOption[]>([]);
 
 const executePreviewVisible = ref(false);
@@ -128,6 +159,8 @@ const batchExecuteSubmitting = ref(false);
 const batchExecuteStagedDispatchMode = ref<BatchExecuteStagedDispatchMode>("execute");
 const batchExecutePreviewOrderIDs = ref<string[]>([]);
 const advancedSearchExpanded = ref(false);
+const statusExpanded = ref(false);
+const envExpanded = ref(false);
 
 interface BatchExecutePreviewItem {
   order: ReleaseOrder;
@@ -139,20 +172,27 @@ const batchExecutePreviewItems = ref<BatchExecutePreviewItem[]>([]);
 
 const filters = reactive({
   application_id: "",
-  binding_id: "",
+  keyword: "",
+  triggered_by: "",
   env_code: "",
+  operation_type: "" as ReleaseOperationType | "",
   status: "" as ReleaseOrderStatus | "",
   trigger_type: "" as ReleaseTriggerType | "",
+  created_at_range: [] as string[],
   page: 1,
   pageSize: 10,
 });
 
 const activeQuery = reactive({
   application_id: "",
-  binding_id: "",
+  keyword: "",
+  triggered_by: "",
   env_code: "",
+  operation_type: "" as ReleaseOperationType | "",
   status: "" as ReleaseOrderStatus | "",
   trigger_type: "" as ReleaseTriggerType | "",
+  created_at_from: "",
+  created_at_to: "",
 });
 
 const initialColumns: TableColumnsType<ReleaseOrder> = [
@@ -193,16 +233,6 @@ const { columns } = useResizableColumns(initialColumns, {
   hitArea: 10,
 });
 
-const hasFilter = computed(() => {
-  return Boolean(
-    activeQuery.application_id ||
-    activeQuery.binding_id ||
-    activeQuery.env_code ||
-    activeQuery.status ||
-    activeQuery.trigger_type,
-  );
-});
-
 const canCreateRelease = computed(() =>
   authStore.hasPermission("release.create"),
 );
@@ -223,66 +253,25 @@ function canCurrentUserExecute(record: ReleaseOrder) {
   return String(record.creator_user_id || "").trim() === currentUserID.value;
 }
 
-const currentPageStatusStats = computed(() => {
-  const stats: Record<string, number> = {
-    pending: 0,
-    running: 0,
-    success: 0,
-    failed: 0,
-    cancelled: 0,
-  };
-  dataSource.value.forEach((item) => {
-    stats[item.status] = (stats[item.status] || 0) + 1;
-  });
-  return stats;
-});
-
-const overviewMetrics = computed(() => [
-  { key: "total", label: "筛选结果", value: total.value, tone: "neutral" },
-  {
-    key: "page",
-    label: "当前页",
-    value: dataSource.value.length,
-    tone: "neutral",
-  },
-  {
-    key: "running",
-    label: "执行中",
-    value: currentPageStatusStats.value.running,
-    tone: "processing",
-  },
-  {
-    key: "failed",
-    label: "失败",
-    value: currentPageStatusStats.value.failed,
-    tone: "danger",
-  },
-  {
-    key: "success",
-    label: "成功",
-    value: currentPageStatusStats.value.success,
-    tone: "success",
-  },
-]);
-
 const refreshText = computed(() => {
   if (!lastLoadedAt.value) {
     return "尚未加载";
   }
-  return `${lastLoadedAt.value} · 自动轮询 ${AUTO_REFRESH_INTERVAL_MS / 1000}s`;
+  return lastLoadedAt.value;
 });
 
-const spotlightText = computed(() => {
+const spotlightHeadline = computed(() => {
   if (activeQuery.status) {
-    return `当前聚焦“${rawStatusText(activeQuery.status)}”状态发布单。`;
+    return rawStatusText(activeQuery.status);
   }
-  if (currentPageStatusStats.value.running > 0) {
-    return `当前页有 ${currentPageStatusStats.value.running} 条发布单正在执行。`;
+  return "最新发布";
+});
+
+const spotlightHint = computed(() => {
+  if (activeQuery.status) {
+    return "已按状态聚焦当前列表";
   }
-  if (currentPageStatusStats.value.failed > 0) {
-    return `当前页有 ${currentPageStatusStats.value.failed} 条失败记录，建议优先排障。`;
-  }
-  return "默认按创建时间倒序展示，可通过状态、应用和环境快速缩小范围。";
+  return "展示当前筛选条件下最近创建的发布单";
 });
 
 const spotlightStateKey = computed<
@@ -290,27 +279,42 @@ const spotlightStateKey = computed<
 >(() => {
   if (activeQuery.status) {
     switch (activeQuery.status) {
+      case "approving":
+      case "building":
+      case "queued":
+      case "deploying":
       case "running":
         return "running";
+      case "rejected":
+      case "deploy_failed":
       case "failed":
         return "failed";
+      case "deploy_success":
       case "success":
         return "success";
       default:
         return "pending";
     }
   }
-  if (currentPageStatusStats.value.running > 0) {
-    return "running";
-  }
-  if (currentPageStatusStats.value.failed > 0) {
-    return "failed";
-  }
-  if (currentPageStatusStats.value.success > 0) {
-    return "success";
-  }
   return "pending";
 });
+
+const spotlightOrderQueryStatus = computed<ReleaseOrderStatus | "">(() => {
+  if (activeQuery.status) {
+    return activeQuery.status;
+  }
+  return "";
+});
+
+const spotlightOrders = computed(() =>
+  spotlightOrderItems.value
+    .sort((left, right) => dayjs(right.created_at).valueOf() - dayjs(left.created_at).valueOf())
+    .slice(0, 2)
+    .map((item) => ({
+      id: item.id,
+      orderNo: item.order_no,
+    })),
+);
 
 const activeFilterTags = computed(() => {
   const tags: Array<{ key: string; label: string; value: string }> = [];
@@ -321,15 +325,29 @@ const activeFilterTags = computed(() => {
       value: optionLabel(applicationOptions.value, activeQuery.application_id),
     });
   }
-  if (activeQuery.binding_id) {
+  if (activeQuery.keyword) {
     tags.push({
-      key: "binding_id",
-      label: "绑定",
-      value: optionLabel(bindingOptions.value, activeQuery.binding_id),
+      key: "keyword",
+      label: "检索词",
+      value: activeQuery.keyword,
+    });
+  }
+  if (activeQuery.triggered_by) {
+    tags.push({
+      key: "triggered_by",
+      label: "发起人",
+      value: activeQuery.triggered_by,
     });
   }
   if (activeQuery.env_code) {
     tags.push({ key: "env_code", label: "环境", value: activeQuery.env_code });
+  }
+  if (activeQuery.operation_type) {
+    tags.push({
+      key: "operation_type",
+      label: "操作类型",
+      value: operationTypeText(activeQuery.operation_type),
+    });
   }
   if (activeQuery.status) {
     tags.push({
@@ -345,25 +363,47 @@ const activeFilterTags = computed(() => {
       value: triggerTypeText(activeQuery.trigger_type),
     });
   }
+  if (activeQuery.created_at_from || activeQuery.created_at_to) {
+    tags.push({
+      key: "created_at_range",
+      label: "创建时间",
+      value: formatCreatedAtRangeLabel(activeQuery.created_at_from, activeQuery.created_at_to),
+    });
+  }
   return tags;
 });
 
 const hasAdvancedFilter = computed(() =>
   Boolean(
     filters.application_id ||
-    filters.binding_id ||
-    filters.trigger_type,
+    filters.keyword.trim() ||
+    filters.triggered_by.trim() ||
+    filters.operation_type ||
+    filters.trigger_type ||
+    filters.created_at_range.length,
   ),
 );
-const showAdvancedSearch = computed(
+const hasActiveAdvancedFilter = computed(() =>
+  Boolean(
+    activeQuery.application_id ||
+    activeQuery.keyword ||
+    activeQuery.triggered_by ||
+    activeQuery.operation_type ||
+    activeQuery.trigger_type ||
+    activeQuery.created_at_from ||
+    activeQuery.created_at_to,
+  ),
+);
+const showAdvancedSearch = computed(() => advancedSearchExpanded.value);
+const hasPendingAdvancedFilterChanges = computed(
   () =>
-    advancedSearchExpanded.value ||
-    Boolean(
-      activeQuery.application_id ||
-      activeQuery.binding_id ||
-      activeQuery.trigger_type,
-    ) ||
-    hasAdvancedFilter.value,
+    filters.application_id !== activeQuery.application_id ||
+    filters.keyword.trim() !== activeQuery.keyword ||
+    filters.triggered_by.trim() !== activeQuery.triggered_by ||
+    filters.operation_type !== activeQuery.operation_type ||
+    filters.trigger_type !== activeQuery.trigger_type ||
+    resolveCreatedAtFrom(filters.created_at_range) !== activeQuery.created_at_from ||
+    resolveCreatedAtTo(filters.created_at_range) !== activeQuery.created_at_to,
 );
 
 function optionLabel(options: SelectOption[], value: string) {
@@ -372,10 +412,36 @@ function optionLabel(options: SelectOption[], value: string) {
 
 function applyActiveQueryFromFilters() {
   activeQuery.application_id = filters.application_id;
-  activeQuery.binding_id = filters.binding_id;
+  activeQuery.keyword = filters.keyword.trim();
+  activeQuery.triggered_by = filters.triggered_by.trim();
   activeQuery.env_code = filters.env_code.trim();
+  activeQuery.operation_type = filters.operation_type;
   activeQuery.status = filters.status;
   activeQuery.trigger_type = filters.trigger_type;
+  activeQuery.created_at_from = resolveCreatedAtFrom(filters.created_at_range);
+  activeQuery.created_at_to = resolveCreatedAtTo(filters.created_at_range);
+}
+
+function resolveCreatedAtFrom(range: string[]) {
+  const start = String(range?.[0] || "").trim();
+  if (!start) {
+    return "";
+  }
+  return dayjs(start).startOf("day").toDate().toISOString();
+}
+
+function resolveCreatedAtTo(range: string[]) {
+  const end = String(range?.[1] || "").trim();
+  if (!end) {
+    return "";
+  }
+  return dayjs(end).endOf("day").toDate().toISOString();
+}
+
+function formatCreatedAtRangeLabel(from: string, to: string) {
+  const startText = from ? dayjs(from).format("YYYY-MM-DD") : "开始";
+  const endText = to ? dayjs(to).format("YYYY-MM-DD") : "结束";
+  return `${startText} ~ ${endText}`;
 }
 
 function formatTime(value: string | null) {
@@ -389,14 +455,30 @@ function rawStatusText(status: ReleaseOrderStatus) {
   switch (status) {
     case "pending":
       return "待执行";
+    case "pending_approval":
+      return "待审批";
+    case "approving":
+      return "审批中";
+    case "approved":
+      return "已批准";
     case "building":
       return "构建中";
     case "built_waiting_deploy":
       return "已构建待部署";
+    case "rejected":
+      return "审批拒绝";
+    case "queued":
+      return "排队中";
+    case "deploying":
+      return "发布中";
     case "running":
       return "执行中";
+    case "deploy_success":
+      return "发布成功";
     case "success":
       return "成功";
+    case "deploy_failed":
+      return "发布失败";
     case "failed":
       return "失败";
     case "cancelled":
@@ -537,7 +619,7 @@ function operationTypeText(
     case "rollback":
       return "标准回滚";
     case "replay":
-      return "重放回滚";
+      return "标准重放";
     default:
       return "普通发布";
   }
@@ -742,9 +824,21 @@ function canEdit(record: ReleaseOrder) {
   );
 }
 
+function canConfirmLive(record: ReleaseOrder) {
+  return (
+    authStore.hasApplicationPermission(
+      "release.execute",
+      record.application_id,
+      record.env_code,
+    ) &&
+    record.live_state_can_confirm === true &&
+    orderBusinessStatus(record) === "deploy_success" &&
+    String(record.live_state_status || "").trim() === "pending_confirm"
+  );
+}
+
 function canExecute(record: ReleaseOrder) {
   return (
-    canCurrentUserExecute(record) &&
     authStore.hasApplicationPermission(
       "release.execute",
       record.application_id,
@@ -765,7 +859,6 @@ function supportsStagedDispatch(record: ReleaseOrder) {
 function canBuild(record: ReleaseOrder) {
   return (
     supportsStagedDispatch(record) &&
-    canCurrentUserExecute(record) &&
     authStore.hasApplicationPermission(
       "release.execute",
       record.application_id,
@@ -778,7 +871,6 @@ function canBuild(record: ReleaseOrder) {
 function canDeploy(record: ReleaseOrder) {
   return (
     supportsStagedDispatch(record) &&
-    canCurrentUserExecute(record) &&
     authStore.hasApplicationPermission(
       "release.execute",
       record.application_id,
@@ -801,36 +893,46 @@ function resolveDispatchAction(record: ReleaseOrder): ReleaseOrderDispatchAction
 function dispatchActionText(action: ReleaseOrderDispatchAction) {
   switch (action) {
     case "build":
-      return "构建";
+      return "仅构建";
     case "deploy":
-      return "部署";
+      return "发布";
     default:
       return "发布";
   }
 }
 
 function canRollback(record: ReleaseOrder) {
+  return canTriggerArgoReplay(record) && hasReplayPermission(record);
+}
+
+function canReplay(record: ReleaseOrder) {
+  return canTriggerStandardReplay(record) && hasReplayPermission(record);
+}
+
+function hasReplayPermission(record: ReleaseOrder) {
   return (
     authStore.hasApplicationPermission(
       "release.create",
       record.application_id,
       record.env_code,
+    )
+  );
+}
+
+function canTriggerArgoReplay(record: ReleaseOrder) {
+  return (
+    ["deploying", "deploy_failed", "deploy_success"].includes(
+      orderBusinessStatus(record),
     ) &&
-    orderBusinessStatus(record) === "deploy_success" &&
     String(record.cd_provider || "")
       .trim()
       .toLowerCase() === "argocd"
   );
 }
 
-function canReplay(record: ReleaseOrder) {
+function canTriggerStandardReplay(record: ReleaseOrder) {
   return (
-    authStore.hasApplicationPermission(
-      "release.create",
-      record.application_id,
-      record.env_code,
-    ) &&
-    orderBusinessStatus(record) === "deploy_success" &&
+    ["deploy_success", "deploy_failed"].includes(orderBusinessStatus(record)) &&
     String(record.cd_provider || "")
       .trim()
       .toLowerCase() !== "argocd"
@@ -842,23 +944,23 @@ function isCiOnlyRecovery(record: ReleaseOrder) {
 }
 
 function replayActionText(record: ReleaseOrder) {
-  return "回滚到此版本";
+  return "一键重发";
 }
 
 function replayConfirmTitle(record: ReleaseOrder) {
   return isCiOnlyRecovery(record)
-    ? "确认基于这张成功单创建 CI 重放回滚吗？"
-    : "确认基于这张成功单创建重放回滚吗？";
+    ? "确认创建 CI 标准重放单吗？"
+    : "确认创建标准重放单吗？";
 }
 
 function replaySuccessText(record: ReleaseOrder, orderNo: string) {
   return isCiOnlyRecovery(record)
-    ? `已创建 CI 重放回滚单：${orderNo}`
-    : `已创建重放回滚单：${orderNo}`;
+    ? `已创建 CI 标准重放单：${orderNo}`
+    : `已创建标准重放单：${orderNo}`;
 }
 
 function replayFailureText(record: ReleaseOrder) {
-  return isCiOnlyRecovery(record) ? "CI 重放回滚创建失败" : "重放回滚创建失败";
+  return isCiOnlyRecovery(record) ? "CI 标准重放创建失败" : "标准重放创建失败";
 }
 
 const selectedExecutableOrders = computed(() =>
@@ -918,11 +1020,11 @@ const canShowBatchExecuteBar = computed(
     dataSource.value.some((item) => String(item.creator_user_id || "").trim() === currentUserID.value),
 );
 
-const canShowBatchDeleteBar = computed(() => authStore.isAdmin);
+const canShowBatchDeleteAction = computed(() => authStore.isAdmin);
 
 const canBatchDelete = computed(
   () =>
-    canShowBatchDeleteBar.value &&
+    canShowBatchDeleteAction.value &&
     selectedOrderIDs.value.length > 0 &&
     !batchDeleting.value,
 );
@@ -962,29 +1064,6 @@ async function loadApplicationOptions() {
   }
 }
 
-async function loadBindingOptions() {
-  if (!filters.application_id) {
-    bindingOptions.value = [];
-    return;
-  }
-  bindingOptionsLoading.value = true;
-  try {
-    const response = await listPipelineBindings(filters.application_id, {
-      page: 1,
-      page_size: 100,
-    });
-    bindingOptions.value = response.data.map((item: PipelineBinding) => ({
-      label: `${item.name || item.id} [${item.binding_type}/${item.provider}]`,
-      value: item.id,
-    }));
-  } catch (error) {
-    bindingOptions.value = [];
-    message.error(extractHTTPErrorMessage(error, "管线绑定下拉加载失败"));
-  } finally {
-    bindingOptionsLoading.value = false;
-  }
-}
-
 async function loadReleaseEnvOptions() {
   envOptionsLoading.value = true;
   try {
@@ -1013,8 +1092,162 @@ function handleEnvQuickFilter(envCode: string) {
   handleSearch();
 }
 
-async function loadReleaseOrders(options?: { silent?: boolean }) {
+async function loadOverviewStats(options?: { force?: boolean; silent?: boolean }) {
+  const nextKey = "global-release-overview";
+  if (!options?.force && overviewQueryKey.value === nextKey) {
+    return;
+  }
+  try {
+    const stats = await getReleaseOrderStats({
+      page: 1,
+      page_size: 1,
+    });
+    overviewStatusStats.value = stats;
+    overviewQueryKey.value = nextKey;
+    renderOverviewChart();
+    await loadSpotlightOrders({ silent: options?.silent });
+  } catch (error) {
+    if (!options?.silent) {
+      message.error(extractHTTPErrorMessage(error, "发布统计加载失败"));
+    }
+  }
+}
+
+async function loadSpotlightOrders(options?: { silent?: boolean }) {
+  try {
+    const response = await listReleaseOrders({
+      application_id: activeQuery.application_id || undefined,
+      keyword: activeQuery.keyword || undefined,
+      triggered_by: activeQuery.triggered_by || undefined,
+      env_code: activeQuery.env_code || undefined,
+      operation_type: activeQuery.operation_type || undefined,
+      status: spotlightOrderQueryStatus.value || undefined,
+      trigger_type: activeQuery.trigger_type || undefined,
+      created_at_from: activeQuery.created_at_from || undefined,
+      created_at_to: activeQuery.created_at_to || undefined,
+      page: 1,
+      page_size: 2,
+    });
+    spotlightOrderItems.value = response.data;
+  } catch (error) {
+    spotlightOrderItems.value = [];
+    if (!options?.silent) {
+      message.error(extractHTTPErrorMessage(error, "关注发布单加载失败"));
+    }
+  }
+}
+
+function renderOverviewChart() {
+  if (!overviewChartRef.value) {
+    return;
+  }
+  if (!overviewChart) {
+    overviewChart = echarts.init(overviewChartRef.value);
+  }
+  const stats = overviewStatusStats.value;
+  const labels = ["待处理", "执行中", "失败", "成功"];
+  const values = [stats.pending, stats.running, stats.failed, stats.success];
+  const colors = ["rgba(148, 163, 184, 0.68)", "#60a5fa", "#f87171", "#34d399"];
+  const borderColors = [
+    "rgba(148, 163, 184, 0.34)",
+    "rgba(96, 165, 250, 0.5)",
+    "rgba(248, 113, 113, 0.5)",
+    "rgba(52, 211, 153, 0.5)",
+  ];
+
+  overviewChart.setOption(
+    {
+      animationDuration: 420,
+      animationEasing: "cubicOut",
+      grid: {
+        top: 16,
+        right: 8,
+        bottom: 0,
+        left: 8,
+        containLabel: true,
+      },
+      tooltip: {
+        trigger: "axis",
+        backgroundColor: "rgba(2, 6, 23, 0.92)",
+        borderColor: "rgba(148, 163, 184, 0.2)",
+        borderWidth: 1,
+        padding: [10, 12],
+        textStyle: {
+          color: "#e2e8f0",
+          fontSize: 12,
+        },
+        axisPointer: {
+          type: "shadow",
+          shadowStyle: {
+            color: "rgba(148, 163, 184, 0.06)",
+          },
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: {
+          color: "rgba(226, 232, 240, 0.56)",
+          fontSize: 12,
+          fontWeight: 600,
+        },
+        axisLine: {
+          lineStyle: {
+            color: "rgba(71, 85, 105, 0.32)",
+          },
+        },
+        axisTick: { show: false },
+      },
+      yAxis: {
+        type: "value",
+        minInterval: 1,
+        splitNumber: Math.min(3, Math.max(1, ...values)),
+        axisLabel: {
+          color: "rgba(226, 232, 240, 0.52)",
+          fontSize: 11,
+        },
+        axisLine: { show: false },
+        axisTick: { show: false },
+        splitLine: {
+          lineStyle: {
+            color: "rgba(71, 85, 105, 0.22)",
+          },
+        },
+      },
+      series: [
+        {
+          type: "bar",
+          barWidth: "34%",
+          data: values.map((val, idx) => ({
+            value: val,
+            itemStyle: {
+              color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: colors[idx] },
+                { offset: 1, color: "rgba(15, 23, 42, 0.02)" },
+              ]),
+              borderColor: borderColors[idx],
+              borderWidth: 1,
+              borderRadius: [6, 6, 0, 0],
+            },
+          })),
+        },
+      ],
+    },
+    true,
+  );
+  overviewChart.resize();
+}
+
+function disposeOverviewChart() {
+  overviewChart?.dispose();
+  overviewChart = null;
+}
+
+async function loadReleaseOrders(options?: { silent?: boolean; force?: boolean }) {
   if (querying.value) {
+    if (options?.force) {
+      pendingReloadOptions.value = { silent: options?.silent };
+    }
     return;
   }
   const silent = Boolean(options?.silent);
@@ -1025,10 +1258,14 @@ async function loadReleaseOrders(options?: { silent?: boolean }) {
   try {
     const response = await listReleaseOrders({
       application_id: activeQuery.application_id || undefined,
-      binding_id: activeQuery.binding_id || undefined,
+      keyword: activeQuery.keyword || undefined,
+      triggered_by: activeQuery.triggered_by || undefined,
       env_code: activeQuery.env_code || undefined,
+      operation_type: activeQuery.operation_type || undefined,
       status: activeQuery.status || undefined,
       trigger_type: activeQuery.trigger_type || undefined,
+      created_at_from: activeQuery.created_at_from || undefined,
+      created_at_to: activeQuery.created_at_to || undefined,
       page: filters.page,
       page_size: filters.pageSize,
     });
@@ -1047,6 +1284,11 @@ async function loadReleaseOrders(options?: { silent?: boolean }) {
     }
   } finally {
     querying.value = false;
+    if (pendingReloadOptions.value) {
+      const next = pendingReloadOptions.value;
+      pendingReloadOptions.value = null;
+      void loadReleaseOrders(next);
+    }
     if (!silent) {
       loading.value = false;
     }
@@ -1061,16 +1303,20 @@ function handleQuickStatusChange(status: ReleaseOrderStatus | "") {
 function clearFilterTag(key: string) {
   if (key === "application_id") {
     filters.application_id = "";
-    filters.binding_id = "";
-    bindingOptions.value = [];
-  } else if (key === "binding_id") {
-    filters.binding_id = "";
+  } else if (key === "keyword") {
+    filters.keyword = "";
+  } else if (key === "triggered_by") {
+    filters.triggered_by = "";
   } else if (key === "env_code") {
     filters.env_code = "";
+  } else if (key === "operation_type") {
+    filters.operation_type = "";
   } else if (key === "status") {
     filters.status = "";
   } else if (key === "trigger_type") {
     filters.trigger_type = "";
+  } else if (key === "created_at_range") {
+    filters.created_at_range = [];
   }
   handleSearch();
 }
@@ -1080,6 +1326,24 @@ function applyRouteQuery() {
   if (applicationID) {
     filters.application_id = applicationID;
   }
+  const status = String(route.query.status || "").trim() as ReleaseOrderStatus | "";
+  if (status) {
+    filters.status = status;
+  }
+  const createdAtFrom = String(route.query.created_at_from || "").trim();
+  const createdAtTo = String(route.query.created_at_to || "").trim();
+  if (createdAtFrom || createdAtTo) {
+    const fromText = createdAtFrom
+      ? dayjs(createdAtFrom).format("YYYY-MM-DD")
+      : dayjs(createdAtTo).format("YYYY-MM-DD");
+    const toText = createdAtTo
+      ? dayjs(createdAtTo).format("YYYY-MM-DD")
+      : dayjs(createdAtFrom).format("YYYY-MM-DD");
+    filters.created_at_range = [
+      fromText,
+      toText,
+    ];
+  }
 }
 
 function toCreate() {
@@ -1087,16 +1351,7 @@ function toCreate() {
   if (filters.application_id) {
     query.application_id = filters.application_id;
   }
-  if (filters.binding_id) {
-    query.binding_id = filters.binding_id;
-  }
   void router.push({ path: "/releases/new", query });
-}
-
-async function handleRefresh() {
-  await loadReleaseEnvOptions();
-  applyActiveQueryFromFilters();
-  await loadReleaseOrders();
 }
 
 function toDetail(id: string) {
@@ -1114,20 +1369,24 @@ function handleEdit(record: ReleaseOrder) {
 function handleSearch() {
   filters.page = 1;
   applyActiveQueryFromFilters();
+  void loadSpotlightOrders();
   void loadReleaseOrders();
 }
 
 function handleReset() {
   filters.application_id = "";
-  filters.binding_id = "";
+  filters.keyword = "";
+  filters.triggered_by = "";
   filters.env_code = "";
+  filters.operation_type = "";
   filters.status = "";
   filters.trigger_type = "";
+  filters.created_at_range = [];
   filters.page = 1;
   filters.pageSize = 10;
-  bindingOptions.value = [];
   advancedSearchExpanded.value = false;
   applyActiveQueryFromFilters();
+  void loadSpotlightOrders();
   void loadReleaseOrders();
 }
 
@@ -1147,10 +1406,8 @@ function handlePageSizeChange(page: number, pageSize: number) {
   void loadReleaseOrders();
 }
 
-async function handleApplicationChange(value: string | undefined) {
+function handleApplicationChange(value: string | undefined) {
   filters.application_id = String(value || "");
-  filters.binding_id = "";
-  await loadBindingOptions();
 }
 
 async function handleCancel(record: ReleaseOrder) {
@@ -1166,6 +1423,20 @@ async function handleCancel(record: ReleaseOrder) {
   }
 }
 
+async function handleConfirmLive(record: ReleaseOrder) {
+  confirmingLiveID.value = record.id;
+  try {
+    await confirmReleaseOrderLive(record.id);
+    message.success("当前版本已确认生效");
+    await loadOverviewStats({ force: true, silent: true });
+    await loadReleaseOrders({ force: true });
+  } catch (error) {
+    message.error(extractHTTPErrorMessage(error, "确认生效失败"));
+  } finally {
+    confirmingLiveID.value = "";
+  }
+}
+
 async function handleDelete(record: ReleaseOrder) {
   if (!authStore.isAdmin) {
     message.warning("仅管理员可删除发布记录");
@@ -1178,6 +1449,7 @@ async function handleDelete(record: ReleaseOrder) {
       (item) => item !== record.id,
     );
     message.success("发布记录已删除");
+    await loadOverviewStats({ force: true, silent: true });
     await loadReleaseOrders();
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, "发布记录删除失败"));
@@ -1212,6 +1484,7 @@ async function handleBatchDelete() {
       const firstReason = failed[0]?.reason ? `：${failed[0].reason}` : "";
       message.warning(`未删除任何发布记录${firstReason}`);
     }
+    await loadOverviewStats({ force: true, silent: true });
     await loadReleaseOrders();
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, "批量删除发布记录失败"));
@@ -1241,9 +1514,9 @@ async function openExecutePreviewModal(
   if (!canDispatch) {
     message.warning(
       action === "build"
-        ? "当前发布单不满足构建条件，无法触发构建"
+        ? "当前发布单不满足仅构建条件，无法触发仅构建"
         : action === "deploy"
-          ? "当前发布单尚未完成构建，无法直接部署"
+          ? "当前发布单尚未完成构建，无法继续发布"
           : "当前发布单已执行完成、已取消或不处于待执行状态，无法再次触发发布",
     );
     return;
@@ -1270,9 +1543,9 @@ async function openExecutePreviewModal(
     if (!nextCanDispatch) {
       message.warning(
         action === "build"
-          ? "当前发布单状态已变化，无法继续触发构建"
+          ? "当前发布单状态已变化，无法继续触发仅构建"
           : action === "deploy"
-            ? "当前发布单状态已变化，无法继续触发部署"
+            ? "当前发布单状态已变化，无法继续触发发布"
             : "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
       );
       closeExecutePreviewModal();
@@ -1304,9 +1577,9 @@ async function confirmExecuteRelease() {
   if (!canDispatch) {
     message.warning(
       action === "build"
-        ? "当前发布单状态已变化，无法继续触发构建"
+        ? "当前发布单状态已变化，无法继续触发仅构建"
         : action === "deploy"
-          ? "当前发布单状态已变化，无法继续触发部署"
+          ? "当前发布单状态已变化，无法继续触发发布"
           : "当前发布单已执行完成、已取消或状态已变化，无法再次触发发布",
     );
     closeExecutePreviewModal();
@@ -1316,24 +1589,25 @@ async function confirmExecuteRelease() {
   try {
     if (action === "build") {
       await buildReleaseOrder(executePreviewOrder.value.id);
-      message.success("构建已提交，正在调度执行");
+      message.success("仅构建已提交，正在调度执行");
     } else if (action === "deploy") {
       await deployReleaseOrder(executePreviewOrder.value.id);
-      message.success("部署已提交，正在调度执行");
+      message.success("发布已提交，正在调度执行");
     } else {
       await executeReleaseOrder(executePreviewOrder.value.id);
       message.success("发布已提交，正在调度执行");
     }
     closeExecutePreviewModal();
+    await loadOverviewStats({ force: true, silent: true });
     await loadReleaseOrders();
   } catch (error) {
     message.error(
       extractHTTPErrorMessage(
         error,
         action === "build"
-          ? "构建执行失败"
+          ? "仅构建执行失败"
           : action === "deploy"
-            ? "部署执行失败"
+            ? "发布执行失败"
             : "发布执行失败",
       ),
     );
@@ -1349,10 +1623,11 @@ async function handleRollback(record: ReleaseOrder) {
   recoveringID.value = record.id;
   try {
     const response = await rollbackReleaseOrderByID(record.id);
-    message.success(`已创建标准回滚单：${response.data.order_no}`);
+    message.success(`已创建一键重发单：${response.data.order_no}`);
+    await loadOverviewStats({ force: true, silent: true });
     void router.push(`/releases/${response.data.id}`);
   } catch (error) {
-    message.error(extractHTTPErrorMessage(error, "标准回滚创建失败"));
+    message.error(extractHTTPErrorMessage(error, "一键重发创建失败"));
   } finally {
     recoveringID.value = "";
   }
@@ -1366,6 +1641,7 @@ async function handleReplay(record: ReleaseOrder) {
   try {
     const response = await replayReleaseOrderByID(record.id);
     message.success(replaySuccessText(record, response.data.order_no));
+    await loadOverviewStats({ force: true, silent: true });
     void router.push(`/releases/${response.data.id}`);
   } catch (error) {
     message.error(extractHTTPErrorMessage(error, replayFailureText(record)));
@@ -1406,6 +1682,7 @@ async function handleBatchExecute(
         `并发执行批次 ${response.data.batch_no} 已创建，成功调度 ${successCount} 张，${response.data.dispatch_errors.length} 张需关注`,
       );
     }
+    await loadOverviewStats({ force: true, silent: true });
     await loadReleaseOrders();
   } catch (error) {
     const acceptedBatch = await detectAcceptedBatchExecute(targetOrderIDs);
@@ -1416,7 +1693,7 @@ async function handleBatchExecute(
       const batchText = acceptedBatch.batchNo
         ? `批次号：${acceptedBatch.batchNo}`
         : `已受理 ${acceptedCount} 张`;
-      message.warning(`并发执行请求已受理，${batchText}，可忽略本次异常提示。`);
+      message.warning(`并发执行请求已受理，${batchText}，可忽略本次异常提示`);
       return;
     }
     message.error(extractHTTPErrorMessage(error, "并发执行发起失败"));
@@ -1520,7 +1797,7 @@ async function loadBatchExecutePreviewItems() {
     const executableResults = results.filter((item) => canExecute(item.order));
     batchExecutePreviewItems.value = executableResults;
     if (executableResults.length < 2) {
-      message.warning("当前可并发执行的发布单不足两张，请重新勾选。");
+      message.warning("当前可并发执行的发布单不足两张，请重新勾选");
       closeBatchExecutePreviewModal();
       await loadReleaseOrders({ silent: true });
       return;
@@ -1608,25 +1885,25 @@ const executePreviewSummaryMessage = computed(() => {
   if (!executePreviewPrecheck.value.executable && executePreviewPrecheck.value.ahead_count > 0) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      `当前应用前面还有 ${executePreviewPrecheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}。`
+      `当前应用前面还有 ${executePreviewPrecheck.value.ahead_count} 单，请等待先前执行单结束后再点击${actionText}`
     );
   }
   if (executePreviewPrecheck.value.waiting_for_lock) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      `当前目标已被其他发布占用，确认${actionText}后会进入等待队列。`
+      `当前目标已被其他发布占用，确认${actionText}后会进入等待队列`
     );
   }
   if (!executePreviewPrecheck.value.executable) {
     return (
       executePreviewPrecheck.value.conflict_message ||
-      `当前发布单未通过${actionText}前预审，请先处理阻塞项。`
+      `当前发布单未通过${actionText}前预审，请先处理阻塞项`
     );
   }
   if (executePreviewPrecheck.value.lock_enabled) {
-    return `并发发布保护已启用，当前按 ${executePreviewPrecheck.value.lock_scope || "application_env"} 范围进行调度控制。`;
+    return `并发发布保护已启用，当前按 ${executePreviewPrecheck.value.lock_scope || "application_env"} 范围进行调度控制`;
   }
-  return `预审已完成，确认后将进入${actionText}调度。`;
+  return `预审已完成，确认后将进入${actionText}调度`;
 });
 
 const executePreviewSummaryTone = computed<"info" | "warning" | "error">(() => {
@@ -1643,60 +1920,73 @@ const executePreviewTitle = computed(() => `${dispatchActionText(executePreviewA
 
 const executePreviewOkText = computed(() => `确认${dispatchActionText(executePreviewAction.value)}`);
 
-function stopAutoRefresh() {
-  if (autoRefreshTimer.value !== null) {
-    window.clearInterval(autoRefreshTimer.value);
-    autoRefreshTimer.value = null;
-  }
-}
-
-function startAutoRefresh() {
-  stopAutoRefresh();
-  autoRefreshTimer.value = window.setInterval(() => {
-    if (
-      document.hidden ||
-      executePreviewVisible.value ||
-      executePreviewLoading.value ||
-      executeSubmitting.value
-    ) {
-      return;
-    }
-    void loadReleaseOrders({ silent: true });
-  }, AUTO_REFRESH_INTERVAL_MS);
-}
-
 onMounted(async () => {
   applyRouteQuery();
-  advancedSearchExpanded.value = hasAdvancedFilter.value;
+  advancedSearchExpanded.value = hasAdvancedFilter.value || hasActiveAdvancedFilter.value;
   await loadReleaseEnvOptions();
   await loadApplicationOptions();
-  await loadBindingOptions();
   applyActiveQueryFromFilters();
+  await loadOverviewStats({ force: true, silent: true });
   await loadReleaseOrders();
-  startAutoRefresh();
+
+  window.addEventListener("resize", handleOverviewChartResize);
 });
 
 onBeforeUnmount(() => {
-  stopAutoRefresh();
+  window.removeEventListener("resize", handleOverviewChartResize);
+  disposeOverviewChart();
 });
+
+function handleOverviewChartResize() {
+  overviewChart?.resize();
+}
 </script>
 
 <template>
   <div class="page-wrapper">
     <div class="page-header-card page-header">
       <div class="page-header-copy">
-        <h2 class="page-title">发布单</h2>
-        <p class="page-subtitle">管理发布任务，追踪执行状态与结果</p>
-      </div>
-      <a-space>
-        <a-button @click="handleRefresh">
-          <template #icon>
-            <ReloadOutlined />
+        <h2 class="page-title">发布</h2>
+        <div v-if="selectedOrderIDs.length > 0" class="page-header-selection">
+          已勾选 <strong>{{ selectedOrderIDs.length }}</strong> 条
+          <template v-if="selectedExecutableOrders.length > 0">
+            ，{{ selectedExecutableOrders.length }} 条可执行
           </template>
-          刷新
-        </a-button>
+        </div>
+      </div>
+      <a-space :size="10">
+        <template v-if="selectedOrderIDs.length > 0">
+          <a-button
+            class="release-toolbar-action-btn release-toolbar-action-btn--ghost"
+            @click="selectedOrderIDs = []"
+          >
+            清空勾选
+          </a-button>
+          <a-popconfirm
+            v-if="canShowBatchDeleteAction"
+            title="确认批量删除当前勾选的发布记录吗？删除后不可恢复"
+            ok-text="确认删除"
+            cancel-text="取消"
+            @confirm="handleBatchDelete"
+          >
+            <template #icon>
+              <ExclamationCircleOutlined class="danger-icon" />
+            </template>
+            <a-button
+              class="release-toolbar-action-btn release-toolbar-action-btn--danger"
+              :disabled="!canBatchDelete"
+              :loading="batchDeleting"
+            >
+              <template #icon>
+                <DeleteOutlined />
+              </template>
+              批量删除
+            </a-button>
+          </a-popconfirm>
+        </template>
         <a-button
           v-if="canShowBatchExecuteBar"
+          class="release-toolbar-action-btn"
           :disabled="!canBatchExecute"
           :loading="batchExecuting"
           @click="openBatchExecutePreviewModal"
@@ -1706,7 +1996,17 @@ onBeforeUnmount(() => {
           </template>
           并发执行
         </a-button>
-        <a-button v-if="canCreateRelease" type="primary" @click="toCreate">
+        <a-button
+          class="release-toolbar-action-btn"
+          :class="{ 'release-toolbar-action-btn--primary': advancedSearchExpanded }"
+          @click="toggleAdvancedSearch"
+        >
+          <template #icon>
+            <SearchOutlined />
+          </template>
+          {{ advancedSearchExpanded ? "收起检索" : "高级检索" }}
+        </a-button>
+        <a-button v-if="canCreateRelease" class="release-toolbar-action-btn release-toolbar-action-btn--primary" @click="toCreate">
           <template #icon>
             <PlusOutlined />
           </template>
@@ -1717,16 +2017,18 @@ onBeforeUnmount(() => {
 
     <a-card class="release-overview-card" :bordered="true">
       <div class="overview-bar">
-        <div class="overview-metrics">
-          <div
-            v-for="item in overviewMetrics"
-            :key="item.key"
-            class="overview-metric"
-            :class="`overview-metric-${item.tone}`"
-          >
-            <div class="overview-metric-label">{{ item.label }}</div>
-            <div class="overview-metric-value">{{ item.value }}</div>
+        <div class="overview-chart-panel">
+          <div class="overview-chart-header">
+            <div>
+              <div class="overview-chart-label">发布统计</div>
+              <div class="overview-chart-title">全部发布单状态分布</div>
+            </div>
+            <div class="overview-chart-meta">
+              共 {{ overviewStatusStats.total }} 条
+            </div>
           </div>
+          <div ref="overviewChartRef" class="overview-chart-canvas"></div>
+          <div class="overview-chart-footnote">统计口径：汇总全部发布单状态数量</div>
         </div>
         <div class="overview-spotlight">
           <div class="overview-spotlight-icon-wrap">
@@ -1750,51 +2052,131 @@ onBeforeUnmount(() => {
               <ClockCircleFilled v-else class="overview-spotlight-icon" />
             </div>
           </div>
-          <div class="overview-spotlight-label">当前关注</div>
-          <div class="overview-spotlight-text">{{ spotlightText }}</div>
-          <div class="overview-spotlight-meta">最近刷新：{{ refreshText }}</div>
+          <div>
+            <div class="overview-spotlight-label">当前关注</div>
+            <div class="overview-spotlight-text">{{ spotlightHeadline }}</div>
+            <div class="overview-spotlight-hint">{{ spotlightHint }}</div>
+            <div v-if="spotlightOrders.length" class="overview-spotlight-orders">
+              <span class="overview-spotlight-orders-label">最新单号</span>
+              <div class="overview-spotlight-order-links">
+                <button
+                  v-for="item in spotlightOrders"
+                  :key="item.id"
+                  type="button"
+                  class="overview-spotlight-order-link"
+                  @click="toDetail(item.id)"
+                >
+                  {{ item.orderNo }}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="overview-spotlight-meta">
+            <span>最近刷新</span>
+            <strong>{{ refreshText }}</strong>
+            <span>自动轮询</span>
+            <strong>5s</strong>
+          </div>
         </div>
       </div>
     </a-card>
 
     <a-card class="filter-card" :bordered="true">
       <div class="filter-entry-row">
-        <div class="quick-status-row">
+        <div class="quick-filter-row">
           <a-button
-            v-for="item in statusOptions"
-            :key="String(item.value)"
-            class="quick-status-button"
-            :type="filters.status === item.value ? 'primary' : 'default'"
-            @click="handleQuickStatusChange(item.value)"
+            class="release-toolbar-action-btn release-toolbar-action-btn--primary release-quick-filter-trigger-btn"
+            :class="{ 'release-quick-filter-trigger-btn--active': statusExpanded || Boolean(filters.status) }"
+            @click="statusExpanded = !statusExpanded"
           >
-            {{ item.label }}
+            <template #icon>
+              <FilterOutlined />
+            </template>
+            状态查询
+            <DownOutlined :class="{ 'trigger-icon-rotate': statusExpanded }" />
           </a-button>
-        </div>
-        <a-button class="advanced-toggle-button" @click="toggleAdvancedSearch">
-          {{ showAdvancedSearch ? "收起检索" : "高级检索" }}
-        </a-button>
-      </div>
+          <transition-group name="filter-expand">
+            <a-button
+              v-for="item in statusOptions"
+              v-show="statusExpanded"
+              :key="String(item.value)"
+              class="release-toolbar-action-btn release-quick-filter-chip-btn"
+              :class="{ 'release-quick-filter-chip-btn--active': filters.status === item.value }"
+              @click="handleQuickStatusChange(item.value)"
+            >
+              {{ item.label }}
+            </a-button>
+          </transition-group>
 
-      <div v-if="envShortcutOptions.length > 0" class="quick-env-row">
-        <span class="quick-env-label">环境快捷筛选</span>
-        <a-space wrap :size="[8, 8]">
-          <a-button
-            v-for="item in envShortcutOptions"
-            :key="item.value"
-            class="quick-env-button"
-            :type="currentEnvFilter === item.value ? 'primary' : 'default'"
-            @click="handleEnvQuickFilter(item.value)"
-          >
-            {{ item.label }}
-          </a-button>
-        </a-space>
+          <div v-if="envShortcutOptions.length > 0" class="quick-filter-divider"></div>
+
+          <template v-if="envShortcutOptions.length > 0">
+            <a-button
+              class="release-toolbar-action-btn release-toolbar-action-btn--primary release-quick-filter-trigger-btn"
+              :class="{ 'release-quick-filter-trigger-btn--active': envExpanded || Boolean(currentEnvFilter) }"
+              @click="envExpanded = !envExpanded"
+            >
+              <template #icon>
+                <EnvironmentOutlined />
+              </template>
+              环境筛选
+              <DownOutlined :class="{ 'trigger-icon-rotate': envExpanded }" />
+            </a-button>
+            <transition-group name="filter-expand">
+              <a-button
+                v-for="item in envShortcutOptions"
+                v-show="envExpanded"
+                :key="item.value"
+                class="release-toolbar-action-btn release-quick-filter-chip-btn"
+                :class="{ 'release-quick-filter-chip-btn--active': currentEnvFilter === item.value }"
+                @click="handleEnvQuickFilter(item.value)"
+              >
+                {{ item.label }}
+              </a-button>
+            </transition-group>
+          </template>
+        </div>
       </div>
 
       <div v-if="showAdvancedSearch" class="filter-advanced-panel">
+        <div class="filter-actions-row">
+          <div class="filter-actions-hint">
+            高级条件需点击"查询"后生效
+            <template v-if="hasPendingAdvancedFilterChanges">
+              · 有未生效的条件
+            </template>
+          </div>
+          <div class="filter-actions-buttons">
+            <a-button
+              class="release-toolbar-action-btn release-toolbar-action-btn--primary"
+              @click="handleSearch"
+            >
+              查询
+            </a-button>
+            <a-button
+              class="release-toolbar-action-btn release-toolbar-action-btn--ghost"
+              @click="handleReset"
+            >
+              重置
+            </a-button>
+          </div>
+        </div>
         <a-form layout="vertical" class="filter-grid">
           <a-form-item
+            label="检索词"
+            class="filter-grid-item filter-grid-item--keyword"
+          >
+            <a-input
+              v-model:value="filters.keyword"
+              class="filter-select"
+              allow-clear
+              placeholder="支持发布单号 / 来源单号 / 应用名"
+              @keydown.enter.prevent="handleSearch"
+            />
+          </a-form-item>
+          <a-form-item
             label="应用"
-            class="filter-grid-item filter-grid-item-wide"
+            class="filter-grid-item filter-grid-item--app"
           >
             <a-select
               v-model:value="filters.application_id"
@@ -1808,19 +2190,13 @@ onBeforeUnmount(() => {
               @change="handleApplicationChange"
             />
           </a-form-item>
-          <a-form-item
-            label="绑定"
-            class="filter-grid-item filter-grid-item-wide"
-          >
+          <a-form-item label="操作类型" class="filter-grid-item">
             <a-select
-              v-model:value="filters.binding_id"
+              v-model:value="filters.operation_type"
               class="filter-select"
               allow-clear
-              show-search
-              option-filter-prop="label"
               placeholder="全部"
-              :loading="bindingOptionsLoading"
-              :options="bindingOptions"
+              :options="operationTypeOptions"
             />
           </a-form-item>
           <a-form-item label="触发方式" class="filter-grid-item">
@@ -1832,21 +2208,28 @@ onBeforeUnmount(() => {
               :options="triggerTypeOptions"
             />
           </a-form-item>
-          <a-form-item class="filter-grid-item filter-grid-actions">
-            <div class="filter-actions-panel">
-              <div class="filter-actions-meta">
-                高级条件会在点击“查询”后统一生效，状态快捷筛选会立即应用。
-              </div>
-              <a-space>
-                <a-button type="primary" @click="handleSearch">查询</a-button>
-                <a-button @click="handleReset">重置</a-button>
-              </a-space>
-            </div>
+          <a-form-item label="创建时间" class="filter-grid-item">
+            <a-range-picker
+              v-model:value="filters.created_at_range"
+              class="filter-select"
+              value-format="YYYY-MM-DD"
+              format="YYYY-MM-DD"
+              allow-clear
+            />
+          </a-form-item>
+          <a-form-item label="发起人" class="filter-grid-item">
+            <a-input
+              v-model:value="filters.triggered_by"
+              class="filter-select"
+              allow-clear
+              placeholder="按发起人模糊匹配"
+              @keydown.enter.prevent="handleSearch"
+            />
           </a-form-item>
         </a-form>
       </div>
 
-      <div v-if="hasFilter || hasAdvancedFilter" class="active-filter-bar">
+      <div v-if="activeFilterTags.length > 0" class="active-filter-bar">
         <span class="active-filter-label">当前筛选</span>
         <a-space wrap :size="[8, 8]">
           <a-tag
@@ -1863,71 +2246,8 @@ onBeforeUnmount(() => {
     </a-card>
 
     <a-card class="table-card" :bordered="true">
-      <div v-if="canShowBatchExecuteBar" class="batch-execute-bar">
-        <div class="batch-execute-copy">
-          <div class="batch-execute-title">并发执行</div>
-          <div class="batch-execute-subtitle">
-            勾选两张及以上待执行发布单后，可发起同批并发执行。
-            <template v-if="selectedExecutableOrders.length > 0">
-              当前已选择 {{ selectedExecutableOrders.length }} 张待执行单。
-            </template>
-          </div>
-        </div>
-        <a-space>
-          <a-button
-            v-if="selectedOrderIDs.length > 0"
-            @click="selectedOrderIDs = []"
-          >
-            清空勾选
-          </a-button>
-          <a-button
-            type="primary"
-            :disabled="!canBatchExecute"
-            :loading="batchExecuting"
-            @click="openBatchExecutePreviewModal"
-          >
-            <template #icon>
-              <SyncOutlined />
-            </template>
-            并发执行
-          </a-button>
-        </a-space>
-      </div>
-      <div v-if="canShowBatchDeleteBar" class="batch-delete-bar">
-        <div class="batch-delete-copy">
-          <div class="batch-delete-title">管理员删除</div>
-          <div class="batch-delete-subtitle">
-            支持删除单条或批量删除发布记录。当前已勾选
-            {{ selectedOrderIDs.length }} 条记录。
-          </div>
-        </div>
-        <a-space>
-          <a-button
-            v-if="selectedOrderIDs.length > 0"
-            @click="selectedOrderIDs = []"
-          >
-            清空勾选
-          </a-button>
-          <a-popconfirm
-            title="确认批量删除当前勾选的发布记录吗？删除后不可恢复。"
-            ok-text="确认删除"
-            cancel-text="取消"
-            @confirm="handleBatchDelete"
-          >
-            <template #icon>
-              <ExclamationCircleOutlined class="danger-icon" />
-            </template>
-            <a-button
-              danger
-              :disabled="!canBatchDelete"
-              :loading="batchDeleting"
-            >
-              批量删除
-            </a-button>
-          </a-popconfirm>
-        </a-space>
-      </div>
       <a-table
+        class="release-order-table"
         row-key="id"
         :row-selection="tableRowSelection"
         :columns="columns"
@@ -1984,6 +2304,18 @@ onBeforeUnmount(() => {
             <a-space :size="6" wrap>
               <span>{{ record.order_no }}</span>
               <a-tag
+                v-if="record.live_state_status === 'pending_confirm' && record.live_state_can_confirm"
+                class="dashboard-chip dashboard-chip-warning"
+              >
+                待确认生效
+              </a-tag>
+              <a-tag
+                v-else-if="record.live_state_is_current"
+                class="dashboard-chip dashboard-chip-running"
+              >
+                当前生效
+              </a-tag>
+              <a-tag
                 v-if="record.is_concurrent"
                 class="dashboard-chip dashboard-chip-running"
                 >并发执行</a-tag
@@ -2038,7 +2370,7 @@ onBeforeUnmount(() => {
                 :loading="executingID === record.id && executePreviewAction === 'build'"
                 @click="openExecutePreviewModal(record, 'build')"
               >
-                构建
+                仅构建
               </a-button>
               <a-button
                 v-else-if="canDeploy(record)"
@@ -2048,9 +2380,10 @@ onBeforeUnmount(() => {
                 :loading="executingID === record.id && executePreviewAction === 'deploy'"
                 @click="openExecutePreviewModal(record, 'deploy')"
               >
-                部署
+                发布
               </a-button>
               <a-button
+                v-else-if="canExecute(record)"
                 type="link"
                 size="small"
                 :disabled="!canExecute(record)"
@@ -2059,10 +2392,20 @@ onBeforeUnmount(() => {
               >
                 发布
               </a-button>
+              <a-button
+                v-if="canConfirmLive(record)"
+                type="link"
+                size="small"
+                :loading="confirmingLiveID === record.id"
+                @click="handleConfirmLive(record)"
+              >
+                确认生效
+              </a-button>
               <a-popconfirm
-                v-if="canRollback(record)"
-                title="确认基于这张成功单创建标准回滚吗？"
-                ok-text="确认回滚"
+                v-if="canTriggerArgoReplay(record)"
+                :disabled="!canRollback(record)"
+                title="确认基于当前发布单创建一键重发单吗？"
+                ok-text="确认重发"
                 cancel-text="取消"
                 @confirm="handleRollback(record)"
               >
@@ -2073,14 +2416,16 @@ onBeforeUnmount(() => {
                   type="link"
                   size="small"
                   class="rollback-trigger-link"
+                  :disabled="!canRollback(record)"
                   :loading="recoveringID === record.id"
-                  >回滚到此版本</a-button
+                  >一键重发</a-button
                 >
               </a-popconfirm>
               <a-popconfirm
-                v-else-if="canReplay(record)"
+                v-else-if="canTriggerStandardReplay(record)"
+                :disabled="!canReplay(record)"
                 :title="replayConfirmTitle(record)"
-                :ok-text="isCiOnlyRecovery(record) ? '确认恢复' : '确认重放'"
+                :ok-text="isCiOnlyRecovery(record) ? '确认重发' : '确认重放'"
                 cancel-text="取消"
                 @confirm="handleReplay(record)"
               >
@@ -2091,6 +2436,7 @@ onBeforeUnmount(() => {
                   type="link"
                   size="small"
                   class="rollback-trigger-link"
+                  :disabled="!canReplay(record)"
                   :loading="recoveringID === record.id"
                   >{{ replayActionText(record) }}</a-button
                 >
@@ -2116,7 +2462,7 @@ onBeforeUnmount(() => {
               <a-button v-else type="link" size="small" disabled>取消</a-button>
               <a-popconfirm
                 v-if="authStore.isAdmin"
-                title="确认删除该发布记录吗？删除后不可恢复。"
+                title="确认删除该发布记录吗？删除后不可恢复"
                 ok-text="确认删除"
                 cancel-text="取消"
                 @confirm="handleDelete(record)"
@@ -2154,7 +2500,6 @@ onBeforeUnmount(() => {
 
     <a-modal
       :open="batchExecutePreviewVisible"
-      title="并发执行预审"
       :width="920"
       ok-text="确认并发执行"
       cancel-text="取消"
@@ -2166,6 +2511,27 @@ onBeforeUnmount(() => {
       @ok="confirmBatchExecute"
       @cancel="closeBatchExecutePreviewModal"
     >
+      <template #title>
+        并发执行预审
+        <a-popover
+          trigger="click"
+          placement="rightTop"
+          overlay-class-name="release-tip-popover"
+        >
+          <template #content>
+            <div class="release-tip-content">
+              系统会先校验每张发布单的执行条件；同一批次中命中同应用同环境的发布单，会在通过预检后进入等待队列，按顺序逐步执行
+            </div>
+          </template>
+          <button
+            class="release-tip-trigger release-tip-trigger-info"
+            type="button"
+            aria-label="查看并发执行预审说明"
+          >
+            <ExclamationCircleOutlined />
+          </button>
+        </a-popover>
+      </template>
       <a-skeleton
         v-if="batchExecutePreviewLoading"
         active
@@ -2199,19 +2565,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <a-alert
-          class="batch-preview-alert"
-          type="info"
-          show-icon
-          message="并发执行预审"
-          :description="`系统会先校验每张发布单的执行条件；同一批次中命中同应用同环境的发布单，会在通过预检后进入等待队列，按顺序逐步执行。当前执行方式：${batchDispatchModeLabel}。`"
-        />
-
         <div v-if="batchPreviewHasStagedOrders" class="batch-dispatch-mode-panel">
           <div class="batch-dispatch-mode-title">可分段单执行方式</div>
           <div class="batch-dispatch-mode-desc">
             当前勾选中可分段发布单 {{ batchPreviewStagedCount }} 张，纯 CI 发布单
-            {{ batchPreviewCIOnlyCount }} 张。纯 CI 发布单会默认走正常发布执行。
+            {{ batchPreviewCIOnlyCount }} 张纯 CI 发布单会默认走正常发布执行
           </div>
           <a-radio-group
             :value="batchExecuteStagedDispatchMode"
@@ -2465,7 +2823,7 @@ onBeforeUnmount(() => {
         <div class="execute-preview-section">
           <div class="preview-param-header">发布参数</div>
           <div class="execute-preview-param-meta">
-            当前展示的是本次发布确认时会带入执行链路的参数快照。
+            当前展示的是本次发布确认时会带入执行链路的参数快照
           </div>
         </div>
         <a-empty
@@ -2518,6 +2876,13 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.page-header-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
 .page-header {
   display: flex;
   align-items: center;
@@ -2525,10 +2890,163 @@ onBeforeUnmount(() => {
   gap: 20px;
 }
 
+.release-toolbar-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 42px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.34) !important;
+  background: rgba(255, 255, 255, 0.42) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.68),
+    0 10px 22px rgba(15, 23, 42, 0.05) !important;
+  backdrop-filter: blur(14px) saturate(135%);
+  padding-inline: 14px;
+  font-weight: 600;
+}
+
+.release-toolbar-action-btn:hover,
+.release-toolbar-action-btn:focus,
+.release-toolbar-action-btn:focus-visible,
+.release-toolbar-action-btn:active {
+  border-color: rgba(96, 165, 250, 0.34) !important;
+  background: rgba(255, 255, 255, 0.56) !important;
+  color: #0f172a !important;
+}
+
+.release-toolbar-action-btn--primary {
+  background: linear-gradient(180deg, rgba(241, 247, 255, 0.9), rgba(223, 235, 255, 0.8)) !important;
+  border-color: rgba(147, 197, 253, 0.74) !important;
+  color: #1d4ed8 !important;
+}
+
+.release-toolbar-action-btn--primary:hover,
+.release-toolbar-action-btn--primary:focus,
+.release-toolbar-action-btn--primary:focus-visible,
+.release-toolbar-action-btn--primary:active {
+  background: linear-gradient(180deg, rgba(248, 251, 255, 0.96), rgba(231, 241, 255, 0.88)) !important;
+  border-color: rgba(96, 165, 250, 0.66) !important;
+  color: #1e3a8a !important;
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 12px 26px rgba(59, 130, 246, 0.12) !important;
+}
+
+.release-quick-filter-chip-btn {
+  min-width: 108px;
+  border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  background: rgba(255, 255, 255, 0.62) !important;
+  color: #0f172a !important;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 12px 24px rgba(15, 23, 42, 0.04) !important;
+}
+
+.release-quick-filter-chip-btn:hover,
+.release-quick-filter-chip-btn:focus,
+.release-quick-filter-chip-btn:focus-visible,
+.release-quick-filter-chip-btn:active {
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  background: rgba(239, 246, 255, 0.78) !important;
+  color: #0f172a !important;
+}
+
+.release-quick-filter-trigger-btn {
+  min-width: 126px;
+  padding-inline: 16px;
+}
+
+.release-quick-filter-chip-btn {
+  padding-inline: 14px;
+}
+
+.release-quick-filter-trigger-btn--active {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 12px 26px rgba(59, 130, 246, 0.12) !important;
+}
+
+.release-quick-filter-chip-btn--active {
+  border-color: rgba(59, 130, 246, 0.32) !important;
+  background: rgba(239, 246, 255, 0.78) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 14px 28px rgba(59, 130, 246, 0.08) !important;
+}
+
+.release-toolbar-action-btn--ghost {
+  background: transparent !important;
+  border-color: rgba(30, 41, 59, 0.16) !important;
+  color: var(--color-text-secondary) !important;
+  box-shadow: none !important;
+}
+
+.release-toolbar-action-btn--ghost:hover,
+.release-toolbar-action-btn--ghost:focus,
+.release-toolbar-action-btn--ghost:focus-visible,
+.release-toolbar-action-btn--ghost:active {
+  background: rgba(241, 245, 249, 0.8) !important;
+  border-color: rgba(30, 41, 59, 0.24) !important;
+  color: var(--color-text-main) !important;
+}
+
+.release-toolbar-action-btn--danger {
+  background: rgba(254, 242, 242, 0.8) !important;
+  border-color: rgba(239, 68, 68, 0.2) !important;
+  color: #dc2626 !important;
+  box-shadow: none !important;
+}
+
+.release-toolbar-action-btn--danger:hover,
+.release-toolbar-action-btn--danger:focus,
+.release-toolbar-action-btn--danger:focus-visible,
+.release-toolbar-action-btn--danger:active {
+  background: rgba(254, 226, 226, 0.9) !important;
+  border-color: rgba(239, 68, 68, 0.36) !important;
+  color: #b91c1c !important;
+}
+
+.release-toolbar-action-btn--danger:disabled,
+.release-toolbar-action-btn--danger[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.page-header-selection {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}
+
+.page-header-selection strong {
+  color: var(--color-text-main);
+  font-weight: 600;
+}
+
 .release-overview-card,
 .filter-card,
 .table-card {
   border-radius: var(--radius-xl);
+}
+
+.release-overview-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.release-overview-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
 }
 
 .filter-card {
@@ -2542,56 +3060,106 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.overview-bar {
-  display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(280px, 0.9fr);
-  gap: 16px;
+.table-card {
+  background: transparent;
+  border: none;
+  box-shadow: none;
 }
 
-.overview-metrics {
+.table-card :deep(.ant-card-body) {
+  padding: 0;
+  background: transparent;
+}
+
+.overview-bar {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.15fr) minmax(240px, 0.85fr);
   gap: 14px;
 }
 
-.overview-metric {
-  padding: 16px 18px;
-  border-radius: 16px;
-  background: var(--color-bg-subtle);
-  border: 1px solid var(--color-border-muted);
+.overview-chart-panel {
+  position: relative;
+  min-height: 236px;
+  border-radius: 20px;
+  padding: 18px;
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  background:
+    radial-gradient(circle at top right, rgba(52, 211, 153, 0.14), transparent 24%),
+    radial-gradient(circle at top left, rgba(96, 165, 250, 0.16), transparent 30%),
+    linear-gradient(180deg, rgba(2, 6, 23, 0.98), rgba(15, 23, 42, 0.96) 48%, rgba(19, 30, 53, 0.96));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 22px 48px rgba(2, 6, 23, 0.16);
+  overflow: hidden;
 }
 
-.overview-metric-label {
-  color: var(--color-text-secondary);
-  font-size: 13px;
+.overview-chart-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0), rgba(56, 189, 248, 0.46), rgba(52, 211, 153, 0.32), rgba(56, 189, 248, 0));
+  pointer-events: none;
 }
 
-.overview-metric-value {
-  margin-top: 8px;
-  color: var(--color-text-main);
-  font-size: 24px;
+.overview-chart-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.overview-chart-label {
+  color: rgba(125, 211, 252, 0.92);
+  font-size: 12px;
   font-weight: 700;
-  line-height: 1;
+  letter-spacing: 0.08em;
 }
 
-.overview-metric-processing {
-  background: var(--color-primary-50);
+.overview-chart-title {
+  margin-top: 6px;
+  color: #f8fafc;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
-.overview-metric-danger {
-  background: var(--color-danger-bg);
+.overview-chart-meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.34);
+  background: rgba(15, 23, 42, 0.44);
+  color: rgba(226, 232, 240, 0.7);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
-.overview-metric-success {
-  background: var(--color-success-bg);
+.overview-chart-canvas {
+  height: 142px;
+  width: 100%;
+}
+
+.overview-chart-footnote {
+  margin-top: 6px;
+  color: rgba(226, 232, 240, 0.54);
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .overview-spotlight {
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  padding: 18px 20px;
-  border-radius: 22px;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 236px;
+  padding: 18px;
+  border-radius: 20px;
   border: 1px solid var(--color-dashboard-border);
   background:
     radial-gradient(
@@ -2611,14 +3179,14 @@ onBeforeUnmount(() => {
 
 .overview-spotlight-icon-wrap {
   position: absolute;
-  top: 18px;
-  right: 18px;
+  top: 16px;
+  right: 16px;
 }
 
 .overview-spotlight-icon-orb {
-  width: 48px;
-  height: 48px;
-  border-radius: 16px;
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2631,7 +3199,7 @@ onBeforeUnmount(() => {
 }
 
 .overview-spotlight-icon {
-  font-size: 20px;
+  font-size: 28px;
   color: #eff6ff;
 }
 
@@ -2652,6 +3220,7 @@ onBeforeUnmount(() => {
 }
 
 .overview-spotlight-label {
+  padding-right: 92px;
   font-size: 12px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2659,28 +3228,130 @@ onBeforeUnmount(() => {
 }
 
 .overview-spotlight-text {
-  margin-top: 10px;
-  font-size: 15px;
-  line-height: 1.8;
-  font-weight: 600;
+  margin-top: 14px;
+  padding-right: 92px;
+  font-size: 24px;
+  line-height: 1.2;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.overview-spotlight-hint {
+  margin-top: 8px;
+  padding-right: 88px;
+  color: var(--color-dashboard-text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.overview-spotlight-orders {
+  margin-top: 12px;
+  padding-right: 18px;
+}
+
+.overview-spotlight-orders-label {
+  display: block;
+  margin-bottom: 8px;
+  color: rgba(226, 232, 240, 0.58);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.overview-spotlight-order-links {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.overview-spotlight-order-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  max-width: 100%;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.overview-spotlight-order-link:hover,
+.overview-spotlight-order-link:focus-visible {
+  border-color: rgba(191, 219, 254, 0.46);
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+  transform: translateY(-1px);
 }
 
 .overview-spotlight-meta {
-  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
   font-size: 12px;
   color: var(--color-dashboard-text-soft);
 }
 
-.quick-status-row {
+.overview-spotlight-meta span {
+  color: rgba(226, 232, 240, 0.58);
+}
+
+.overview-spotlight-meta strong {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.quick-filter-row {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   flex: 1;
   min-width: 0;
+  align-items: center;
+}
+
+.quick-filter-divider {
+  width: 1px;
+  height: 24px;
+  background: rgba(148, 163, 184, 0.24);
+  flex-shrink: 0;
 }
 
 .quick-status-button {
   border-radius: 999px;
+}
+
+.trigger-icon-rotate {
+  transform: rotate(180deg);
+  transition: transform 0.2s ease;
+}
+
+.filter-expand-enter-active {
+  transition: opacity 0.18s ease;
+}
+
+.filter-expand-leave-active {
+  transition: opacity 0.12s ease;
+}
+
+.filter-expand-enter-from,
+.filter-expand-leave-to {
+  opacity: 0;
 }
 
 .filter-entry-row {
@@ -2696,26 +3367,6 @@ onBeforeUnmount(() => {
   gap: 8px;
   border-radius: 999px;
   flex: 0 0 auto;
-}
-
-.quick-env-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(148, 163, 184, 0.16);
-  flex-wrap: wrap;
-}
-
-.quick-env-label {
-  font-size: 13px;
-  color: var(--color-text-soft);
-  white-space: nowrap;
-}
-
-.quick-env-button {
-  border-radius: 999px;
 }
 
 .persistent-env-filter-row {
@@ -2755,17 +3406,30 @@ onBeforeUnmount(() => {
   margin-top: 18px;
   padding: 18px;
   border-radius: 18px;
-  border: 1px solid var(--color-border-soft);
-  background: var(--color-bg-card);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: transparent;
+  box-shadow: none;
+}
+
+.filter-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.filter-actions-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .filter-grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1.4fr) minmax(220px, 1.4fr) minmax(
-      150px,
-      0.9fr
-    ) minmax(150px, 0.9fr) minmax(240px, 1.1fr);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 14px 16px;
 }
 
@@ -2782,8 +3446,12 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
-.filter-grid-item-wide {
-  min-width: 0;
+.filter-grid-item--keyword {
+  grid-column: span 3;
+}
+
+.filter-grid-item--app {
+  grid-column: span 3;
 }
 
 .application-select,
@@ -2791,34 +3459,10 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-.filter-grid-actions {
+.filter-actions-buttons {
   display: flex;
-  align-items: flex-end;
-}
-
-.filter-actions-panel {
-  width: 100%;
-  min-height: 76px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  background: linear-gradient(
-    180deg,
-    var(--color-bg-subtle) 0%,
-    var(--color-bg-card) 100%
-  );
-  border: 1px solid var(--color-border-muted);
-}
-
-.filter-actions-meta {
-  color: var(--color-text-muted);
-  font-size: 12px;
-  text-align: right;
-  line-height: 1.6;
 }
 
 .active-filter-bar {
@@ -3000,65 +3644,6 @@ onBeforeUnmount(() => {
 .rollback-trigger-link:hover,
 .rollback-trigger-link:focus {
   color: #020617;
-}
-
-.batch-execute-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  border: 1px solid var(--color-border-muted);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, #f8fbff 100%);
-}
-
-.batch-execute-copy {
-  min-width: 0;
-}
-
-.batch-execute-title {
-  color: var(--color-text-main);
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.batch-execute-subtitle {
-  margin-top: 4px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
-  line-height: 1.7;
-}
-
-.batch-delete-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border-radius: 16px;
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  background: linear-gradient(180deg, #fff7f7 0%, #fff1f2 100%);
-}
-
-.batch-delete-copy {
-  min-width: 0;
-}
-
-.batch-delete-title {
-  color: #991b1b;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.batch-delete-subtitle {
-  margin-top: 4px;
-  color: #7f1d1d;
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 .batch-preview-overview {
@@ -3297,16 +3882,17 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
-  .overview-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .overview-chart-panel {
+    min-height: 236px;
   }
 
   .filter-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .filter-grid-actions {
-    grid-column: 1 / -1;
+  .filter-grid-item--keyword,
+  .filter-grid-item--app {
+    grid-column: span 1;
   }
 }
 
@@ -3339,18 +3925,26 @@ onBeforeUnmount(() => {
     align-items: flex-start;
   }
 
-  .overview-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .overview-chart-panel {
+    min-height: 210px;
+    padding: 16px;
   }
 
-  .batch-execute-bar {
-    flex-direction: column;
-    align-items: flex-start;
+  .overview-chart-title {
+    font-size: 18px;
   }
 
-  .batch-delete-bar {
-    flex-direction: column;
-    align-items: flex-start;
+  .overview-chart-canvas {
+    height: 132px;
+  }
+
+  .overview-spotlight {
+    min-height: 198px;
+    padding: 16px;
+  }
+
+  .overview-spotlight-text {
+    font-size: 22px;
   }
 
   .batch-preview-overview,
@@ -3361,10 +3955,6 @@ onBeforeUnmount(() => {
   .filter-entry-row {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .quick-env-row {
-    align-items: flex-start;
   }
 
   .persistent-env-filter-row {
@@ -3384,6 +3974,17 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 
+  .filter-grid-item--keyword,
+  .filter-grid-item--app {
+    grid-column: span 1;
+  }
+
+  .filter-actions-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
   .batch-preview-card-head,
   .batch-preview-precheck-item {
     flex-direction: column;
@@ -3393,14 +3994,6 @@ onBeforeUnmount(() => {
   .batch-preview-overview,
   .batch-preview-detail-grid {
     grid-template-columns: 1fr;
-  }
-
-  .filter-actions-panel {
-    align-items: flex-start;
-  }
-
-  .filter-actions-meta {
-    text-align: left;
   }
 }
 </style>

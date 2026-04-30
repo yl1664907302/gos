@@ -175,6 +175,8 @@ func TestSyncFailedOrderClosesRunningCDAndKeepsHooksPending(t *testing.T) {
 	manager.now = func() time.Time { return now }
 
 	order := testReleaseOrder("ro-failed-dirty", "RO-FAILED-DIRTY", domain.OrderStatusFailed, now)
+	order.TemplateID = ""
+	order.TemplateName = ""
 	order.StartedAt = &startedAt
 	order.FinishedAt = &now
 	executions := []domain.ReleaseOrderExecution{
@@ -256,6 +258,157 @@ func TestSyncFailedOrderClosesRunningCDAndKeepsHooksPending(t *testing.T) {
 	hookStep := findStepByCode(storedSteps, "hook:post_release:notification_hook:1")
 	if hookStep == nil || hookStep.Status != domain.StepStatusPending {
 		t.Fatalf("hook step = %#v, want pending", hookStep)
+	}
+}
+
+func TestSyncFailedOrderExecutesPostReleaseFailureHooks(t *testing.T) {
+	t.Parallel()
+
+	webhookCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webhookCalls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	manager, repo := newReleaseOrderManagerForCancelTest(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	startedAt := now.Add(-2 * time.Minute)
+	manager.now = func() time.Time { return now }
+
+	template := domain.ReleaseTemplate{
+		ID:              "rt-failed-hook",
+		Name:            "Failed Hook Template",
+		ApplicationID:   "app-1",
+		ApplicationName: "App 1",
+		BindingID:       "app-1",
+		BindingName:     "App 1",
+		BindingType:     "application",
+		Status:          domain.TemplateStatusActive,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	hooks := []domain.ReleaseTemplateHook{
+		{
+			ID:               "hook-post-release-failed",
+			TemplateID:       template.ID,
+			HookType:         domain.TemplateHookTypeWebhookNotification,
+			Name:             "失败后通知",
+			ExecuteStage:     domain.TemplateHookExecuteStagePostRelease,
+			TriggerCondition: domain.TemplateHookTriggerOnFailed,
+			FailurePolicy:    domain.TemplateHookFailurePolicyBlockRelease,
+			WebhookMethod:    http.MethodPost,
+			WebhookURL:       server.URL,
+			WebhookBody:      `{"order_no":"{order_no}","status":"{release_status}"}`,
+			SortNo:           1,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		},
+	}
+	if err := repo.CreateTemplate(ctx, template, nil, nil, nil, hooks); err != nil {
+		t.Fatalf("CreateTemplate failed: %v", err)
+	}
+
+	order := testReleaseOrder("ro-failed-hook", "RO-FAILED-HOOK", domain.OrderStatusFailed, now)
+	order.TemplateID = template.ID
+	order.TemplateName = template.Name
+	order.StartedAt = &startedAt
+	order.FinishedAt = &now
+	executions := []domain.ReleaseOrderExecution{
+		testReleaseExecution(order.ID, "exec-ci", domain.PipelineScopeCI, domain.ExecutionStatusSuccess, now),
+		{
+			ID:             "exec-cd",
+			ReleaseOrderID: order.ID,
+			PipelineScope:  domain.PipelineScopeCD,
+			BindingID:      "binding-cd",
+			BindingName:    "Binding cd",
+			Provider:       "argocd",
+			PipelineID:     "pipeline-cd",
+			Status:         domain.ExecutionStatusRunning,
+			ExternalRunID:  "commit-1",
+			StartedAt:      &startedAt,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		},
+	}
+	steps := []domain.ReleaseOrderStep{
+		testReleaseStep(order.ID, "step-git-push", domain.StepScopeCD, "cd:git_push", domain.StepStatusFailed, 10, now),
+		{
+			ID:             "step-health",
+			ReleaseOrderID: order.ID,
+			StepScope:      domain.StepScopeCD,
+			StepCode:       "cd:health_check",
+			StepName:       "cd:health_check",
+			Status:         domain.StepStatusRunning,
+			SortNo:         11,
+			CreatedAt:      now,
+			StartedAt:      &startedAt,
+		},
+		{
+			ID:             "step-hook",
+			ReleaseOrderID: order.ID,
+			StepScope:      domain.StepScopeGlobal,
+			StepCode:       "hook:post_release:webhook_notification:1",
+			StepName:       "失败后通知",
+			Status:         domain.StepStatusPending,
+			SortNo:         12,
+			CreatedAt:      now,
+		},
+		testReleaseStep(order.ID, "step-finish", domain.StepScopeGlobal, "global:release_finish", domain.StepStatusFailed, 99, now),
+	}
+	if err := repo.Create(ctx, order, executions, nil, steps); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	tracker := NewTrackReleaseExecution(manager, nil)
+	tracker.now = func() time.Time { return now }
+
+	updated, skipped, err := tracker.syncOrder(ctx, order)
+	if err != nil {
+		t.Fatalf("first syncOrder failed: %v", err)
+	}
+	if skipped {
+		t.Fatal("first skipped = true, want false")
+	}
+	if !updated {
+		t.Fatal("first updated = false, want true")
+	}
+
+	stored, err := repo.GetByID(ctx, order.ID)
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if stored.Status != domain.OrderStatusRunning {
+		t.Fatalf("stored status after first sync = %s, want %s", stored.Status, domain.OrderStatusRunning)
+	}
+	storedSteps, err := repo.ListSteps(ctx, order.ID)
+	if err != nil {
+		t.Fatalf("ListSteps failed: %v", err)
+	}
+	hookStep := findStepByCode(storedSteps, "hook:post_release:webhook_notification:1")
+	if hookStep == nil || hookStep.Status != domain.StepStatusSuccess {
+		t.Fatalf("hook step after first sync = %#v, want success", hookStep)
+	}
+	if webhookCalls != 1 {
+		t.Fatalf("webhookCalls after first sync = %d, want 1", webhookCalls)
+	}
+
+	updated, skipped, err = tracker.syncOrder(ctx, stored)
+	if err != nil {
+		t.Fatalf("second syncOrder failed: %v", err)
+	}
+	if skipped {
+		t.Fatal("second skipped = true, want false")
+	}
+
+	stored, err = repo.GetByID(ctx, order.ID)
+	if err != nil {
+		t.Fatalf("GetByID failed: %v", err)
+	}
+	if stored.Status != domain.OrderStatusFailed {
+		t.Fatalf("stored status after second sync = %s, want %s", stored.Status, domain.OrderStatusFailed)
 	}
 }
 
